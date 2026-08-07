@@ -34,6 +34,23 @@ network:
   # workstation should work without a discovery server.
   fastdds_profile: /root/fastdds_unicast.xml
   fastdds_disables: shared_memory_transport
+  fastdds_profile_note: >-
+    MEASURED 2026-08-08: that path is owned by root and is NOT readable by
+    user `jetson`, who runs the host-side nodes. The previous team's host-side
+    fix has therefore never actually been in effect for host nodes — FastDDS
+    silently falls back to defaults when the profile file cannot be read.
+    Only the in-container copy (also /root, but the container runs as root)
+    was ever live.
+
+  # Multicast discovery does NOT work on the lab WiFi. See
+  # config/fastdds_unicast_peers.xml for the measurement and the fix.
+  discovery: unicast_initial_peers
+  discovery_profile: config/fastdds_unicast_peers.xml
+  multicast_status: >-
+    225.0.0.1 (the group `ros2 multicast send/receive` uses) crosses fine;
+    239.255.0.1 (the group FastDDS uses for SPDP discovery) is dropped by the
+    access point. Verified with raw sockets in both directions. A passing
+    `ros2 multicast receive` is therefore NOT evidence that DDS will work.
 
 control:
   # TODO(phase1): must be at or below the slowest sensor feeding the
@@ -108,18 +125,22 @@ observation:
       empty_bin_policy: fault   # never range_max — that would be fail-open
 
     - name: base_velocity
-      # TODO(phase1): the Yahboom X3 stack publishes /vel_raw as a bare
-      # geometry_msgs/Twist (that is what the previous team subscribed to —
-      # they never used /odom). Whether an /odom exists at all on this
-      # bringup is UNVERIFIED; their documented `ros2 topic list` sanity
-      # check does not show one. Confirm before freezing.
-      source_topic: null
-      source_topic_candidates:
-        - {topic: /vel_raw, type: geometry_msgs/Twist, subfield: null,
-           note: "used by the previous team's engine; known to exist"}
-        - {topic: /odom, type: nav_msgs/Odometry, subfield: twist.twist,
-           note: "preferred if present — carries a header/timestamp, which
-                  /vel_raw does not, and staleness detection needs one"}
+      # RESOLVED 2026-08-08: /odom DOES exist. yahboomcar_bringup_X3_launch.py
+      # includes a robot_localization EKF (ekf_x1_x3_launch.py) which fuses
+      # wheel encoders with the IMU and publishes /odom plus the odom->base_link
+      # TF. The previous team simply never used it.
+      #
+      # /odom is chosen over /vel_raw because nav_msgs/Odometry carries a
+      # header/timestamp and a bare geometry_msgs/Twist does not. Fail-closed
+      # staleness detection needs a source timestamp — arrival time at the
+      # subscriber cannot tell a stalled driver from a stalled network.
+      source_topic: /odom
+      source_topic_type: nav_msgs/Odometry
+      subfield: twist.twist
+      source_note: >-
+        EKF-fused, not raw encoder output. /odom_raw and /vel_raw carry the
+        unfused encoder velocity if that turns out to be preferable — but
+        /vel_raw has no timestamp. TODO(phase1): confirm measured rate.
       shape: [3]             # vx, vy, wz — mecanum, lateral DOF is real
       units: [m/s, m/s, rad/s]
       preprocessing: none    # raw physical units, see normalization note below
@@ -129,10 +150,15 @@ observation:
         distinguish a stalled driver from a stalled network. Prefer /odom.
 
     - name: imu_angular_velocity
-      # The X3 publishes THREE imu topics: /imu/data_raw, /imu/data, /imu/mag.
-      # The previous team used /imu/data_raw. TODO(phase1): confirm whether
-      # /imu/data is filter-fused (and at what rate) before choosing — raw vs
-      # fused is a real difference the policy would learn around.
+      # RESOLVED 2026-08-08: /imu/data is produced by imu_filter_madgwick,
+      # launched as part of yahboomcar_bringup_X3_launch.py, from /imu/data_raw.
+      # So /imu/data IS fused and /imu/data_raw is the unfiltered sensor.
+      #
+      # We stay on /imu/data_raw (also the previous team's choice): the
+      # observation wants raw angular velocity and linear acceleration, and
+      # Madgwick's value is in the orientation quaternion, which we do not use.
+      # Feeding filtered inertial channels would add lag we cannot characterise.
+      # TODO(phase1): confirm measured rates for both.
       source_topic: /imu/data_raw
       source_topic_alternatives: [/imu/data]
       subfield: angular_velocity

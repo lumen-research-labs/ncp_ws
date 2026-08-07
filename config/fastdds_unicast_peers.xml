@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  FastDDS unicast peer discovery — workstation <-> bernard-2.
+
+  WHY THIS EXISTS
+  Measured 2026-08-08 on the lab WiFi: multicast to 225.0.0.1 (the group
+  `ros2 multicast send/receive` uses) crosses between the workstation and the
+  robot fine, but multicast to 239.255.0.1 — the group FastDDS actually uses
+  for SPDP discovery — is silently dropped by the access point. Every other
+  check passes: same subnet, no firewall, unicast works both ways (ssh), both
+  ends are rmw_fastrtps_cpp, ROS_DOMAIN_ID=28 on both. Nodes on the robot are
+  simply never discovered from the workstation.
+
+  So `ros2 multicast receive` succeeding is NOT evidence that DDS discovery
+  will work. It tests a different group. Do not use it to rule out this fault.
+
+  This file replaces multicast discovery with an explicit unicast peer list.
+  Each participant sends its discovery announcements directly to the listed
+  addresses. No discovery server, no extra process.
+
+  NOTE: this is a different fix from the previous team's
+  /root/fastdds_unicast.xml. Theirs disabled the shared-memory transport to
+  get data across the robot's container boundary; it does not address
+  discovery and contains no peer list. Both fixes can be needed at once.
+
+  USE
+    export FASTRTPS_DEFAULT_PROFILES_FILE=/path/to/fastdds_unicast_peers.xml
+
+  MAINTENANCE
+  The addresses below are hardcoded. If either machine's DHCP lease moves,
+  discovery breaks with no error message. Prefer static leases; if an address
+  changes, update it here and nowhere else.
+-->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <participant profile_name="unicast_peer_discovery" is_default_profile="true">
+    <rtps>
+      <builtin>
+        <initialPeersList>
+          <!-- bernard-2 (robot, wlP1p1s0) -->
+          <locator>
+            <udpv4>
+              <address>192.168.1.154</address>
+            </udpv4>
+          </locator>
+          <!-- dev workstation (wlan0) -->
+          <locator>
+            <udpv4>
+              <address>192.168.1.144</address>
+            </udpv4>
+          </locator>
+          <!-- Loopback, so nodes on the same host still find each other
+               once multicast is no longer doing that job for us. -->
+          <locator>
+            <udpv4>
+              <address>127.0.0.1</address>
+            </udpv4>
+          </locator>
+        </initialPeersList>
+      </builtin>
+    </rtps>
+  </participant>
+</profiles>
