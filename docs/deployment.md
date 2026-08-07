@@ -239,8 +239,14 @@ ros2 launch yahboomcar_bringup yahboomcar_bringup_X3_launch.py
 #   ls /home/jetson/yahboomcar_ros2_ws/software/library_ws/install/astra_camera/share/astra_camera/launch/
 source /opt/ros/humble/setup.bash
 source /home/jetson/yahboomcar_ros2_ws/software/library_ws/install/setup.bash
-ros2 launch astra_camera astra_pro.launch.xml uvc_product_id:=0x050f   # Astra Pro variant
+ros2 launch astra_camera astro_pro_plus.launch.xml
 ```
+
+**VERIFIED 2026-08-08**: `astro_pro_plus.launch.xml` (note the spelling — the
+file really is `astro_`, not `astra_`) is the correct one for this unit, and it
+needs no `uvc_product_id` argument. Device reports as `2bc5/060f`, Astra serial
+`ACR6C5400KT`. The previous team's `astra_pro.launch.xml ... 0x050f` is for a
+different camera and does not apply here.
 
 The `my_lidar: a1` in the banner confirms the RPLidar A1 independently.
 
@@ -297,6 +303,13 @@ expect the answer to land in 5–10 Hz — but measure it.
 | `/tf` | `tf2_msgs/TFMessage` | 29.99 | — | `odom -> base_footprint` only |
 | `/voltage` | `std_msgs/Float32` | 9.05 | — | battery |
 | `/cmd_vel` | `geometry_msgs/Twist` | n/a | RELIABLE / VOLATILE | 1 pub (joy), 1 sub (driver) |
+| `/camera/color/image_raw` | `sensor_msgs/Image` | 30.01 | — | measured **on the robot** |
+| `/camera/depth/image_raw` | `sensor_msgs/Image` | 29.98 | — | measured on the robot |
+| `/camera/depth/points` | `sensor_msgs/PointCloud2` | 24.19 | — | measured on the robot |
+
+Camera rates are measured on the robot, not the workstation: image topics over
+WiFi measure the link, not the sensor. The camera is not in the observation, so
+its rate does not constrain the control rate.
 
 Measured 2026-08-08 from the workstation over DDS. **Everything sensor-side is
 ~10 Hz.** Nothing is faster. Note `/imu/data_raw` publishes RELIABLE, so a

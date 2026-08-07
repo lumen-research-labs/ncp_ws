@@ -143,6 +143,15 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   nothing. Fix committed as `config/fastdds_unicast_peers.xml`; both-ends
   application UNVERIFIED. Lidar never started (timeout) at 9.5 V battery.
 
+- 2026-08-08 (session 2): DDS **working end to end** — workstation receives
+  robot data. Fix was `maxInitialPeersRange` (default 4 < 8 nodes) in
+  `config/fastdds_unicast_peers.xml`, applied on both ends. Rate table and TF
+  tree measured (`docs/deployment.md` §6/§6b). Camera confirmed on
+  `astro_pro_plus.launch.xml`. Two silent-error traps found: lidar frame is
+  `laser_link` not `laser`, and **the IMU is rotated 180/0/-90 deg vs
+  base_link** — blocks the Phase 3 freeze. Lidar is a **hardware fault**:
+  zero bytes over raw serial to STOP/GET_INFO/GET_HEALTH.
+
 ## 4. Current Goal
 
 Phase 1, tasks 3-5 — sensors, rates, baseline bag. Task 1 (SSH) is done;
