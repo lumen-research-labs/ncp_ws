@@ -24,7 +24,9 @@ the authority; this file is the working-state summary of it.
 | ROS2 distro on robot | Humble |
 | Physical E-stop | **NONE.** `/safety/kill` is the only stop; battery pull is last resort |
 | Network | Same subnet, direct DDS — no NAT/VLAN, no discovery server |
-| `ROS_DOMAIN_ID` | **TBD** — dictated by the Jetson host, candidates 20 / 28 |
+| `ROS_DOMAIN_ID` | **28** — confirmed from the host banner 2026-08-08 |
+| Robot address | `bernard-2` / `192.168.1.154` (mDNS `bernard-2.local`) |
+| Camera | `astraplus` per host banner — NOT the Astra Pro the previous team documented |
 
 ### Prior art — `LumenLabs/firmware` (cpt_b2)
 
@@ -134,10 +136,11 @@ NaN, exception) → publish zero velocity, never let the last command persist.
 
 Phase 1, task 1 — SSH + DDS connectivity, no X11 forwarding.
 
-**Blocked on the operator for (morning of 2026-08-08):** the robot's current
-hostname/IP on 192.168.1.0/24, and the `~/.ssh/lumen` key copied onto this
-workstation (operator is bringing it; user is `jetson`). Everything else is
-known — see §1 prior art.
+**Blocked on:** SSH auth only. Robot is up at `192.168.1.154`, port 22 open,
+mDNS resolving. No key on this workstation works, and password auth needs a
+TTY (no `sshpass` installed). Operator to run `ssh-copy-id` once; after that
+this session can drive Phase 1 unattended. SSH username still unconfirmed —
+firmware docs say `jetson`.
 
 Settled 2026-08-07, do not re-open: observation stays **forward-180°, 36 bins**
 despite the lidar being a 360° A1. The robot is therefore blind behind — the
@@ -153,6 +156,16 @@ Once unblocked, in order:
    `docs/deployment.md` §6. **This determines the Phase 3 control rate — it is
    measured, never guessed.**
 6. Record a ~2 min teleop baseline bag, commit a trimmed fixture.
+
+Open items to resolve during the above:
+- Does `/odom` exist? Decides base_velocity source (see interface_contract.md).
+- `/imu/data` fused or not, and at what rate?
+- Which camera launch file matches `astraplus` (banner) vs the Astra Pro
+  command the previous team documented?
+- Re-calibrate lidar self-occlusion zones on THIS unit — the previous team's
+  `[-6,+6]` zone was attributed to an Astra *Pro* body; a different camera
+  means a different shadow.
+- Where does the lidar launch from? Not in either documented bringup.
 
 ---
 

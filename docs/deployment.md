@@ -11,7 +11,7 @@ this file is the thing someone follows at 9am with no context.
 | ROS2 distro on robot | Humble |
 | Physical E-stop | **None.** `/safety/kill` only; battery disconnect is the last resort. |
 | Network topology | Workstation and robot on the same subnet, direct — no NAT/VLAN boundary, no discovery server needed |
-| `ROS_DOMAIN_ID` | **TBD** — must match the Jetson host. Candidates 20 / 28, see `config/interface.yaml` |
+| `ROS_DOMAIN_ID` | **28** — confirmed from the host banner 2026-08-08 |
 | Robot ROS2 | Runs **natively on the Jetson host**, not only in Docker |
 | Base image (previous team) | `yahboomtechnology/ros-humble:4.1.2` |
 
@@ -21,11 +21,21 @@ Mostly established from the previous team's runbook
 (`LumenLabs/firmware/DOCS/`) — only the current address is missing.
 
 ```
-SSH user:        jetson          # per firmware/DOCS/1_ssh-key_setup.md
-Identity file:   ~/.ssh/lumen     # NOT PRESENT on this workstation — see below
-Robot hostname:  TODO(operator)  # firmware docs use <HOSTNAME>.local (mDNS)
-Robot IP:        TODO(operator)
+Robot hostname:  bernard-2       # bernard-2.local resolves via mDNS
+Robot IP:        192.168.1.154   # same subnet as the workstation (192.168.1.0/24)
+SSH user:        jetson          # per firmware/DOCS — VERIFY, not yet confirmed on this unit
+Identity file:   ~/.ssh/lumen    # not yet on this workstation
 Firmware path:   ~/Desktop/firmware   (previous team's checkout on the robot)
+
+Host banner reports:
+
+```
+ROS_DOMAIN_ID: 28
+my_robot_type: x3 | my_lidar: a1 | my_camera: astraplus
+```
+
+Password auth is enabled. Do not put the password in this file or anywhere in
+the repo — set up key auth instead (below).
 ```
 
 ```bash
@@ -63,17 +73,14 @@ First, find out what the robot host actually uses — this is not ours to pick.
 The Yahboom drivers run natively on the host and are the source of `/scan`,
 `/imu/*`, `/vel_raw` and the sink for `/cmd_vel`, so we must join their domain.
 
-```bash
-# on the Jetson HOST
-printenv ROS_DOMAIN_ID
-grep ROS_DOMAIN_ID ~/.bashrc
-```
+**Answered: `28`**, straight off the host's login banner. Set it identically on
+the workstation and in our container — in the shell profile / `docker run -e`,
+never interactively, so it can't be half-applied. A mismatched domain ID looks
+exactly like a broken network.
 
-The Yahboom image bakes `20`; the previous team set their *container* to `28`
-and their docs never state the host value. Record the answer in
-`config/interface.yaml` and set it identically on both machines, in the shell
-profile / container invocation so it can never be half-set — a mismatched
-domain ID looks exactly like a broken network.
+```bash
+export ROS_DOMAIN_ID=28
+```
 
 Talker on the robot, echo on the workstation:
 
@@ -181,11 +188,16 @@ a container, and **order matters**. One SSH session per terminal.
 source /opt/ros/humble/setup.bash
 ros2 launch yahboomcar_bringup yahboomcar_bringup_X3_launch.py
 
-# Terminal 2 — Astra Pro camera (the product id argument is required)
+# Terminal 2 — camera. NOTE: this unit reports my_camera: astraplus, but the
+# previous team's command is for the Astra *Pro*. Check which launch file
+# applies before running it:
+#   ls /home/jetson/yahboomcar_ros2_ws/software/library_ws/install/astra_camera/share/astra_camera/launch/
 source /opt/ros/humble/setup.bash
 source /home/jetson/yahboomcar_ros2_ws/software/library_ws/install/setup.bash
-ros2 launch astra_camera astra_pro.launch.xml uvc_product_id:=0x050f
+ros2 launch astra_camera astra_pro.launch.xml uvc_product_id:=0x050f   # Astra Pro variant
 ```
+
+The `my_lidar: a1` in the banner confirms the RPLidar A1 independently.
 
 **Lidar: launch command unknown.** `cpt_b2_engine` subscribes to `/scan`, so it
 exists, but `/scan` does not appear in the topic list the previous team

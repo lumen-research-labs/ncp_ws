@@ -13,19 +13,14 @@
 interface_version: "1.0.0"
 
 network:
-  # TODO(phase1): MUST match whatever the Jetson HOST publishes on, because
-  # the Yahboom drivers (source of /scan, /imu/*, /vel_raw and the sink for
-  # /cmd_vel) run natively on the host, not in our container. This is not a
-  # free choice.
+  # CONFIRMED 2026-08-08 from the Jetson host's own login banner:
+  #   ROS_DOMAIN_ID: 28 | my_robot_type: x3 | my_lidar: a1 | my_camera: astraplus
   #
-  # Evidence from the previous team's stack (LumenLabs/firmware, cpt_b2):
-  #   - the Yahboom image bakes ROS_DOMAIN_ID=20
-  #   - they sed'd their container to 28 and passed -e ROS_DOMAIN_ID=28
-  #   - their docs never state what the HOST is set to
-  # So 20 and 28 are both live candidates. Verify on the robot with
-  # `printenv ROS_DOMAIN_ID` on the host before picking.
-  ros_domain_id: null
-  ros_domain_id_candidates: [20, 28]
+  # Not a free choice — the Yahboom drivers run natively on the host and are
+  # the source of /scan, /imu/*, /vel_raw and the sink for /cmd_vel, so we
+  # join their domain. Matches what the previous team set their container to.
+  # Set identically on the workstation and in our container.
+  ros_domain_id: 28
 
   # The previous team needed this on BOTH host and container. Their stated
   # rationale ("bypasses multicast discovery") is not what it does — a custom
