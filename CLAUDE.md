@@ -154,26 +154,105 @@ NaN, exception) → publish zero velocity, never let the last command persist.
 
 ## 4. Current Goal
 
-Phase 1, tasks 3-5 — sensors, rates, baseline bag. Task 1 (SSH) is done;
-task 1's DDS half is diagnosed and fixed but not yet verified end-to-end.
+Phase 1 is **substantially complete except the lidar**. Tasks 1 (SSH + DDS),
+3 (partial), 4 (rates) done; tasks 3 (lidar), 4 (`/scan` rate), 5 (baseline
+bag) blocked.
 
-**Blocked on hardware: the battery needs charging.** It read 9.5 V (calibrated
-range 9.0-11.0) and the robot powered off mid-session.
+**BLOCKER — the lidar is a hardware fault, not a config or power problem.**
+Raw serial to `/dev/ttyUSB0` at 115200 returns **zero bytes** to `STOP`
+(`A5 25`), `GET_INFO` (`A5 50`) and `GET_HEALTH` (`A5 52`), including with the
+DTR motor line toggled. Those queries do not need the motor spinning, so this
+is not a brownout. The CP2102 adapter enumerates fine, so USB and the cable to
+the Jetson are good — the fault is between the adapter board and the lidar.
+Operator to check, in order: (1) does it physically spin? (2) the JST connector
+between lidar and adapter board, (3) try a different USB port to rule out the
+adapter itself.
 
-Settled 2026-08-07, do not re-open: observation stays **forward-180°, 36 bins**
-despite the lidar being a 360° A1. The robot is therefore blind behind — the
-safety layer treats reverse as unguarded.
+Battery is a secondary concern, not the cause: 9.5 V → 10.1 V after a short
+charge → 9.9 V under load by session end. Still low for a 3S pack. Charge fully
+to remove it as a confounder.
 
-Next session, in order:
-1. Charge; confirm `/voltage` near 12 V.
-2. Retest lidar. Still timing out on a full battery => hardware fault.
-3. `fastdds_unicast_peers.xml` on BOTH ends; verify `topic echo`/`hz`, not
-   just `topic list`.
-4. Rate/QoS table -> `docs/deployment.md` §6. Blocks the Phase 3 control rate.
-5. Camera via `astro_pro_plus.launch.xml`, verify in RVIZ2.
-6. Static lidar scan -> re-derive self-occlusion zones for THIS unit (Astra
-   Plus, not the Astra Pro the previous team's mask assumed).
-7. Teleop baseline bag — operator only, never an agent.
+**BLOCKS PHASE 3 FREEZE — the IMU is rotated** 180°/0°/−90° (RPY) relative to
+`base_link`. `/imu/data_raw`'s `angular_velocity` and `linear_acceleration` are
+in `imu_link`, so 6 of the 48 observation dims have axes that do not match the
+frame every other component uses. Unrotated, forward acceleration lands on the
+wrong component and at least one sign flips — silently. Resolve before
+freezing; see the warning block in `config/interface.yaml`. Preferred fix:
+rotate into `base_link` in `observation_builder.py`, because a mixed-frame
+observation vector is a trap for whoever trains next.
+
+Settled, do not re-open:
+- Observation stays **forward-180°, 36 bins** despite the lidar being a 360° A1
+  (operator, 2026-08-07). The robot is therefore blind behind — the safety
+  layer treats reverse as unguarded motion.
+- Base velocity is **`/odom`** (EKF, has a header) not `/vel_raw` (bare Twist,
+  no timestamp — cannot support honest staleness detection).
+- IMU source is **`/imu/data_raw`**; `/imu/data` is Madgwick-fused and its
+  value is the orientation quaternion we do not use.
+- `ROS_DOMAIN_ID` is **28**, dictated by the Jetson host.
+
+### Next session, in order
+
+1. **Lidar hardware check** (above). Everything below except 5 depends on it.
+2. Relaunch: bringup, then lidar **with `frame_id:=laser_link`** — the launch
+   file defaults to `laser`, which is not in the TF tree and makes every scan
+   untransformable.
+3. Measure `/scan` rate → `docs/deployment.md` §6. **This is the last input to
+   the Phase 3 control-rate decision.** Everything else sensor-side is ~10 Hz,
+   so 10 Hz control would leave zero headroom; 5 Hz is the conservative option.
+4. **Record a short static bag** — all sensor topics, robot stationary, ~60 s,
+   no teleop, so an agent can do it unattended. Gives re-analyzable rate/jitter
+   data (the current table is summary numbers only — `topic hz` discards its
+   samples) and an early replay fixture. Trim and commit to `tests/fixtures/`.
+   Also run `ros2 topic delay`, which was never captured; BUILD-PLAN task 4
+   asks for latency as well as rate.
+5. **Capture one raw `/scan` message to a file** and commit it to
+   `tests/fixtures/`. A few KB. This is what the self-occlusion mask must be
+   derived from — the previous team's `[-6,+6]` zone is NOT inheritable (their
+   unit had an Astra Pro; ours is an Astra Plus, and on our measured geometry
+   `camera_link` sits 1.4 cm forward of `laser_link` but 7.2 cm below it, so it
+   may not occlude the scan plane at all).
+6. Verify all five sensor streams in RVIZ2 from the workstation, no X11.
+7. Teleop baseline bag — **operator only, never an agent**.
+8. Resolve the IMU rotation before touching Phase 3.
+
+### Robot state at session end (2026-08-08)
+
+I tried to stop the nodes I had launched (bringup + camera) at wrap-up, but the
+robot had already gone off the network — either powered down or the battery
+gave out again after reading 9.9 V under load. So they were not stopped
+cleanly; they died with the machine. No harm done: none of them run at boot and
+nothing persists, but the disorderly stop is worth knowing if the next session
+finds anything odd.
+
+The robot is otherwise untouched: no files written outside `/tmp`, no packages
+installed, no repo cloned on it yet.
+
+**Check the battery first thing next session** — this is twice now that it has
+dropped off mid-session. If a full charge does not hold, the pack itself is
+suspect, and that would need settling before any Phase 2 hardware testing,
+where losing power mid-run with a policy driving is a genuine safety issue.
+
+`/tmp/ncp_fastdds_peers.xml` is a copy of `config/fastdds_unicast_peers.xml`
+placed there for this session; `/tmp` does not survive reboot, so re-copy it
+next session (`scp config/fastdds_unicast_peers.xml bernard-2:/tmp/ncp_fastdds_peers.xml`).
+The durable fix is to clone this repo onto the robot and point
+`FASTRTPS_DEFAULT_PROFILES_FILE` at the in-repo copy.
+
+### Remote-command gotchas (cost real time — do not rediscover)
+
+- **Non-interactive SSH does not source `~/.bashrc`.** Ubuntu's bashrc returns
+  early for non-interactive shells, before the ROS lines. `ssh bernard-2
+  'ros2 topic list'` fails with an empty `ROS_DISTRO`. Every remote command
+  needs the explicit source prelude — see `docs/phase1_session_2026-08-08.md`.
+- **Never `pkill -f <pattern>` where the pattern appears in your own SSH
+  command line.** It matches the remote shell running it and kills the session.
+- `ros2 multicast send/receive` passing proves **nothing** about DDS. It uses
+  group 225.0.0.1; FastDDS discovery uses 239.255.0.1, which this AP drops.
+- A portless FastDDS initial-peer locator only covers participant IDs
+  0..`maxInitialPeersRange`, **default 4**. The robot runs 8 nodes, so the
+  default gives partial, silent discovery failure that looks like a flaky
+  network. Set to 20 in our profile.
 
 ---
 
