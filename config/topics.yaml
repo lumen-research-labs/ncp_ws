@@ -4,6 +4,12 @@
 # Command sources publish to namespaced INPUT topics and have no route to the
 # base driver. Anything that adds a second publisher to /cmd_vel is a bug,
 # not a shortcut.
+#
+# !! The previous team's stack (LumenLabs/firmware, cpt_b2) publishes /cmd_vel
+# !! DIRECTLY from cpt_b2_engine, with no safety layer — its e-stop is a
+# !! browser button. cpt_b2_engine and rm_safety must NEVER run at the same
+# !! time on the same ROS_DOMAIN_ID: that is two publishers on /cmd_vel and
+# !! the base driver will interleave them.
 
 base_driver:
   # Sole publisher: rm_safety. Sole subscriber: the vendor base driver.
@@ -19,14 +25,32 @@ debug:
   policy_cmd_vel_debug: /policy/cmd_vel_debug
 
 sensors:
-  # TODO(phase1): confirm each of these against `ros2 topic list` on the real
-  # robot — the vendor bringup may namespace or rename them.
-  scan: /scan
-  odom: /odom
-  imu: /imu
-  camera_image: /camera/color/image_raw
+  # Names below are the previous team's OBSERVED topics on this exact
+  # platform (Yahboom X3 Plus + Orin Nano Super, ROS2 Humble), taken from
+  # firmware/DOCS/4_robot_start_up.md and cpt_b2_engine.py subscriptions.
+  # Confirmed-present unless marked. Still re-verify in Phase 1 — the
+  # previous team's own code carries the note "verify with `ros2 topic list`
+  # on the flashed Orin before relying on them".
+  scan: /scan                              # sensor_msgs/LaserScan, RPLidar A1, 360 deg
+  imu_raw: /imu/data_raw                   # sensor_msgs/Imu — what cpt_b2 used
+  imu_filtered: /imu/data                  # sensor_msgs/Imu — fusion status UNVERIFIED
+  imu_mag: /imu/mag                        # sensor_msgs/MagneticField
+  vel_raw: /vel_raw                        # geometry_msgs/Twist — NO header/timestamp
+  voltage: /voltage                        # std_msgs/Float32
+  camera_color: /camera/color/image_raw
   camera_depth: /camera/depth/image_raw
   point_cloud: /camera/depth/points
+
+  # UNVERIFIED — does not appear in the previous team's documented topic
+  # list and they never subscribed to it. If absent, base_velocity in
+  # interface.yaml has to come from /vel_raw instead.
+  odom: /odom
+
+  # NOTE: /scan is absent from the sanity-check output recorded in
+  # firmware/DOCS/4_robot_start_up.md PART 4, even though the grep pattern
+  # would have matched it. Most likely the lidar simply was not launched for
+  # that capture — cpt_b2_engine definitely subscribes to /scan. Confirm the
+  # lidar comes up as part of yahboomcar_bringup and is not a separate launch.
 
 status:
   safety: /safety/status
@@ -35,3 +59,8 @@ status:
 services:
   safety_kill: /safety/kill
   safety_reset: /safety/reset
+
+foreign:
+  # Topics owned by the previous team's stack. Listed so nothing of ours ever
+  # collides with them. We do not publish or subscribe to any of these.
+  cpt_namespace: /cpt/*

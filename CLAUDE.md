@@ -24,7 +24,34 @@ the authority; this file is the working-state summary of it.
 | ROS2 distro on robot | Humble |
 | Physical E-stop | **NONE.** `/safety/kill` is the only stop; battery pull is last resort |
 | Network | Same subnet, direct DDS — no NAT/VLAN, no discovery server |
-| `ROS_DOMAIN_ID` | `42`, both machines |
+| `ROS_DOMAIN_ID` | **TBD** — dictated by the Jetson host, candidates 20 / 28 |
+
+### Prior art — `LumenLabs/firmware` (cpt_b2)
+
+The previous team ran a full stack on this same unit. Their repo is the best
+source of ground truth about the hardware; read it before guessing.
+
+- SSH: `ssh -i ~/.ssh/lumen jetson@<HOSTNAME>.local`, checkout at
+  `~/Desktop/firmware`. (That key is **not** on this workstation yet.)
+- **ROS2 Humble runs natively on the Jetson host.** Yahboom drivers launch on
+  the host (`ros2 launch yahboomcar_bringup yahboomcar_bringup_X3_launch.py`),
+  not in a container. Our container joins their domain; it does not own it.
+- Real topics: `/scan`, `/imu/data_raw`, `/imu/data`, `/imu/mag`, `/vel_raw`
+  (bare Twist, **no timestamp**), `/voltage`, `/camera/*`. **`/odom` presence
+  is unverified** — they never used it.
+- Lidar is a **360° RPLidar A1**, not forward-only. Forward-180° is our
+  choice, not a hardware limit. Self-occlusion zones `[-6,6]`, `[18,24]`,
+  `[38,41]` deg — the first is the Astra Pro camera body **dead ahead** and
+  must be masked or the e-stop latches permanently.
+- Their engine ran at **5 Hz** (200 ms latency target) — strong prior for our
+  control rate.
+- Host↔container needs a FastDDS profile with `useBuiltinTransports=false`.
+  Their docs call it a multicast fix; it is actually disabling shared-memory
+  transport, which cannot cross the container boundary. Multicast discovery
+  is unaffected, so workstation↔robot DDS should work normally.
+- `cpt_b2_engine` publishes `/cmd_vel` **directly, with no safety layer**, and
+  moves the robot the instant it starts. It must never run concurrently with
+  `rm_safety` — that is two publishers on `/cmd_vel`.
 
 **No policy has been trained and no task is defined.** The interface exists to
 unblock Phases 1–3; those phases are exercised with a random/hand-scripted
@@ -93,16 +120,26 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   lidar `range_min/max`, and all TF transforms are `null` pending Phase 1
   measurements. Phase 1 task 1 blocked on robot SSH details.
 
+- 2026-08-07: Committed the skeleton (f1c6b6f). Mined `LumenLabs/firmware`
+  (previous team's cpt_b2 stack on this same robot) and the operator's
+  Obsidian ROS notes. Corrected several assumptions: real topic names,
+  360° lidar with front-dead-ahead self-occlusion, 5 Hz prior control rate,
+  domain ID is host-dictated not free, `/odom` may not exist. Wrote
+  `docs/dev_env_setup.md` from the Obsidian notes (workstation ROS2 is a
+  Docker container, `osrf/ros:humble-desktop-full-jammy`, `--net=host`,
+  X11 via XWayland). Robot unreachable — stale `~/.ssh/config` entries point
+  at `10.0.0.149`, a different subnet from this workstation's 192.168.1.0/24.
+
 ## 4. Current Goal
 
 Phase 1, task 1 — SSH + DDS connectivity, no X11 forwarding.
 
-**Blocked on the operator for:** robot hostname/IP, SSH user, auth method
-(fill into `docs/deployment.md` §1), and the workstation's ROS2 Humble setup
-from the personal Obsidian note (into `docs/dev_env_setup.md`).
+**Blocked on the operator for:** the robot's current hostname/IP on
+192.168.1.0/24, and SSH auth (the `~/.ssh/lumen` key the firmware docs use is
+not on this workstation). Everything else is now known — see §1 prior art.
 
 Once unblocked, in order:
-1. `export ROS_DOMAIN_ID=42` on both machines, in the shell profile.
+1. `printenv ROS_DOMAIN_ID` on the Jetson **host**; set both machines to match.
 2. Talker on robot / `ros2 topic echo` on workstation. On failure check subnet
    → multicast → workstation firewall, in that order, before anything else.
 3. `cat /etc/nv_tegra_release` on the robot; pin `docker/Dockerfile.jetson`.

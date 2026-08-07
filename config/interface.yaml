@@ -13,16 +13,45 @@
 interface_version: "1.0.0"
 
 network:
-  # Shared between workstation and robot. Non-zero so we don't collide with
-  # any default-domain traffic on the subnet. Both machines export this.
-  ros_domain_id: 42
+  # TODO(phase1): MUST match whatever the Jetson HOST publishes on, because
+  # the Yahboom drivers (source of /scan, /imu/*, /vel_raw and the sink for
+  # /cmd_vel) run natively on the host, not in our container. This is not a
+  # free choice.
+  #
+  # Evidence from the previous team's stack (LumenLabs/firmware, cpt_b2):
+  #   - the Yahboom image bakes ROS_DOMAIN_ID=20
+  #   - they sed'd their container to 28 and passed -e ROS_DOMAIN_ID=28
+  #   - their docs never state what the HOST is set to
+  # So 20 and 28 are both live candidates. Verify on the robot with
+  # `printenv ROS_DOMAIN_ID` on the host before picking.
+  ros_domain_id: null
+  ros_domain_id_candidates: [20, 28]
+
+  # The previous team needed this on BOTH host and container. Their stated
+  # rationale ("bypasses multicast discovery") is not what it does — a custom
+  # UDPv4 transport still does multicast. What `useBuiltinTransports: false`
+  # actually removes is the SHARED-MEMORY transport, which cannot work across
+  # the container boundary. That matches their reported symptom exactly:
+  # `ros2 topic list` works (discovery is fine) but `ros2 topic echo` hangs
+  # (data transport is not). Same fix, correct reason.
+  #
+  # Consequence for us: multicast discovery is intact, so plain DDS from the
+  # workstation should work without a discovery server.
+  fastdds_profile: /root/fastdds_unicast.xml
+  fastdds_disables: shared_memory_transport
 
 control:
   # TODO(phase1): must be at or below the slowest sensor feeding the
-  # observation, with headroom. Expected to be lidar-bound (~10 Hz on stock
-  # X3 hardware) but that is a guess until measured. Justify the final choice
-  # in docs/interface_contract.md against the Phase 1 numbers.
+  # observation, with headroom. Justify the final choice in
+  # docs/interface_contract.md against the Phase 1 numbers.
+  #
+  # Strong prior from the previous team's stack on this exact hardware:
+  # cpt_b2_engine ran its decision cycle at PIPELINE_HZ = 5, with a 200 ms
+  # latency target and 400 ms flagged as "very slow". The lidar is an RPLidar
+  # A1, which spins at 5.5-10 Hz. So the answer is very likely 5-10 Hz, and
+  # anything above 10 Hz would be feeding the policy repeated scans.
   rate_hz: null
+  prior_hz: 5   # not a decision — the previous stack's rate, for reference
   frame_id: base_link
 
 observation:
@@ -34,13 +63,12 @@ observation:
       shape: [36]
       units: dimensionless   # normalized; raw source is meters
       preprocessing: >-
-        The X3's lidar is occluded to the rear by the chassis, so only the
-        forward 180 deg carries signal. Take that forward 180 deg arc and
-        min-pool into 36 bins of 10 deg each (nearest obstacle per sector —
-        min, NOT mean, so a narrow obstacle is never averaged away).
-        Clip to [range_min, range_max]. Replace non-finite returns
-        (inf/NaN, i.e. no-return) with range_max BEFORE normalizing.
-        Normalize by dividing by range_max, giving [0, 1].
+        Operator decision: use the forward 180 deg arc only, min-pooled into
+        36 bins of 10 deg each (nearest obstacle per sector — min, NOT mean,
+        so a narrow obstacle is never averaged away). Drop self-occlusion
+        rays FIRST, then clip to [range_min, range_max], then replace
+        non-finite returns (inf/NaN, i.e. no-return) with range_max, then
+        min-pool, then divide by range_max giving [0, 1].
       # TODO(phase1): from the datasheet of the lidar actually fitted, cross
       # checked against the range_min/range_max fields of a live LaserScan.
       range_min_m: null
@@ -49,22 +77,77 @@ observation:
       bin_deg: 10
       pooling: min
 
+      # The sensor itself is a 360 deg RPLidar A1 (confirmed from the previous
+      # team's cpt_b2_engine, which decomposed full FRONT/RIGHT/REAR/LEFT
+      # sectors and used the rear one for reverse-motion obstacle avoidance).
+      # Restricting to the forward 180 deg is our deliberate choice, not a
+      # hardware limit — the rear half is discarded, not absent. Widening the
+      # arc later is an interface_version bump.
+      sensor: rplidar_a1
+      sensor_fov_deg: 360
+      scan_convention: index 0 at angle_min; angle = angle_min + i*angle_increment
+
+      # Rays that hit the robot's own body. These MUST be dropped before
+      # pooling: a min-pool over a bin containing a self-hit returns the
+      # distance to the robot's own chassis, i.e. a permanent phantom
+      # obstacle, and the e-stop would latch the moment it is enabled.
+      #
+      # Values below are the previous team's, calibrated 2026-02-23 on this
+      # platform. TODO(phase1): re-verify on OUR unit from a static diagnostic
+      # scan in open space — mounting differs between builds.
+      #
+      # Note the first zone straddles 0 deg (the Astra Pro camera body sits
+      # directly in front of the lidar). That is dead centre of our forward
+      # arc and lands in the most safety-critical bin.
+      self_occlusion_zones_deg:
+        - [-6.0, 6.0]      # Astra Pro camera body, directly ahead
+        - [18.0, 24.0]     # cable/bracket at ~20 deg
+        - [38.0, 41.0]     # structure at ~39 deg
+      # At 10 deg bins over [-90, +90] none of the three zones covers a whole
+      # bin (the widest, -6..+6, takes 60% of the two bins adjacent to 0), so
+      # every bin retains valid rays. That must be ASSERTED, not assumed:
+      #   - a bin left with zero valid rays after masking is a sensor fault,
+      #     not "clear". The observation builder returns None and the safety
+      #     layer treats it as a stale scan -> e-stop. Filling it with
+      #     range_max would be fail-OPEN and is forbidden.
+      empty_bin_policy: fault   # never range_max — that would be fail-open
+
     - name: base_velocity
-      source_topic: /odom
-      subfield: twist.twist
+      # TODO(phase1): the Yahboom X3 stack publishes /vel_raw as a bare
+      # geometry_msgs/Twist (that is what the previous team subscribed to —
+      # they never used /odom). Whether an /odom exists at all on this
+      # bringup is UNVERIFIED; their documented `ros2 topic list` sanity
+      # check does not show one. Confirm before freezing.
+      source_topic: null
+      source_topic_candidates:
+        - {topic: /vel_raw, type: geometry_msgs/Twist, subfield: null,
+           note: "used by the previous team's engine; known to exist"}
+        - {topic: /odom, type: nav_msgs/Odometry, subfield: twist.twist,
+           note: "preferred if present — carries a header/timestamp, which
+                  /vel_raw does not, and staleness detection needs one"}
       shape: [3]             # vx, vy, wz — mecanum, lateral DOF is real
       units: [m/s, m/s, rad/s]
       preprocessing: none    # raw physical units, see normalization note below
+      staleness_warning: >-
+        A bare Twist has no timestamp. If we end up on /vel_raw, staleness
+        must be tracked by arrival time at the subscriber, which cannot
+        distinguish a stalled driver from a stalled network. Prefer /odom.
 
     - name: imu_angular_velocity
-      source_topic: /imu
+      # The X3 publishes THREE imu topics: /imu/data_raw, /imu/data, /imu/mag.
+      # The previous team used /imu/data_raw. TODO(phase1): confirm whether
+      # /imu/data is filter-fused (and at what rate) before choosing — raw vs
+      # fused is a real difference the policy would learn around.
+      source_topic: /imu/data_raw
+      source_topic_alternatives: [/imu/data]
       subfield: angular_velocity
       shape: [3]             # x, y, z
       units: [rad/s, rad/s, rad/s]
       preprocessing: none
 
     - name: imu_linear_acceleration
-      source_topic: /imu
+      source_topic: /imu/data_raw
+      source_topic_alternatives: [/imu/data]
       subfield: linear_acceleration
       shape: [3]             # x, y, z
       units: [m/s^2, m/s^2, m/s^2]

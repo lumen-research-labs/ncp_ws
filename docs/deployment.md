@@ -11,34 +11,64 @@ this file is the thing someone follows at 9am with no context.
 | ROS2 distro on robot | Humble |
 | Physical E-stop | **None.** `/safety/kill` only; battery disconnect is the last resort. |
 | Network topology | Workstation and robot on the same subnet, direct — no NAT/VLAN boundary, no discovery server needed |
-| `ROS_DOMAIN_ID` | `42` |
+| `ROS_DOMAIN_ID` | **TBD** — must match the Jetson host. Candidates 20 / 28, see `config/interface.yaml` |
+| Robot ROS2 | Runs **natively on the Jetson host**, not only in Docker |
+| Base image (previous team) | `yahboomtechnology/ros-humble:4.1.2` |
 
 ## 1. Access
 
+Mostly established from the previous team's runbook
+(`LumenLabs/firmware/DOCS/`) — only the current address is missing.
+
 ```
-Robot hostname:  TODO(operator)
+SSH user:        jetson          # per firmware/DOCS/1_ssh-key_setup.md
+Identity file:   ~/.ssh/lumen     # NOT PRESENT on this workstation — see below
+Robot hostname:  TODO(operator)  # firmware docs use <HOSTNAME>.local (mDNS)
 Robot IP:        TODO(operator)
-SSH user:        TODO(operator)
-Auth:            TODO(operator)  # key path, or note that password auth is in use
+Firmware path:   ~/Desktop/firmware   (previous team's checkout on the robot)
 ```
 
 ```bash
-ssh <user>@<host>
+ssh -i ~/.ssh/lumen jetson@<HOSTNAME>.local
 ```
 
-If the IP is DHCP-assigned and moves, note the reservation or mDNS name here
-rather than re-discovering it every session.
+Find the address from the robot's own console:
+
+```bash
+hostname       # -> <HOSTNAME>, use <HOSTNAME>.local
+hostname -I    # -> the IP
+```
+
+### Two open items
+
+1. **The `~/.ssh/lumen` key does not exist on this workstation.** Present keys
+   are `id_ed25519` and `id_ed25519_github`. Either the Lumen key needs to be
+   copied over, or this workstation's `id_ed25519` needs to be added to the
+   robot's `authorized_keys`.
+2. **`~/.ssh/config` already has stale entries** for `jetson.local` and
+   `10.0.0.149`, both with user `devpatel` — not the `jetson` user the
+   firmware docs use. `10.0.0.149` is also on a different subnet from this
+   workstation (`192.168.1.0/24`), so it is from another network. Neither
+   host answered a ping or a TCP connect on port 22 as of 2026-08-07.
+   Clean these up once the real address is known.
 
 ## 2. Network / DDS sanity check
 
-Both machines:
+First, find out what the robot host actually uses — this is not ours to pick.
+The Yahboom drivers run natively on the host and are the source of `/scan`,
+`/imu/*`, `/vel_raw` and the sink for `/cmd_vel`, so we must join their domain.
 
 ```bash
-export ROS_DOMAIN_ID=42
+# on the Jetson HOST
+printenv ROS_DOMAIN_ID
+grep ROS_DOMAIN_ID ~/.bashrc
 ```
 
-Put that in the shell profile on both ends so it is never half-set — a
-mismatched domain ID looks exactly like a broken network.
+The Yahboom image bakes `20`; the previous team set their *container* to `28`
+and their docs never state the host value. Record the answer in
+`config/interface.yaml` and set it identically on both machines, in the shell
+profile / container invocation so it can never be half-set — a mismatched
+domain ID looks exactly like a broken network.
 
 Talker on the robot, echo on the workstation:
 
@@ -76,6 +106,27 @@ Base image tag:  TODO(phase1)
 Build **on the robot**. Never build or cross-compile TensorRT artifacts on the
 workstation.
 
+The previous team's proven container recipe on this unit, for reference:
+
+```bash
+docker run -it --network host --privileged \
+  -v /dev:/dev \
+  -v ~/Desktop/firmware:/root/cpt_ws/src/cpt_b2 \
+  -e ROS_DOMAIN_ID=28 \
+  --name cpt_b2 yahboomtechnology/ros-humble:4.1.2 bash
+```
+
+`yahboomtechnology/ros-humble:4.1.2` is known to work on this hardware, but
+whether it carries TensorRT and a Jetson-appropriate ONNX Runtime is
+**unverified** — Phase 4 needs both. Check inside it before committing to a
+base image:
+
+```bash
+python3 -c "import tensorrt, onnxruntime; print(tensorrt.__version__, onnxruntime.get_available_providers())"
+```
+
+Ours:
+
 ```bash
 cd ~/ncp_ws/docker
 docker compose build
@@ -83,8 +134,22 @@ docker compose up -d
 docker compose exec robot bash
 ```
 
-Inside the container, `ros2 topic list` must match what the host sees
-(`--network host` is why).
+Inside the container, `ros2 topic list` must match what the host sees.
+
+### The SHM transport fix
+
+`--network host` is not sufficient on its own. The previous team had to disable
+the FastDDS shared-memory transport on **both** the host and inside the
+container — shared memory cannot cross the container boundary. Symptom without
+it: `ros2 topic list` shows topics but `ros2 topic echo` hangs silently.
+
+Their profile (`/root/fastdds_unicast.xml`, exported via
+`FASTRTPS_DEFAULT_PROFILES_FILE`) declares a plain UDPv4 transport and sets
+`useBuiltinTransports=false`. Their docs explain this as "bypassing multicast
+discovery" — that is not what it does; a UDPv4 transport still multicasts.
+What it removes is SHM. The fix is right, the stated reason is not, and the
+distinction matters: **multicast discovery stays intact, so the workstation
+can still find the robot over plain DDS with no discovery server.**
 
 ## 4. Deliver code
 
@@ -102,9 +167,41 @@ docker compose exec robot colcon build --symlink-install \
 
 ## 5. Sensor bringup
 
+These are the previous team's working commands
+(`firmware/DOCS/4_robot_start_up.md`). They run on the **Jetson host**, not in
+a container, and **order matters**. One SSH session per terminal.
+
+```bash
+# Terminal 1 — Yahboom base drivers (motors, IMU, encoders)
+source /opt/ros/humble/setup.bash
+ros2 launch yahboomcar_bringup yahboomcar_bringup_X3_launch.py
+
+# Terminal 2 — Astra Pro camera (the product id argument is required)
+source /opt/ros/humble/setup.bash
+source /home/jetson/yahboomcar_ros2_ws/software/library_ws/install/setup.bash
+ros2 launch astra_camera astra_pro.launch.xml uvc_product_id:=0x050f
 ```
-TODO(phase1): the vendor bringup launch command, once confirmed on the robot.
+
+**Lidar: launch command unknown.** `cpt_b2_engine` subscribes to `/scan`, so it
+exists, but `/scan` does not appear in the topic list the previous team
+recorded after running the two launches above — which suggests the lidar is a
+separate launch they did not document. Find it in Phase 1:
+
+```bash
+ros2 pkg list | grep -i -E 'lidar|rplidar|ydlidar'
+ls /opt/ros/humble/share/*lidar*/launch/ 2>/dev/null
+ros2 topic list | grep scan
 ```
+
+We do **not** need rosbridge, the HTTP server, or the CLIP vision server —
+those are the previous stack's browser plumbing. Skip them.
+
+### Do not run `cpt_b2_engine`
+
+It publishes `/cmd_vel` directly with no safety layer, and its own docs warn
+"**Robot will start moving as soon as engine is started.**" Two publishers on
+`/cmd_vel` breaks the project's central invariant. If it is ever running,
+stop it before bringing up `rm_safety`.
 
 Then from the workstation:
 
@@ -121,12 +218,35 @@ task 3 table in `BUILD-PLAN.md`.
 Phase 1 task 4. These determine the control rate in `config/interface.yaml`;
 they are measured, never guessed.
 
-| Topic | Type | Advertised | Measured `hz` | Measured `delay` | Notes |
-|---|---|---|---|---|---|
-| `/scan` | `sensor_msgs/LaserScan` | | | | |
-| `/odom` | `nav_msgs/Odometry` | | | | |
-| `/imu` | `sensor_msgs/Imu` | | | | |
-| `/camera/color/image_raw` | `sensor_msgs/Image` | | | | |
-| `/camera/depth/points` | `sensor_msgs/PointCloud2` | | | | |
+Reference point: the previous team's engine ran its decision cycle at **5 Hz**
+with a 200 ms latency target. The lidar is an RPLidar A1 (5.5–10 Hz spin). So
+expect the answer to land in 5–10 Hz — but measure it.
+
+| Topic | Type | Measured `hz` | Measured `delay` | Notes |
+|---|---|---|---|---|
+| `/scan` | `sensor_msgs/LaserScan` | | | RPLidar A1, 360°; we use forward 180° |
+| `/vel_raw` | `geometry_msgs/Twist` | | | no header — see below |
+| `/odom` | `nav_msgs/Odometry` | | | **does it exist at all?** |
+| `/imu/data_raw` | `sensor_msgs/Imu` | | | what cpt_b2 used |
+| `/imu/data` | `sensor_msgs/Imu` | | | fused? confirm |
+| `/camera/color/image_raw` | `sensor_msgs/Image` | | | |
+| `/camera/depth/points` | `sensor_msgs/PointCloud2` | | | |
+
+Also record, for each: `ros2 topic info <topic> --verbose` QoS. The previous
+team used `sensor_qos` (best-effort) for `/scan` and `/vel_raw` and RELIABLE
+for `/imu/data_raw`. A QoS mismatch is a silent no-data failure.
+
+### Two things to settle here
+
+1. **`/odom` present or not.** `interface.yaml` observation component 2 is
+   base velocity. `/vel_raw` is a bare `Twist` with **no header and no
+   timestamp**, which makes real staleness detection impossible — arrival time
+   at the subscriber cannot distinguish a stalled driver from a stalled
+   network. Fail-closed needs a timestamp. Prefer `/odom` if it exists.
+2. **Lidar self-occlusion.** Take a static scan in open space and confirm the
+   previous team's masked zones against our unit:
+   `[-6, +6]` (Astra Pro camera body, **dead ahead**), `[18, 24]`, `[38, 41]`.
+   Unmasked, the first one puts a permanent phantom obstacle straight in front
+   of the robot and the e-stop latches the moment it is enabled.
 
 Copy the conclusions into `docs/interface_contract.md`.
