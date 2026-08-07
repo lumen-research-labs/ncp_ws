@@ -1,0 +1,56 @@
+# Safety layer limits — clamps, e-stop zones, timeouts.
+#
+# THERE IS NO PHYSICAL E-STOP ON THIS UNIT. The software kill switch
+# (/safety/kill) is the only stop mechanism, with battery disconnect as the
+# last resort. Every value here is therefore set deliberately low. Raising
+# any of them requires Phase 2 safety validation to be signed off in
+# docs/safety_validation.md, with date and operator.
+#
+# Consumed by rm_safety. No value here may be duplicated as a literal in node
+# code — everything is loaded from this file.
+
+velocity_limits:
+  # Absolute caps applied to every command regardless of source. These are at
+  # or below the action scaling in interface.yaml so the safety layer is
+  # always the tighter of the two.
+  max_vx: 0.25          # m/s   — forward/back
+  max_vy: 0.25          # m/s   — lateral (mecanum; do not omit)
+  max_wz: 0.4           # rad/s — yaw
+
+acceleration_limits:
+  # Clamped by comparing against the last published command and elapsed time.
+  # This is what protects the STM32 and the drivetrain from step commands.
+  max_ax: 0.5           # m/s^2
+  max_ay: 0.5           # m/s^2
+  max_alpha_z: 1.0      # rad/s^2
+
+estop:
+  # Two-tier lidar zones, measured on the rolling minimum range within the
+  # monitored arcs. Rear arc is chassis-occluded and carries no signal, so it
+  # is not monitored — the robot must be treated as blind behind.
+  slow_zone_m: 0.80     # scale commanded velocity down proportionally
+  stop_zone_m: 0.35     # zero velocity and LATCH
+  forward_arc_deg: 90   # centered on +x
+  lateral_arc_deg: 60   # each side, for the mecanum lateral DOF
+  consecutive_scans_to_trigger: 3   # noise filter; a single bad return must
+                                    # never latch a stop
+  latching: true        # once stopped, stays stopped until /safety/reset
+
+timeouts:
+  command_timeout_ms: 300    # no command on the active input -> publish zero
+  scan_timeout_ms: 500       # stale /scan -> treat as e-stop; safety cannot
+                             # be guaranteed without perception
+  odom_timeout_ms: 500
+
+startup:
+  # With no physical E-stop, killed-on-startup is mandatory, not a fallback.
+  # The robot must never be able to move as a side effect of a node launching.
+  start_killed: true
+  persist_kill_state: true
+  kill_state_path: /var/lib/rm_safety/kill_state
+
+publishing:
+  status_rate_hz: 10
+  # When killed, publish zero velocity CONTINUOUSLY rather than going silent:
+  # a downstream stale-command watchdog may not exist.
+  zero_publish_rate_hz: 20

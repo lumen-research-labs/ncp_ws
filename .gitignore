@@ -1,0 +1,21 @@
+# ROS2 / colcon
+build/
+install/
+log/
+
+# Never commit TensorRT engines — they are built on the target device
+*.engine
+*.plan
+
+# Bags: only trimmed fixtures under tests/fixtures/ are committed
+*.db3
+*.mcap
+!tests/fixtures/**/*.db3
+!tests/fixtures/**/*.mcap
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/

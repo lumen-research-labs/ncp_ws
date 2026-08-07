@@ -1,0 +1,37 @@
+# Canonical topic names — single source of truth.
+#
+# The central invariant: /cmd_vel has exactly ONE publisher, rm_safety.
+# Command sources publish to namespaced INPUT topics and have no route to the
+# base driver. Anything that adds a second publisher to /cmd_vel is a bug,
+# not a shortcut.
+
+base_driver:
+  # Sole publisher: rm_safety. Sole subscriber: the vendor base driver.
+  cmd_vel: /cmd_vel
+
+command_sources:
+  # Inputs to rm_safety. Never connected directly to the base driver.
+  policy: /policy/cmd_vel
+  teleop: /teleop/cmd_vel
+
+debug:
+  # Where rm_policy publishes when dry_run is true (which is the default).
+  policy_cmd_vel_debug: /policy/cmd_vel_debug
+
+sensors:
+  # TODO(phase1): confirm each of these against `ros2 topic list` on the real
+  # robot — the vendor bringup may namespace or rename them.
+  scan: /scan
+  odom: /odom
+  imu: /imu
+  camera_image: /camera/color/image_raw
+  camera_depth: /camera/depth/image_raw
+  point_cloud: /camera/depth/points
+
+status:
+  safety: /safety/status
+  policy: /policy/status
+
+services:
+  safety_kill: /safety/kill
+  safety_reset: /safety/reset

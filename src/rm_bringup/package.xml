@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rm_bringup</name>
+  <version>0.0.0</version>
+  <description>
+    ROBOT. Launch files and parameter files for sensor bringup, safety layer, policy, and recording.
+  </description>
+  <maintainer email="devsp2003@gmail.com">Dev Patel</maintainer>
+  <license>Proprietary</license>
+
+  <depend>rclpy</depend>
+  <depend>launch</depend>
+  <depend>launch_ros</depend>
+  <depend>rm_safety</depend>
+  <depend>rm_policy</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

@@ -1,0 +1,142 @@
+# THE FROZEN CONTRACT — obs/action interface for the ROSMASTER X3 policy pipeline.
+#
+# STATUS: DRAFT — NOT YET FROZEN.
+# This file is filled in during Phase 3, which blocks on Phase 1 measured
+# sensor rates. Fields marked TODO(phase1) cannot be chosen until Phase 1
+# task 4 (`ros2 topic hz` / `ros2 topic delay`) has been run against the real
+# robot. Do not guess them.
+#
+# Bump `interface_version` on ANY change to observation or action layout.
+# The policy node asserts the version embedded in the exported model metadata
+# against this value and refuses to start on a mismatch.
+
+interface_version: "1.0.0"
+
+network:
+  # Shared between workstation and robot. Non-zero so we don't collide with
+  # any default-domain traffic on the subnet. Both machines export this.
+  ros_domain_id: 42
+
+control:
+  # TODO(phase1): must be at or below the slowest sensor feeding the
+  # observation, with headroom. Expected to be lidar-bound (~10 Hz on stock
+  # X3 hardware) but that is a guess until measured. Justify the final choice
+  # in docs/interface_contract.md against the Phase 1 numbers.
+  rate_hz: null
+  frame_id: base_link
+
+observation:
+  # Order is load-bearing. The vector is built in exactly this order by the
+  # shared schema loader; nothing hand-writes this ordering a second time.
+  layout:
+    - name: lidar_ranges
+      source_topic: /scan
+      shape: [36]
+      units: dimensionless   # normalized; raw source is meters
+      preprocessing: >-
+        The X3's lidar is occluded to the rear by the chassis, so only the
+        forward 180 deg carries signal. Take that forward 180 deg arc and
+        min-pool into 36 bins of 10 deg each (nearest obstacle per sector —
+        min, NOT mean, so a narrow obstacle is never averaged away).
+        Clip to [range_min, range_max]. Replace non-finite returns
+        (inf/NaN, i.e. no-return) with range_max BEFORE normalizing.
+        Normalize by dividing by range_max, giving [0, 1].
+      # TODO(phase1): from the datasheet of the lidar actually fitted, cross
+      # checked against the range_min/range_max fields of a live LaserScan.
+      range_min_m: null
+      range_max_m: null
+      arc_deg: 180
+      bin_deg: 10
+      pooling: min
+
+    - name: base_velocity
+      source_topic: /odom
+      subfield: twist.twist
+      shape: [3]             # vx, vy, wz — mecanum, lateral DOF is real
+      units: [m/s, m/s, rad/s]
+      preprocessing: none    # raw physical units, see normalization note below
+
+    - name: imu_angular_velocity
+      source_topic: /imu
+      subfield: angular_velocity
+      shape: [3]             # x, y, z
+      units: [rad/s, rad/s, rad/s]
+      preprocessing: none
+
+    - name: imu_linear_acceleration
+      source_topic: /imu
+      subfield: linear_acceleration
+      shape: [3]             # x, y, z
+      units: [m/s^2, m/s^2, m/s^2]
+      preprocessing: none
+
+    - name: previous_action
+      source_topic: null     # internal node state, not a subscription
+      shape: [3]             # the previous cmd_vx, cmd_vy, cmd_wz, post-tanh
+      units: dimensionless   # [-1, 1], as emitted by the network
+      preprocessing: none
+      note: >-
+        The action the policy itself last emitted, in network output space
+        (pre-scaling). On the first cycle, and after any reset, this is zeros.
+        It is NOT read back from /cmd_vel — the safety layer may have clamped
+        that, and feeding the clamped value back would silently change the
+        observation distribution relative to training.
+
+  total_dim: 48              # 36 + 3 + 3 + 3 + 3
+  dtype: float32
+
+  normalization:
+    # No policy has been trained yet, so no learned normalizer exists.
+    # The lidar block carries a fixed /range_max scaling (declared above).
+    # Velocity and IMU components are deliberately left in raw physical
+    # units — placeholder statistics are NOT to be fabricated.
+    scheme: fixed_lidar_only
+    stats_source: null
+    note: >-
+      When training begins and a running mean/std normalizer is used, its
+      statistics are exported alongside the ONNX model and loaded by the
+      inference node. See the marked hook in
+      src/rm_policy/rm_policy/observation_builder.py. Adding it is an
+      interface_version bump.
+
+action:
+  layout:
+    - name: cmd_vx
+      range: [-1.0, 1.0]
+      units: dimensionless   # network output, tanh
+    - name: cmd_vy
+      range: [-1.0, 1.0]
+      units: dimensionless
+    - name: cmd_wz
+      range: [-1.0, 1.0]
+      units: dimensionless
+  total_dim: 3
+  dtype: float32
+  activation: tanh
+
+  scaling:
+    # Maps network output [-1, 1] to physical units: physical = output * max.
+    # PROVISIONAL and deliberately conservative, matching the safety layer's
+    # "start low" principle. To be raised only after Phase 2 safety validation
+    # is signed off in docs/safety_validation.md. Not final.
+    vx_max: 0.3   # m/s
+    vy_max: 0.3   # m/s
+    wz_max: 0.5   # rad/s
+    provisional: true
+
+coordinate_frames:
+  # TODO(phase1): confirm every one of these against the live TF tree
+  # (`ros2 run tf2_tools view_frames`) rather than trusting the vendor docs.
+  base_link:
+    definition: Robot body origin, at the geometric center of the base.
+    axes: REP-103 — x forward, y left, z up.
+  odom:
+    definition: Wheel-encoder odometry frame; drifts, continuous, no jumps.
+    axes: REP-103.
+  laser:
+    definition: Lidar optical center.
+    transform_from_base_link: null   # TODO(phase1)
+    note: Rear arc is occluded by the chassis; only forward 180 deg is used.
+  imu_link:
+    definition: IMU sensing origin.
+    transform_from_base_link: null   # TODO(phase1)

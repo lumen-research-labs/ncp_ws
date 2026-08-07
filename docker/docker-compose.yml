@@ -1,0 +1,25 @@
+# Robot-side only. Run from the robot: docker compose up -d
+services:
+  robot:
+    build:
+      context: .
+      dockerfile: Dockerfile.jetson
+    image: ncp_ws:jetson
+    container_name: ncp_ws
+    # Required for DDS discovery: `ros2 topic list` inside the container must
+    # match the host. Bridged networking breaks multicast discovery.
+    network_mode: host
+    ipc: host
+    runtime: nvidia
+    privileged: true
+    environment:
+      - ROS_DOMAIN_ID=42
+    volumes:
+      - ..:/ws:rw
+      # TODO(phase1): confirm the actual device nodes on the unit.
+      # - /dev/ttyUSB0:/dev/ttyUSB0   # lidar
+      # - /dev/ttyUSB1:/dev/ttyUSB1   # STM32 base driver
+    devices: []
+    stdin_open: true
+    tty: true
+    command: bash
