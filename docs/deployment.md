@@ -57,9 +57,42 @@ hostname -I    # -> the IP
    user `jetson`, key `~/.ssh/lumen`. Then:
 
    ```bash
-   chmod 600 ~/.ssh/lumen
-   ssh -i ~/.ssh/lumen jetson@<HOSTNAME>.local
+   chmod 600 ~/.ssh/lumen        # ssh refuses a key readable by others
    ```
+
+   A `~/.ssh/config` entry is set up so nobody has to remember the address,
+   user or key flag ever again — `ssh bernard-2` is the whole command:
+
+   ```
+   Host bernard-2 bernard-2.local 192.168.1.154
+     HostName 192.168.1.154
+     User jetson                    # <- correct this if wrong
+     IdentityFile ~/.ssh/lumen
+     IdentityFile ~/.ssh/id_ed25519
+     IdentitiesOnly yes
+     ServerAliveInterval 30
+   ```
+
+   The alias works everywhere ssh does, including `scp bernard-2:...`,
+   `rsync ... bernard-2:...` and `git`. `scripts/deploy.sh` and
+   `scripts/fetch_bags.sh` therefore only need `ROBOT_HOST=bernard-2`.
+
+   Two `IdentityFile` lines are listed deliberately: the Lumen key, and this
+   workstation's own key in case it was added to the robot's
+   `authorized_keys` instead. `IdentitiesOnly yes` stops ssh offering every
+   other key in the agent, which some servers reject as too many attempts.
+
+   To avoid retyping a passphrase (if the key has one):
+
+   ```bash
+   eval "$(ssh-agent -s)"
+   ssh-add ~/.ssh/lumen
+   ```
+
+   Status 2026-08-08: `~/.ssh/lumen` is **not present** on this workstation,
+   and this workstation's `id_ed25519` is not authorized for user `jetson`.
+   Stale entries for `jetson.local` and `10.0.0.149` (user `devpatel`, a
+   different subnet) were removed; backup at `~/.ssh/config.bak.20260807`.
 2. **`~/.ssh/config` already has stale entries** for `jetson.local` and
    `10.0.0.149`, both with user `devpatel` — not the `jetson` user the
    firmware docs use. `10.0.0.149` is also on a different subnet from this
@@ -81,6 +114,18 @@ exactly like a broken network.
 ```bash
 export ROS_DOMAIN_ID=28
 ```
+
+### Verified so far (2026-08-08)
+
+- Robot reachable at `192.168.1.154`, `bernard-2.local` resolves via mDNS,
+  port 22 open.
+- Workstation is on `192.168.1.0/24` — same subnet, as expected.
+- No firewall active on the workstation (no ufw, no firewalld).
+- From the workstation container (`--net=host`, `ROS_DOMAIN_ID=28`),
+  `ros2 topic list` returns only `/parameter_events` and `/rosout`, and
+  `ros2 node list` is empty. **This is not a DDS failure** — nothing is
+  publishing, because the Yahboom drivers have not been launched. The DDS
+  path is untested until something is up on the robot to discover.
 
 Talker on the robot, echo on the workstation:
 
