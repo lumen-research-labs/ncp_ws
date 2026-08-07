@@ -132,40 +132,39 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   X11 via XWayland). Robot unreachable — stale `~/.ssh/config` entries point
   at `10.0.0.149`, a different subnet from this workstation's 192.168.1.0/24.
 
+- 2026-08-08: Phase 1 session, ended early on a dead battery. Full log in
+  `docs/phase1_session_2026-08-08.md`. SSH working (`ssh bernard-2`, key
+  `~/.ssh/bernard-2`). L4T R36.4.3 / JetPack 6.2 confirmed. Resolved: `/odom`
+  exists (robot_localization EKF) and is now the base-velocity source;
+  `/imu/data` is Madgwick-fused so we stay on `/imu/data_raw`; lidar is a
+  separate `sllidar_ros2` launch; camera is `astro_pro_plus.launch.xml`.
+  DDS root cause found: the AP drops multicast 239.255.0.1 (FastDDS SPDP)
+  while forwarding 225.0.0.1, so `ros2 multicast receive` passing proves
+  nothing. Fix committed as `config/fastdds_unicast_peers.xml`; both-ends
+  application UNVERIFIED. Lidar never started (timeout) at 9.5 V battery.
+
 ## 4. Current Goal
 
-Phase 1, task 1 — SSH + DDS connectivity, no X11 forwarding.
+Phase 1, tasks 3-5 — sensors, rates, baseline bag. Task 1 (SSH) is done;
+task 1's DDS half is diagnosed and fixed but not yet verified end-to-end.
 
-**Blocked on:** SSH auth only. Robot is up at `192.168.1.154`, port 22 open,
-mDNS resolving. No key on this workstation works, and password auth needs a
-TTY (no `sshpass` installed). Operator to run `ssh-copy-id` once; after that
-this session can drive Phase 1 unattended. SSH username still unconfirmed —
-firmware docs say `jetson`.
+**Blocked on hardware: the battery needs charging.** It read 9.5 V (calibrated
+range 9.0-11.0) and the robot powered off mid-session.
 
 Settled 2026-08-07, do not re-open: observation stays **forward-180°, 36 bins**
 despite the lidar being a 360° A1. The robot is therefore blind behind — the
 safety layer treats reverse as unguarded.
 
-Once unblocked, in order:
-1. `printenv ROS_DOMAIN_ID` on the Jetson **host**; set both machines to match.
-2. Talker on robot / `ros2 topic echo` on workstation. On failure check subnet
-   → multicast → workstation firewall, in that order, before anything else.
-3. `cat /etc/nv_tegra_release` on the robot; pin `docker/Dockerfile.jetson`.
-4. Sensor bringup, verify all five streams in RVIZ2 on the workstation.
-5. `ros2 topic hz` / `ros2 topic delay` for every topic → the table in
-   `docs/deployment.md` §6. **This determines the Phase 3 control rate — it is
-   measured, never guessed.**
-6. Record a ~2 min teleop baseline bag, commit a trimmed fixture.
-
-Open items to resolve during the above:
-- Does `/odom` exist? Decides base_velocity source (see interface_contract.md).
-- `/imu/data` fused or not, and at what rate?
-- Which camera launch file matches `astraplus` (banner) vs the Astra Pro
-  command the previous team documented?
-- Re-calibrate lidar self-occlusion zones on THIS unit — the previous team's
-  `[-6,+6]` zone was attributed to an Astra *Pro* body; a different camera
-  means a different shadow.
-- Where does the lidar launch from? Not in either documented bringup.
+Next session, in order:
+1. Charge; confirm `/voltage` near 12 V.
+2. Retest lidar. Still timing out on a full battery => hardware fault.
+3. `fastdds_unicast_peers.xml` on BOTH ends; verify `topic echo`/`hz`, not
+   just `topic list`.
+4. Rate/QoS table -> `docs/deployment.md` §6. Blocks the Phase 3 control rate.
+5. Camera via `astro_pro_plus.launch.xml`, verify in RVIZ2.
+6. Static lidar scan -> re-derive self-occlusion zones for THIS unit (Astra
+   Plus, not the Astra Pro the previous team's mask assumed).
+7. Teleop baseline bag — operator only, never an agent.
 
 ---
 
