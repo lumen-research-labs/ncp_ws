@@ -62,8 +62,29 @@ control:
   # latency target and 400 ms flagged as "very slow". The lidar is an RPLidar
   # A1, which spins at 5.5-10 Hz. So the answer is very likely 5-10 Hz, and
   # anything above 10 Hz would be feeding the policy repeated scans.
+  # MEASURED 2026-08-08 from the workstation (see docs/deployment.md §6).
+  # The whole Yahboom stack runs at ~10 Hz: /odom 10.74, /imu/data_raw 10.74,
+  # /vel_raw 9.22, /voltage 9.05. Nothing sensor-side is faster than ~10 Hz.
+  #
+  # Still null because the LIDAR rate is unmeasured — the lidar did not start
+  # this session (hardware fault, see docs/phase1_session_2026-08-08.md) and
+  # it is expected to be the slowest contributor. Decide once /scan is
+  # measured. Note 10 Hz control against 10 Hz sensors leaves NO headroom,
+  # which is the situation BUILD-PLAN §Phase 3 task 1 warns about; 5 Hz (the
+  # previous team's choice) is the conservative option.
   rate_hz: null
   prior_hz: 5   # not a decision — the previous stack's rate, for reference
+  measured_source_rates_hz:
+    odom: 10.74
+    odom_raw: 10.74
+    vel_raw: 9.22
+    imu_data: 9.41
+    imu_data_raw: 10.74
+    imu_mag: 10.01
+    joint_states: 20.01
+    tf: 29.99
+    voltage: 9.05
+    scan: null   # lidar did not start
   frame_id: base_link
 
 observation:
@@ -137,6 +158,9 @@ observation:
       source_topic: /odom
       source_topic_type: nav_msgs/Odometry
       subfield: twist.twist
+      measured_rate_hz: 10.74
+      qos: {reliability: RELIABLE, durability: VOLATILE}
+      child_frame_id: base_footprint
       source_note: >-
         EKF-fused, not raw encoder output. /odom_raw and /vel_raw carry the
         unfused encoder velocity if that turns out to be preferable — but
@@ -229,18 +253,47 @@ action:
     provisional: true
 
 coordinate_frames:
-  # TODO(phase1): confirm every one of these against the live TF tree
-  # (`ros2 run tf2_tools view_frames`) rather than trusting the vendor docs.
+  # MEASURED 2026-08-08 from the live TF tree.
+  # Tree: odom -> base_footprint -> base_link -> {imu_link, camera_link, laser_link}
+  tree: odom -> base_footprint -> base_link -> {imu_link, camera_link, laser_link}
+
   base_link:
-    definition: Robot body origin, at the geometric center of the base.
+    definition: Robot body origin. Child of base_footprint.
     axes: REP-103 — x forward, y left, z up.
   odom:
-    definition: Wheel-encoder odometry frame; drifts, continuous, no jumps.
-    axes: REP-103.
-  laser:
+    definition: EKF odometry frame (robot_localization). Continuous, drifts.
+    note: /odom child_frame_id is base_footprint, NOT base_link.
+  laser_link:
     definition: Lidar optical center.
-    transform_from_base_link: null   # TODO(phase1)
-    note: Rear arc is occluded by the chassis; only forward 180 deg is used.
+    # NOTE the frame is `laser_link`. sllidar_launch.py defaults frame_id to
+    # `laser`, which is NOT in the TF tree — launch it with
+    # frame_id:=laser_link or every scan is untransformable and RVIZ shows
+    # nothing.
+    transform_from_base_link:
+      translation_m: [0.043, 0.000, 0.110]
+      rotation_rpy_deg: [0.0, 0.0, 0.0]
+    note: >-
+      No rotation, so lidar 0 deg == robot forward and our forward-180 arc maps
+      directly onto scan angles with no offset. 4.3 cm forward, 11 cm up.
   imu_link:
     definition: IMU sensing origin.
-    transform_from_base_link: null   # TODO(phase1)
+    transform_from_base_link:
+      translation_m: [-0.060, 0.010, 0.010]
+      rotation_rpy_deg: [-180.0, 0.0, -90.0]
+    # ============================================================
+    # THE IMU IS ROTATED RELATIVE TO base_link. Roll 180 deg, yaw -90 deg.
+    # /imu/data_raw angular_velocity and linear_acceleration are expressed in
+    # imu_link, so their axes do NOT correspond to base_link's x-forward,
+    # y-left, z-up. Feeding them into the observation unrotated silently
+    # mislabels the axes: base_link x-forward acceleration appears on a
+    # different IMU component, and the sign of at least one axis flips.
+    #
+    # TODO(phase3): decide and implement ONE of
+    #   (a) rotate imu vectors into base_link in observation_builder, or
+    #   (b) declare the observation IMU block to be in imu_link and keep it
+    #       consistent between training and deployment.
+    # (a) is preferred — every other observation component is base_link-ish,
+    # and a mixed-frame observation vector is a trap for whoever trains next.
+    # Whichever is chosen must be stated here explicitly before freezing.
+    # ============================================================
+    observation_frame_unresolved: true

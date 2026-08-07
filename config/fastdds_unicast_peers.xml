@@ -1,39 +1,69 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <!--
-  FastDDS unicast peer discovery — workstation <-> bernard-2.
+  FastDDS discovery profile — workstation <-> bernard-2.
 
   WHY THIS EXISTS
   Measured 2026-08-08 on the lab WiFi: multicast to 225.0.0.1 (the group
   `ros2 multicast send/receive` uses) crosses between the workstation and the
   robot fine, but multicast to 239.255.0.1 — the group FastDDS actually uses
-  for SPDP discovery — is silently dropped by the access point. Every other
-  check passes: same subnet, no firewall, unicast works both ways (ssh), both
-  ends are rmw_fastrtps_cpp, ROS_DOMAIN_ID=28 on both. Nodes on the robot are
-  simply never discovered from the workstation.
+  for SPDP discovery — is silently dropped by the access point. Everything
+  else checks out: same subnet, no firewall, unicast fine both ways (ssh),
+  both ends rmw_fastrtps_cpp, ROS_DOMAIN_ID=28 on both, no ROS_LOCALHOST_ONLY.
 
   So `ros2 multicast receive` succeeding is NOT evidence that DDS discovery
-  will work. It tests a different group. Do not use it to rule out this fault.
+  will work. It tests a different group. Do not use it to rule this out.
 
   This file replaces multicast discovery with an explicit unicast peer list.
-  Each participant sends its discovery announcements directly to the listed
-  addresses. No discovery server, no extra process.
 
-  NOTE: this is a different fix from the previous team's
-  /root/fastdds_unicast.xml. Theirs disabled the shared-memory transport to
-  get data across the robot's container boundary; it does not address
-  discovery and contains no peer list. Both fixes can be needed at once.
+  THE maxInitialPeersRange TRAP
+  An initial-peer locator with no port does not mean "reach every participant
+  at this address". FastDDS expands it into one port per participant ID, and
+  only covers IDs 0..maxInitialPeersRange, which DEFAULTS TO 4. The robot runs
+  8 nodes, so with the default the last few participants are simply never
+  discovered — and the failure is partial and silent: `ros2 topic list` returns
+  most topics, missing exactly the ones belonging to late-starting nodes
+  (/voltage, /cmd_vel, /joy, /Buzzer, /RGBLight, /edition, /JoyState).
+  That looks like a flaky network and is not.
+
+  Raised to 20 below. Anything above the node count on the busiest host works;
+  the cost is a few more discovery datagrams per announcement.
+
+  useBuiltinTransports=false additionally removes the shared-memory transport.
+  That is the previous team's separate fix for the robot's container/host
+  boundary (their /root/fastdds_unicast.xml), folded in here so one profile
+  covers both problems. Note theirs is unreadable by user `jetson` and so has
+  never actually been in effect for host-side nodes.
 
   USE
     export FASTRTPS_DEFAULT_PROFILES_FILE=/path/to/fastdds_unicast_peers.xml
+  Must be set on BOTH ends. Setting it only on the workstation gets partial,
+  unstable discovery: our announcements reach the robot, but the robot's own
+  announcements still go only to the blocked multicast group.
 
   MAINTENANCE
-  The addresses below are hardcoded. If either machine's DHCP lease moves,
-  discovery breaks with no error message. Prefer static leases; if an address
-  changes, update it here and nowhere else.
+  The addresses are hardcoded. If either machine's DHCP lease moves, discovery
+  breaks with no error message. Prefer static leases; update here and nowhere
+  else.
 -->
 <profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>udpv4_peers</transport_id>
+      <type>UDPv4</type>
+      <!-- See "THE maxInitialPeersRange TRAP" above. Default is 4. -->
+      <maxInitialPeersRange>20</maxInitialPeersRange>
+    </transport_descriptor>
+  </transport_descriptors>
+
   <participant profile_name="unicast_peer_discovery" is_default_profile="true">
     <rtps>
+      <userTransports>
+        <transport_id>udpv4_peers</transport_id>
+      </userTransports>
+      <!-- Drops the default SHM + UDP pair in favour of the descriptor above.
+           Also removes shared memory, which cannot cross a container boundary. -->
+      <useBuiltinTransports>false</useBuiltinTransports>
       <builtin>
         <initialPeersList>
           <!-- bernard-2 (robot, wlP1p1s0) -->
@@ -48,8 +78,8 @@
               <address>192.168.1.144</address>
             </udpv4>
           </locator>
-          <!-- Loopback, so nodes on the same host still find each other
-               once multicast is no longer doing that job for us. -->
+          <!-- Loopback: with multicast gone, this is how nodes on the same
+               host find each other. Do not remove. -->
           <locator>
             <udpv4>
               <address>127.0.0.1</address>

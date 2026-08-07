@@ -284,15 +284,57 @@ Reference point: the previous team's engine ran its decision cycle at **5 Hz**
 with a 200 ms latency target. The lidar is an RPLidar A1 (5.5–10 Hz spin). So
 expect the answer to land in 5–10 Hz — but measure it.
 
-| Topic | Type | Measured `hz` | Measured `delay` | Notes |
+| Topic | Type | Measured `hz` | QoS | Notes |
 |---|---|---|---|---|
-| `/scan` | `sensor_msgs/LaserScan` | | | RPLidar A1, 360°; we use forward 180° |
-| `/vel_raw` | `geometry_msgs/Twist` | | | no header — see below |
-| `/odom` | `nav_msgs/Odometry` | | | **does it exist at all?** |
-| `/imu/data_raw` | `sensor_msgs/Imu` | | | what cpt_b2 used |
-| `/imu/data` | `sensor_msgs/Imu` | | | fused? confirm |
-| `/camera/color/image_raw` | `sensor_msgs/Image` | | | |
-| `/camera/depth/points` | `sensor_msgs/PointCloud2` | | | |
+| `/scan` | `sensor_msgs/LaserScan` | **not measured** | — | lidar did not start — hardware fault |
+| `/odom` | `nav_msgs/Odometry` | **10.74** | RELIABLE / VOLATILE | EKF-fused; `child_frame_id: base_footprint` |
+| `/odom_raw` | `nav_msgs/Odometry` | 10.74 | — | pre-EKF |
+| `/vel_raw` | `geometry_msgs/Twist` | 9.22 | RELIABLE / VOLATILE | no header/timestamp |
+| `/imu/data` | `sensor_msgs/Imu` | 9.41 | — | Madgwick-fused |
+| `/imu/data_raw` | `sensor_msgs/Imu` | **10.74** | RELIABLE / VOLATILE | our source |
+| `/imu/mag` | `sensor_msgs/MagneticField` | 10.01 | — | unused |
+| `/joint_states` | `sensor_msgs/JointState` | 20.01 | — | |
+| `/tf` | `tf2_msgs/TFMessage` | 29.99 | — | `odom -> base_footprint` only |
+| `/voltage` | `std_msgs/Float32` | 9.05 | — | battery |
+| `/cmd_vel` | `geometry_msgs/Twist` | n/a | RELIABLE / VOLATILE | 1 pub (joy), 1 sub (driver) |
+
+Measured 2026-08-08 from the workstation over DDS. **Everything sensor-side is
+~10 Hz.** Nothing is faster. Note `/imu/data_raw` publishes RELIABLE, so a
+BEST_EFFORT subscriber will still match, but the reverse would not — worth
+remembering when writing the observation builder.
+
+## 6b. TF tree — measured
+
+```
+odom -> base_footprint -> base_link -> { imu_link, camera_link, laser_link }
+```
+
+| Transform | Translation (m) | Rotation RPY (deg) |
+|---|---|---|
+| `base_link -> laser_link` | `[0.043, 0.000, 0.110]` | `[0, 0, 0]` |
+| `base_link -> imu_link` | `[-0.060, 0.010, 0.010]` | `[-180, 0, -90]` |
+| `base_link -> camera_link` | `[0.057, 0.000, 0.038]` | `[0, 0, 0]` |
+
+Three consequences:
+
+1. **The lidar frame is `laser_link`, not `laser`.** `sllidar_launch.py`
+   defaults `frame_id` to `laser`, which is not in the TF tree. Launch it as
+   `frame_id:=laser_link` or scans cannot be transformed and RVIZ shows
+   nothing.
+2. **The lidar has zero rotation relative to `base_link`**, so lidar 0 deg is
+   robot-forward and the forward-180 arc maps onto scan angles with no offset.
+   One less thing to get wrong.
+3. **The IMU is rotated: roll 180 deg, yaw -90 deg.** See the warning block in
+   `config/interface.yaml` — the raw IMU vectors are in `imu_link`, so their
+   axes do not line up with `base_link`. This must be resolved before the
+   interface is frozen.
+
+Also worth noting: `camera_link` sits 1.4 cm *forward* of `laser_link` but
+7.2 cm *below* it. Whether the camera body actually occludes the lidar plane
+on this unit is therefore not obvious from geometry alone — it depends on the
+Astra Plus body height. The previous team's `[-6, +6]` mask was measured on a
+unit with a different camera and cannot be assumed. Settle it with a real
+static scan once the lidar works.
 
 Also record, for each: `ros2 topic info <topic> --verbose` QoS. The previous
 team used `sensor_qos` (best-effort) for `/scan` and `/vel_raw` and RELIABLE
