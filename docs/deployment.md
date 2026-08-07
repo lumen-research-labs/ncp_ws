@@ -41,10 +41,15 @@ hostname -I    # -> the IP
 
 ### Two open items
 
-1. **The `~/.ssh/lumen` key does not exist on this workstation.** Present keys
-   are `id_ed25519` and `id_ed25519_github`. Either the Lumen key needs to be
-   copied over, or this workstation's `id_ed25519` needs to be added to the
-   robot's `authorized_keys`.
+1. **The `~/.ssh/lumen` key is not yet on this workstation** (present keys are
+   `id_ed25519` and `id_ed25519_github`). Decided 2026-08-07: the operator
+   copies the Lumen key across, matching the previous team's setup exactly —
+   user `jetson`, key `~/.ssh/lumen`. Then:
+
+   ```bash
+   chmod 600 ~/.ssh/lumen
+   ssh -i ~/.ssh/lumen jetson@<HOSTNAME>.local
+   ```
 2. **`~/.ssh/config` already has stale entries** for `jetson.local` and
    `10.0.0.149`, both with user `devpatel` — not the `jetson` user the
    firmware docs use. `10.0.0.149` is also on a different subnet from this

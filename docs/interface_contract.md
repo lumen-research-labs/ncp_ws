@@ -38,8 +38,14 @@ rotation obstacle avoidance.
 
 Restricting the observation to the forward 180° is therefore our **deliberate
 choice**, not a hardware constraint — the rear half is discarded, not absent.
-Widening the arc later is an `interface_version` bump, and the data is there if
-we want it.
+Re-confirmed by the operator on 2026-08-07 after the 360° finding came to
+light. Widening the arc later is an `interface_version` bump, and the data is
+there if we want it.
+
+The robot is consequently **blind behind** for both the policy and the e-stop.
+The safety layer must treat reverse motion as unguarded — that is the reason
+`safety_limits.yaml` monitors only forward and lateral arcs, and it is an
+argument for keeping reverse limits especially low.
 
 That arc is min-pooled into 36 bins of 10° each. Min, not mean: a narrow
 obstacle inside a 10° sector must survive pooling. An average would dilute a

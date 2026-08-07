@@ -134,9 +134,14 @@ NaN, exception) → publish zero velocity, never let the last command persist.
 
 Phase 1, task 1 — SSH + DDS connectivity, no X11 forwarding.
 
-**Blocked on the operator for:** the robot's current hostname/IP on
-192.168.1.0/24, and SSH auth (the `~/.ssh/lumen` key the firmware docs use is
-not on this workstation). Everything else is now known — see §1 prior art.
+**Blocked on the operator for (morning of 2026-08-08):** the robot's current
+hostname/IP on 192.168.1.0/24, and the `~/.ssh/lumen` key copied onto this
+workstation (operator is bringing it; user is `jetson`). Everything else is
+known — see §1 prior art.
+
+Settled 2026-08-07, do not re-open: observation stays **forward-180°, 36 bins**
+despite the lidar being a 360° A1. The robot is therefore blind behind — the
+safety layer treats reverse as unguarded.
 
 Once unblocked, in order:
 1. `printenv ROS_DOMAIN_ID` on the Jetson **host**; set both machines to match.
