@@ -25,7 +25,7 @@ the authority; this file is the working-state summary of it.
 | Physical E-stop | **NONE.** `/safety/kill` is the only stop; battery pull is last resort |
 | Network | Same subnet, direct DDS — no NAT/VLAN, no discovery server |
 | `ROS_DOMAIN_ID` | **28** — confirmed from the host banner 2026-08-08 |
-| Robot address | `bernard-2` / `192.168.1.154` (mDNS `bernard-2.local`) |
+| Robot address | `bernard-2` / `10.0.0.107` (mDNS `bernard-2.local`) — updated 2026-08-12 after network move |
 | Camera | `astraplus` per host banner — NOT the Astra Pro the previous team documented |
 
 ### Prior art — `LumenLabs/firmware` (cpt_b2)
@@ -189,26 +189,82 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   ownership hook moved PostToolUse -> PreToolUse so violations never land; added
   a `robot-ssh` skill encoding the SSH/DDS/battery traps. Commit 5bf166e.
 
+- 2026-08-12: Moved project to a new PC and new WiFi network. Robot now at
+  `10.0.0.107` (was `192.168.1.154`); workstation WiFi at `10.0.0.117` (was
+  `192.168.1.144`). Added `bernard-2` entry to `~/.ssh/config` (key
+  `~/.ssh/bernard-2`, user `jetson`, mDNS hostname). Updated IP addresses in
+  `config/fastdds_unicast_peers.xml`. SSH and mDNS resolution confirmed working.
+  DDS not yet re-verified on the new network — do this at the start of the next
+  robot session.
+
+- 2026-08-12 (session 2): Robot session. DDS **re-verified on the new network**
+  (echoed `/voltage`, `/imu/data_raw`, `/vel_raw` from the workstation). Two
+  findings, one new. **NEW — base-board serial contention:** on first bringup
+  every STM32 value read zero (`/voltage` 0.0, IMU "free fall", `/vel_raw` 0)
+  because a Yahboom factory **autostart**, `Rosmaster/rosmaster/rosmaster_main.py`,
+  was holding `/dev/myserial` (ttyUSB1). Our driver's serial-receive thread had
+  crashed with `SerialException: … multiple access on port`. Killed the app by
+  PID, relaunched bringup → real data (IMU gravity −9.879, voltage 9.8 V). This
+  **recurs every boot** until disabled; `sudo fuser -v /dev/ttyUSB1` is the check.
+  Documented in the robot-ssh skill. **Lidar re-confirmed a hardware fault,
+  now battery-independent AND port-contention-independent:** with ttyUSB0 free
+  and the app dead, the sllidar driver opened the port (SDK banner) then failed
+  `GET_INFO`/`GET_HEALTH` with `SL_RESULT_OPERATION_TIMEOUT`. Non-motor handshake,
+  so not the 9.8 V battery. Also: this install ships **no** `sllidar_a1_launch.py`
+  — use `sllidar_launch.py frame_id:=laser_link scan_mode:=Standard` (the generic
+  default `Sensitivity` is an A2/A3 mode the A1 rejects). Skill launch reference
+  fixed. Robot left clean (ports free, no procs), powered on for the operator to
+  charge.
+
+- 2026-08-12 (session 2, cont.): **Phase 2 safety-layer code written** (not yet
+  hardware/replay validated). Built via Sonnet subagents with rm-safety-reviewer
+  gating each step. `rm_interfaces/msg/SafetyStatus.msg` (state OK/SLOW/STOPPED/
+  KILLED, reason, min_range, clamping_active; kill/reset use std_srvs/Trigger, no
+  custom srv). `rm_safety/safety_logic.py` — pure, ROS-free decision core, all
+  constants from `safety_limits.yaml`, fail-closed; **81 unit tests pass**.
+  `rm_safety/safety_node.py` — sole `/cmd_vel` publisher, killed-on-startup,
+  continuous-zero-when-killed, kill-state persistence (fail-closed to KILLED),
+  std_srvs kill/reset, staleness watchdogs, `/safety/status` publishing; entry
+  point `safety_node` wired. Two review rounds fixed real fail-OPEN bugs: an
+  empty-but-fresh `/scan` bypassing the no-perception e-stop, and `/safety/reset`
+  permitting motion with an obstacle still in the stop zone. evaluate() precedence:
+  KILLED → scan_stale/no-perception → odom_stale → stop_zone(latched) →
+  command_timeout → slow_zone → ok. Remaining Phase 2 (replay + hardware tests,
+  safety_validation.md sign-off) is BLOCKED on the lidar/baseline bag.
+
 
 ## 4. Current Goal
 
-Phase 1 is **substantially complete except the lidar**. Tasks 1 (SSH + DDS),
-3 (partial), 4 (rates) done; tasks 3 (lidar), 4 (`/scan` rate), 5 (baseline
-bag) blocked.
+Phase 1 is **substantially complete except the lidar**. Tasks 1 (SSH + DDS,
+now re-verified on the new network), 3 (partial), 4 (rates) done; tasks 3
+(lidar), 4 (`/scan` rate), 5 (baseline bag) blocked. **Phase 2 code is written
+and reviewed** (see below); its replay + hardware validation is blocked on the
+same lidar/baseline-bag gap.
 
-**BLOCKER — the lidar is a hardware fault, not a config or power problem.**
-Raw serial to `/dev/ttyUSB0` at 115200 returns **zero bytes** to `STOP`
-(`A5 25`), `GET_INFO` (`A5 50`) and `GET_HEALTH` (`A5 52`), including with the
-DTR motor line toggled. Those queries do not need the motor spinning, so this
-is not a brownout. The CP2102 adapter enumerates fine, so USB and the cable to
-the Jetson are good — the fault is between the adapter board and the lidar.
+**BLOCKER — the lidar is a hardware fault.** Re-confirmed 2026-08-12 (session 2)
+and now stronger than before: with `/dev/ttyUSB0` (`/dev/rplidar`) **free** and
+the Yahboom autostart app **dead**, the `sllidar_ros2` driver opened the port
+(SDK banner printed) then failed the `GET_INFO`/`GET_HEALTH` handshake with
+`SL_RESULT_OPERATION_TIMEOUT`. That handshake does not spin the motor, so this
+is not the 9.8 V battery, and the port was uncontended, so it is not the serial
+contention found this session either. Consistent with the 2026-08-08 raw-serial
+"zero bytes" result. The fault is between the adapter board and the lidar.
 Operator to check, in order: (1) does it physically spin? (2) the JST connector
 between lidar and adapter board, (3) try a different USB port to rule out the
-adapter itself.
+adapter itself. Do **not** re-diagnose in software — that ground is covered.
 
-Battery is a secondary concern, not the cause: 9.5 V → 10.1 V after a short
-charge → 9.9 V under load by session end. Still low for a 3S pack. Charge fully
-to remove it as a confounder.
+**STANDING TRAP — Yahboom autostart grabs the base-board serial.** A factory
+autostart, `python3 …/Rosmaster/rosmaster/rosmaster_main.py`, holds
+`/dev/myserial` (ttyUSB1, the STM32) and recurs **every boot**. If it is up when
+`yahboomcar_bringup` starts, the driver's serial-receive thread crashes
+("multiple access on port") and **all** base data — `/voltage`, `/imu/data_raw`,
+`/vel_raw` — silently reads zero while topics keep publishing at normal rate.
+Preflight: `sudo fuser -v /dev/ttyUSB1`; if `rosmaster_main.py` holds it, kill
+that PID (exact PID, not `pkill -f`) and relaunch bringup. See the robot-ssh
+skill. (The durable fix is to disable the autostart on the Jetson, not yet done.)
+
+Battery read **9.8 V** under bringup this session (below the 10.0 V floor);
+operator is charging. Not the lidar's cause — see above.
 
 **RESOLVED 2026-08-12 by removal — the IMU rotation no longer blocks Phase 3.**
 `imu_link` is rotated 180°/0°/−90° (RPY) from `base_link`, so the 6 raw IMU
@@ -242,6 +298,9 @@ Settled, do not re-open:
 
 ### Next session, in order
 
+0. **Robot preflight:** battery ≥ 10 V; re-copy the DDS profile to `/tmp`; after
+   bringup, run `sudo fuser -v /dev/ttyUSB1` and kill `rosmaster_main.py` if it
+   holds the port (the standing trap above), then confirm `/voltage` is non-zero.
 1. **Lidar hardware check** (above). Everything below except 5 depends on it.
 2. Relaunch: bringup, then lidar **with `frame_id:=laser_link`** — the launch
    file defaults to `laser`, which is not in the TF tree and makes every scan
@@ -265,6 +324,17 @@ Settled, do not re-open:
 7. Teleop baseline bag — **operator only, never an agent**.
 8. ~~Resolve the IMU rotation before touching Phase 3.~~ Closed 2026-08-12 by
    removing the IMU from the observation (interface 2.0.0). Nothing to do.
+
+**Phase 2 (safety layer) — code done, validation blocked.** `rm_interfaces`,
+`rm_safety/safety_logic.py` (81 unit tests pass) and `rm_safety/safety_node.py`
+are written and reviewed. Not yet done, in order: (a) `rm_bringup` launch file
+for `safety_node` with params from `config/safety_limits.yaml` (never written —
+node is runnable via its entry point but has no launch); (b) replay tests against
+the Phase 1 baseline bag — **blocked** until task 4/5 produce a bag; (c) the
+hardware safety checklist (BUILD-PLAN Phase 2 §Testing item 3) — operator + kill
+switch in hand, wheels off the ground first, **never an agent**; (d) sign-off in
+`docs/safety_validation.md`. Do not `colcon build` on the workstation shell — ROS
+lives in a container here; the node was syntax-checked only.
 
 ### Robot state at session end (2026-08-08)
 

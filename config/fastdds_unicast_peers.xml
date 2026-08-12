@@ -66,16 +66,16 @@
       <useBuiltinTransports>false</useBuiltinTransports>
       <builtin>
         <initialPeersList>
-          <!-- bernard-2 (robot, wlP1p1s0) -->
+          <!-- bernard-2 (robot, WiFi) -->
           <locator>
             <udpv4>
-              <address>192.168.1.154</address>
+              <address>10.0.0.107</address>
             </udpv4>
           </locator>
           <!-- dev workstation (wlan0) -->
           <locator>
             <udpv4>
-              <address>192.168.1.144</address>
+              <address>10.0.0.117</address>
             </udpv4>
           </locator>
           <!-- Loopback: with multicast gone, this is how nodes on the same

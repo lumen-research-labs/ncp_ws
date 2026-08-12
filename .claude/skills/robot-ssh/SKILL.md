@@ -100,11 +100,23 @@ This was the actual root cause, found 2026-08-08.
 
 ```bash
 # Base bringup (Yahboom drivers, runs natively on the host — not in a container)
+# GOTCHA (2026-08-12): a Yahboom factory autostart, rosmaster_main.py, may
+# already hold /dev/myserial (the STM32 base board). If it does, this driver's
+# serial-receive thread crashes ("multiple access on port") and ALL base data
+# — /voltage, /imu/data_raw, /vel_raw — silently reads zero while topics keep
+# publishing. Before/after bringup, check: sudo fuser -v /dev/ttyUSB1 . If a
+# python3 running .../Rosmaster/rosmaster/rosmaster_main.py holds it, kill that
+# PID (not pkill -f — pattern self-match) and relaunch bringup. Recurs each boot.
 ros2 launch yahboomcar_bringup yahboomcar_bringup_X3_launch.py
 
 # Lidar — MUST override the frame_id; the launch file defaults to "laser",
 # which is not in the TF tree and makes every scan untransformable.
-ros2 launch sllidar_ros2 sllidar_a1_launch.py frame_id:=laser_link
+# NOTE (2026-08-12): this install ships NO sllidar_a1_launch.py — use the
+# generic launch. scan_mode:=Standard is required; the generic default
+# 'Sensitivity' is an A2/A3 mode the A1 rejects. (Lidar is a confirmed HW
+# fault — SL_RESULT_OPERATION_TIMEOUT on the non-motor GET_INFO handshake even
+# with the port free — so this will still fail until the hardware is fixed.)
+ros2 launch sllidar_ros2 sllidar_launch.py frame_id:=laser_link scan_mode:=Standard
 
 # Camera — this unit is an Astra Plus, not the Astra Pro the old team documented
 ros2 launch astra_camera astro_pro_plus.launch.xml

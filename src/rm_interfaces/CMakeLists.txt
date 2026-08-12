@@ -10,15 +10,16 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 
-# Message and service definitions are added in Phase 2 (SafetyStatus) and
-# Phase 4 (PolicyStatus). Intentionally empty for now.
-# rosidl_generate_interfaces(${PROJECT_NAME}
-#   "msg/SafetyStatus.msg"
-#   "msg/PolicyStatus.msg"
-#   "srv/Kill.srv"
-#   "srv/Reset.srv"
-#   DEPENDENCIES std_msgs builtin_interfaces
-# )
+# Phase 2: SafetyStatus message.
+# Phase 4 will add msg/PolicyStatus.msg (not yet authored — add it here then).
+#
+# Kill (/safety/kill) and reset (/safety/reset) use std_srvs/srv/Trigger and
+# are NOT defined here — rm_interfaces ships no custom srv. The std_srvs
+# dependency belongs to rm_safety, which calls those services, not here.
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/SafetyStatus.msg"
+  DEPENDENCIES std_msgs builtin_interfaces
+)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

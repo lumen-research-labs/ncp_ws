@@ -22,3 +22,5 @@ __pycache__/
 
 # Claude Code machine-local settings
 .claude/settings.local.json
+# Subagent working memory — local scratch, churns, machine-specific
+.claude/agent-memory/

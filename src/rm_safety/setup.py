@@ -19,7 +19,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            # populated as nodes are written
+            'safety_node = rm_safety.safety_node:main',
         ],
     },
 )

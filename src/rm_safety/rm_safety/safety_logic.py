@@ -1,0 +1,941 @@
+"""
+safety_logic.py — Pure, deterministic safety FSM logic for the rm_safety node.
+
+What it does:
+    Implements all safety decisions as plain functions with no I/O, no ROS
+    imports, no clock reads, and no logging side effects.  The rm_safety ROS
+    node calls ``evaluate()`` once per cycle, passes its current sensor data
+    and state, and acts on the returned ``Decision``.
+
+Subscribes to:  (nothing — this module has no I/O; the node passes values in)
+Publishes:      (nothing — this module has no I/O; the node acts on the return)
+
+Failure mode:
+    Fail-closed everywhere.  Any unexpected input (NaN, inf, zero/negative dt,
+    empty scan arc, malformed limits) produces ZERO velocity output, never a
+    pass-through of the last command.  An unhandled exception inside
+    ``evaluate()`` is caught at the top level and returns a fully-zeroed
+    STOPPED Decision with reason "internal_error" so the caller always gets a
+    safe value.
+
+Constants:
+    All numeric limits are taken from the ``Limits`` dataclass, which the node
+    builds from ``config/safety_limits.yaml`` via ``Limits.from_dict()``.
+    No numeric literals appear in the logic bodies.
+
+State enum values match SafetyStatus.msg constants exactly:
+    OK=0, SLOW=1, STOPPED=2, KILLED=3
+
+Reason vocabulary (returned in Decision.reason and published in SafetyStatus):
+    "killed"          — hard kill switch active
+    "scan_stale"      — /scan not received within scan_timeout_ms, or no valid
+                        returns in the monitored arcs (perception loss)
+    "odom_stale"      — /odom not received within odom_timeout_ms; proprioception
+                        lost; cannot safely apply acceleration limiting
+    "stop_zone"       — lidar stop-zone latched (obstacle < stop_zone_m)
+    "command_timeout" — active command source has not published within
+                        command_timeout_ms
+    "slow_zone"       — obstacle in slow zone; velocity scaled proportionally
+    "ok"              — nominal; all checks pass
+    "internal_error"  — unexpected exception inside evaluate(); always zeroes
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from enum import IntEnum
+from typing import List, Optional, Tuple
+
+# ---------------------------------------------------------------------------
+# State enum — values MUST match rm_interfaces/msg/SafetyStatus.msg
+# ---------------------------------------------------------------------------
+
+class State(IntEnum):
+    """FSM states.  Numeric values are contractually identical to those in
+    ``SafetyStatus.msg``.  Do not renumber."""
+    OK      = 0
+    SLOW    = 1
+    STOPPED = 2
+    KILLED  = 3
+
+
+# ---------------------------------------------------------------------------
+# Limits dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class VelocityLimits:
+    """Per-axis absolute velocity caps (m/s or rad/s)."""
+    max_vx: float
+    max_vy: float
+    max_wz: float
+    policy_vy_expected: float
+    policy_vy_violation_action: str  # "zero_and_warn" is the only defined value
+
+
+@dataclass(frozen=True)
+class AccelerationLimits:
+    """Per-axis acceleration caps (m/s² or rad/s²)."""
+    max_ax: float
+    max_ay: float
+    max_alpha_z: float
+
+
+@dataclass(frozen=True)
+class EstopLimits:
+    """Lidar e-stop zone configuration."""
+    slow_zone_m: float
+    stop_zone_m: float
+    forward_arc_deg: float
+    lateral_arc_deg: float
+    consecutive_scans_to_trigger: int
+    latching: bool
+
+
+@dataclass(frozen=True)
+class TimeoutLimits:
+    """Staleness timeouts (milliseconds)."""
+    command_timeout_ms: float
+    scan_timeout_ms: float
+    odom_timeout_ms: float
+
+
+@dataclass(frozen=True)
+class Limits:
+    """Aggregated safety limits.
+
+    Build via ``Limits.from_dict(yaml_dict)`` rather than instantiating
+    directly, so the field mapping is maintained in one place.
+
+    Parameters
+    ----------
+    velocity:
+        Absolute per-axis velocity caps.
+    acceleration:
+        Per-axis acceleration caps.
+    estop:
+        Lidar e-stop zone geometry and noise filter.
+    timeouts:
+        Staleness detection thresholds.
+    """
+    velocity: VelocityLimits
+    acceleration: AccelerationLimits
+    estop: EstopLimits
+    timeouts: TimeoutLimits
+
+    @staticmethod
+    def from_dict(d: dict) -> "Limits":
+        """Parse the top-level ``safety_limits.yaml`` dictionary.
+
+        Parameters
+        ----------
+        d:
+            Raw dict produced by ``yaml.safe_load`` on ``safety_limits.yaml``.
+
+        Returns
+        -------
+        Limits:
+            Fully populated, frozen dataclass.
+
+        Raises
+        ------
+        KeyError:
+            If any expected key is absent — the caller should treat this as a
+            fatal configuration error.
+        """
+        v = d["velocity_limits"]
+        a = d["acceleration_limits"]
+        e = d["estop"]
+        t = d["timeouts"]
+
+        return Limits(
+            velocity=VelocityLimits(
+                max_vx=float(v["max_vx"]),
+                max_vy=float(v["max_vy"]),
+                max_wz=float(v["max_wz"]),
+                policy_vy_expected=float(v["policy_vy_expected"]),
+                policy_vy_violation_action=str(v["policy_vy_violation_action"]),
+            ),
+            acceleration=AccelerationLimits(
+                max_ax=float(a["max_ax"]),
+                max_ay=float(a["max_ay"]),
+                max_alpha_z=float(a["max_alpha_z"]),
+            ),
+            estop=EstopLimits(
+                slow_zone_m=float(e["slow_zone_m"]),
+                stop_zone_m=float(e["stop_zone_m"]),
+                forward_arc_deg=float(e["forward_arc_deg"]),
+                lateral_arc_deg=float(e["lateral_arc_deg"]),
+                consecutive_scans_to_trigger=int(e["consecutive_scans_to_trigger"]),
+                latching=bool(e["latching"]),
+            ),
+            timeouts=TimeoutLimits(
+                command_timeout_ms=float(t["command_timeout_ms"]),
+                scan_timeout_ms=float(t["scan_timeout_ms"]),
+                odom_timeout_ms=float(t["odom_timeout_ms"]),
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Inputs / Decision containers
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EvalInputs:
+    """All inputs needed by ``evaluate()`` for one cycle.
+
+    Ages are computed by the node (``now - last_stamp``), so this module stays
+    clockless.
+
+    Parameters
+    ----------
+    cmd_vx, cmd_vy, cmd_wz:
+        Commanded velocity from the active source (policy or teleop).
+    is_policy_source:
+        True when the active command comes from ``/policy/cmd_vel``.  Governs
+        whether ``policy_vy_check`` is applied.
+    command_age_ms:
+        Milliseconds since the last command was received.
+    last_vx, last_vy, last_wz:
+        The last velocity actually published by the safety node (used for
+        acceleration limiting).
+    dt:
+        Elapsed time in seconds since the last publish cycle.
+    scan_ranges:
+        Full lidar range array (metres, may contain NaN/inf for invalid rays).
+    scan_angle_min:
+        Angle of the first element of ``scan_ranges`` (radians).
+    scan_angle_increment:
+        Angular step between consecutive elements (radians, must be > 0).
+    scan_range_min:
+        Sensor minimum valid range (metres, from LaserScan header).
+    scan_range_max:
+        Sensor maximum valid range (metres, from LaserScan header).
+    scan_age_ms:
+        Milliseconds since the last ``/scan`` message was received.
+    is_killed:
+        True when the hard kill switch is active.
+    estop_latched:
+        True when the node is already latched in stop-zone state.
+    consecutive_stop_count:
+        How many consecutive scans have been in the stop zone (for the noise
+        filter).  The node holds this; evaluate returns the updated value.
+    reset_latch:
+        True when the node has received a ``/safety/reset`` call this cycle.
+    """
+    # Command
+    cmd_vx: float
+    cmd_vy: float
+    cmd_wz: float
+    is_policy_source: bool
+    command_age_ms: float
+    # Acceleration context
+    last_vx: float
+    last_vy: float
+    last_wz: float
+    dt: float
+    # Lidar
+    scan_ranges: List[float]
+    scan_angle_min: float
+    scan_angle_increment: float
+    scan_range_min: float
+    scan_range_max: float
+    scan_age_ms: float
+    # FSM state
+    is_killed: bool
+    estop_latched: bool
+    consecutive_stop_count: int
+    reset_latch: bool
+    # Odometry staleness — set by the node when /odom has not arrived within
+    # timeouts.odom_timeout_ms.  odom never received → age is inf → stale=True,
+    # which is the correct fail-closed behaviour.  When True, evaluate() returns
+    # a zeroed STOPPED decision with reason="odom_stale" at precedence 2.5
+    # (after scan-stale, before stop-zone/command-stale).
+    odom_stale: bool = False
+
+
+@dataclass
+class Decision:
+    """Output of ``evaluate()`` for one cycle.
+
+    The node publishes ``out_vx/out_vy/out_wz`` to ``/cmd_vel``, updates its
+    internal ``estop_latched`` and ``consecutive_stop_count`` from the returned
+    values, and builds a ``SafetyStatus`` from the remaining fields.
+
+    Parameters
+    ----------
+    state:
+        Current FSM state (see ``State`` enum).
+    reason:
+        String matching the SafetyStatus reason vocabulary.
+    out_vx, out_vy, out_wz:
+        Velocity to publish.  Zero on any non-OK/non-SLOW state.
+    clamping_active:
+        True if any axis was clamped or altered from the raw command.
+    min_range:
+        Minimum lidar range seen in monitored arcs this cycle (metres).
+        ``math.inf`` when no valid scan is available.
+    estop_latched:
+        Updated latch state for the node to store for next cycle.
+    consecutive_stop_count:
+        Updated consecutive-stop counter for the node to store for next cycle.
+    """
+    state: State
+    reason: str
+    out_vx: float
+    out_vy: float
+    out_wz: float
+    clamping_active: bool
+    min_range: float
+    estop_latched: bool
+    consecutive_stop_count: int
+
+
+# ---------------------------------------------------------------------------
+# 1. Velocity clamping
+# ---------------------------------------------------------------------------
+
+def clamp_velocity(
+    cmd_vx: float,
+    cmd_vy: float,
+    cmd_wz: float,
+    limits: Limits,
+) -> Tuple[float, float, float, bool]:
+    """Clamp each velocity axis to its absolute limit.
+
+    Fail-closed: NaN or infinite values on any axis are replaced with 0.0 and
+    the clamped flag is raised.
+
+    Parameters
+    ----------
+    cmd_vx, cmd_vy, cmd_wz:
+        Commanded velocity (m/s, m/s, rad/s).
+    limits:
+        Loaded safety limits.
+
+    Returns
+    -------
+    (vx, vy, wz, clamped):
+        Clamped velocities and a flag indicating whether any axis was altered.
+    """
+    clamped = False
+
+    def _clamp_axis(val: float, max_abs: float) -> Tuple[float, bool]:
+        if not math.isfinite(val):
+            return 0.0, True
+        if abs(val) > max_abs:
+            return math.copysign(max_abs, val), True
+        return val, False
+
+    vx, c0 = _clamp_axis(cmd_vx, limits.velocity.max_vx)
+    vy, c1 = _clamp_axis(cmd_vy, limits.velocity.max_vy)
+    wz, c2 = _clamp_axis(cmd_wz, limits.velocity.max_wz)
+    clamped = c0 or c1 or c2
+
+    return vx, vy, wz, clamped
+
+
+# ---------------------------------------------------------------------------
+# 2. Acceleration limiting
+# ---------------------------------------------------------------------------
+
+def apply_accel_limit(
+    target_vx: float,
+    target_vy: float,
+    target_wz: float,
+    last_vx: float,
+    last_vy: float,
+    last_wz: float,
+    dt: float,
+    limits: Limits,
+) -> Tuple[float, float, float, bool]:
+    """Limit the per-axis velocity change to max_a * dt.
+
+    Fail-closed on bad dt: when dt <= 0, dt is NaN, or dt is infinite the
+    function returns ZEROS (not the last command) with limited=True.  Returning
+    the last command on a bad dt would silently perpetuate stale motion, which
+    violates the fail-closed principle.  The caller must always check the
+    returned limited flag and handle the zero case.
+
+    Parameters
+    ----------
+    target_vx, target_vy, target_wz:
+        Desired velocity after velocity clamping.
+    last_vx, last_vy, last_wz:
+        Velocity published in the previous cycle.
+    dt:
+        Elapsed seconds since the previous publish.
+    limits:
+        Loaded safety limits.
+
+    Returns
+    -------
+    (vx, vy, wz, limited):
+        Acceleration-limited velocities and a flag indicating whether any axis
+        was limited.  Returns (0,0,0,True) if dt is bad.
+    """
+    if not math.isfinite(dt) or dt <= 0.0:
+        return 0.0, 0.0, 0.0, True
+
+    limited = False
+
+    def _limit_axis(target: float, last: float, max_a: float) -> Tuple[float, bool]:
+        max_delta = max_a * dt
+        delta = target - last
+        if abs(delta) > max_delta:
+            return last + math.copysign(max_delta, delta), True
+        return target, False
+
+    vx, l0 = _limit_axis(target_vx, last_vx, limits.acceleration.max_ax)
+    vy, l1 = _limit_axis(target_vy, last_vy, limits.acceleration.max_ay)
+    wz, l2 = _limit_axis(target_wz, last_wz, limits.acceleration.max_alpha_z)
+    limited = l0 or l1 or l2
+
+    return vx, vy, wz, limited
+
+
+# ---------------------------------------------------------------------------
+# 3. Policy vy check
+# ---------------------------------------------------------------------------
+
+# Floating-point representation tolerance: values whose absolute distance from
+# the expected vy (0.0) is smaller than this are indistinguishable from zero
+# at IEEE-754 double precision and are treated as such.  This is NOT a tunable
+# safety threshold — it is not in safety_limits.yaml because its value is
+# determined by floating-point arithmetic, not by robot geometry or risk.
+# Raising it would silently accept real lateral commands as noise; lowering it
+# below ~1e-15 is meaningless (sub-epsilon from 0.0).
+_POLICY_VY_EPSILON: float = 1e-6
+
+
+def policy_vy_check(
+    cmd_vy: float,
+    limits: Limits,
+) -> Tuple[float, bool]:
+    """Detect and correct an unexpected lateral velocity on the POLICY source.
+
+    This function applies ONLY to commands arriving on ``/policy/cmd_vel``.
+    The policy action space is 2-dim ``[vx, wz]`` since interface 2.0.0; a
+    non-zero ``linear.y`` there is a bug (e.g. a stale 3-dim model), not a
+    command, and must be surfaced rather than silently clamped.
+
+    For the TELEOP source, lateral velocity is legitimate (the operator may
+    strafe).  Do NOT call this function on teleop commands — apply
+    ``clamp_velocity`` instead, which handles vy normally.
+
+    Parameters
+    ----------
+    cmd_vy:
+        The ``linear.y`` component from ``/policy/cmd_vel``.
+    limits:
+        Loaded safety limits (``policy_vy_expected`` and
+        ``policy_vy_violation_action`` are read here).
+
+    Returns
+    -------
+    (corrected_vy, violated):
+        ``corrected_vy`` is 0.0 when a violation is detected (or when
+        ``cmd_vy`` is NaN/inf — fail-closed).
+        ``violated`` is True when the input exceeded the epsilon threshold.
+        The caller (the ROS node) is responsible for emitting the warning log.
+    """
+    if not math.isfinite(cmd_vy):
+        return 0.0, True
+    if abs(cmd_vy - limits.velocity.policy_vy_expected) > _POLICY_VY_EPSILON:
+        return 0.0, True
+    return cmd_vy, False
+
+
+# ---------------------------------------------------------------------------
+# 4. Lidar arc extraction
+# ---------------------------------------------------------------------------
+
+def min_range_in_arcs(
+    ranges: List[float],
+    angle_min: float,
+    angle_increment: float,
+    limits: Limits,
+) -> float:
+    """Compute the minimum valid range within the monitored forward and lateral arcs.
+
+    The lidar is a 360° RPLidar A1 mounted on the robot.  This function
+    selects only the arcs we monitor:
+
+    * Forward arc: ``forward_arc_deg / 2`` centred on 0 rad (the robot's +x
+      axis), i.e. ``[-half_fwd, +half_fwd]``.
+    * Lateral arcs: ``lateral_arc_deg`` centred at ``+90°`` and ``-90°``
+      (pure left and right).  Each arc spans ``lateral_arc_deg / 2`` to each
+      side of its centre.
+
+    The rear hemisphere is chassis-occluded and NOT monitored.
+
+    Invalid returns (NaN, inf, <= 0, outside ``[range_min, range_max]``) are
+    skipped.  If NO valid returns exist in the monitored arcs, ``+inf`` is
+    returned.  The caller (``evaluate``) MUST treat a no-valid-returns result
+    as an e-stop condition (fail-closed — zero valid returns means no
+    perception, not "obstacle-free").
+
+    Note on angle normalisation: angles are normalised to ``(-pi, pi]`` before
+    comparison so that the function is robust to sensors whose ``angle_min`` is
+    not exactly ``-pi``.
+
+    Parameters
+    ----------
+    ranges:
+        Full range array from the LaserScan message.
+    angle_min:
+        Angle of the first element (radians).
+    angle_increment:
+        Angular step between consecutive elements (radians, must be > 0).
+    limits:
+        Loaded safety limits (``estop`` group used here).
+
+    Returns
+    -------
+    float:
+        Minimum range (metres) in the monitored arcs, or ``math.inf`` if no
+        valid returns are found.
+    """
+    if not ranges or angle_increment <= 0.0 or not math.isfinite(angle_increment):
+        return math.inf
+
+    half_fwd = math.radians(limits.estop.forward_arc_deg / 2.0)
+    half_lat = math.radians(limits.estop.lateral_arc_deg / 2.0)
+
+    # Lateral arc centres at ±90°
+    lat_centre_left  = math.pi / 2.0
+    lat_centre_right = -math.pi / 2.0
+
+    range_min = 0.0   # anything <= 0 is invalid regardless of sensor spec
+    # range_max taken from LaserScan; passed in via scan_range_max in EvalInputs
+    # but this function does not have access to it — it trusts the caller to
+    # pass only physically meaningful ranges.  See NOTE below.
+    #
+    # NOTE: ``range_max`` filtering is done in ``evaluate()`` before calling
+    # this function.  Here we only reject values <= 0 and non-finite values
+    # to avoid duplicating the sensor spec across two call sites.
+
+    min_r = math.inf
+
+    for i, r in enumerate(ranges):
+        if not math.isfinite(r) or r <= range_min:
+            continue
+
+        angle_raw = angle_min + i * angle_increment
+        # Normalise to (-pi, pi]
+        angle = (angle_raw + math.pi) % (2 * math.pi) - math.pi
+
+        in_forward = abs(angle) <= half_fwd
+        in_left    = abs(angle - lat_centre_left)  <= half_lat
+        in_right   = abs(angle - lat_centre_right) <= half_lat
+
+        if in_forward or in_left or in_right:
+            if r < min_r:
+                min_r = r
+
+    return min_r
+
+
+def estop_zone(
+    min_range: float,
+    limits: Limits,
+) -> str:
+    """Map a minimum range value to an e-stop zone label.
+
+    Boundary inclusivity (documented and tested):
+    - ``min_range < stop_zone_m``  → ``"stop"``   (strictly less than)
+    - ``min_range < slow_zone_m``  → ``"slow"``   (strictly less than)
+    - Otherwise                    → ``"clear"``
+
+    A range exactly equal to the stop boundary is therefore "slow", not
+    "stop".  This is deliberately conservative — the transition to stop
+    happens the moment a value drops *below* the boundary.  The slow-to-clear
+    boundary works the same way.
+
+    ``math.inf`` → ``"clear"`` (no valid returns; evaluate handles the
+    "no perception" case separately — see the ``min_range_in_arcs`` docstring).
+
+    Parameters
+    ----------
+    min_range:
+        Minimum range returned by ``min_range_in_arcs`` (metres).
+    limits:
+        Loaded safety limits.
+
+    Returns
+    -------
+    str:
+        One of ``"clear"``, ``"slow"``, ``"stop"``.
+    """
+    if min_range < limits.estop.stop_zone_m:
+        return "stop"
+    if min_range < limits.estop.slow_zone_m:
+        return "slow"
+    return "clear"
+
+
+# ---------------------------------------------------------------------------
+# 5. Consecutive-scan noise filter
+# ---------------------------------------------------------------------------
+
+def update_stop_counter(
+    prev_count: int,
+    zone_is_stop: bool,
+    limits: Limits,
+) -> int:
+    """Maintain the consecutive-stop-scan counter.
+
+    Increments when the current zone is "stop"; resets to 0 otherwise.  The
+    latch logic in ``evaluate()`` checks ``new_count >=
+    consecutive_scans_to_trigger``.
+
+    A single bad scan never reaches the trigger threshold by itself (assuming
+    ``consecutive_scans_to_trigger >= 2``), which prevents single noisy returns
+    from latching a stop.
+
+    Parameters
+    ----------
+    prev_count:
+        Counter value from the previous cycle (held by the node).
+    zone_is_stop:
+        Whether the current scan's zone is "stop".
+    limits:
+        Loaded safety limits.
+
+    Returns
+    -------
+    int:
+        Updated counter.
+    """
+    if zone_is_stop:
+        return prev_count + 1
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# 6. Slow-zone velocity scaling
+# ---------------------------------------------------------------------------
+
+def slow_scale(
+    min_range: float,
+    limits: Limits,
+) -> float:
+    """Proportional velocity scale factor for the slow zone.
+
+    Ramp definition:
+    - At ``slow_zone_m`` and beyond → 1.0 (full speed, no reduction).
+    - Approaching ``stop_zone_m`` → ramps linearly toward 0.0.
+    - At ``stop_zone_m`` → 0.0.
+    - Below ``stop_zone_m`` → 0.0 (clamped; evaluate will have chosen STOPPED
+      before this value is used, but defensive anyway).
+
+    The scale is linear in the range ``[stop_zone_m, slow_zone_m]``.
+
+    Parameters
+    ----------
+    min_range:
+        Minimum range (metres) in the monitored arcs.
+    limits:
+        Loaded safety limits.
+
+    Returns
+    -------
+    float:
+        Scale factor in ``[0.0, 1.0]``.
+    """
+    span = limits.estop.slow_zone_m - limits.estop.stop_zone_m
+    if span <= 0.0:
+        # Degenerate config: treat as fully stopped.
+        return 0.0
+    if min_range >= limits.estop.slow_zone_m:
+        return 1.0
+    if min_range <= limits.estop.stop_zone_m:
+        return 0.0
+    return (min_range - limits.estop.stop_zone_m) / span
+
+
+# ---------------------------------------------------------------------------
+# 7. Top-level evaluate
+# ---------------------------------------------------------------------------
+
+def _zero_decision(
+    reason: str,
+    state: State,
+    min_range: float,
+    estop_latched: bool,
+    consecutive_stop_count: int,
+) -> Decision:
+    """Return a fully-zeroed Decision with the given state and reason."""
+    return Decision(
+        state=state,
+        reason=reason,
+        out_vx=0.0,
+        out_vy=0.0,
+        out_wz=0.0,
+        clamping_active=False,
+        min_range=min_range,
+        estop_latched=estop_latched,
+        consecutive_stop_count=consecutive_stop_count,
+    )
+
+
+def evaluate(inputs: EvalInputs, limits: Limits) -> Decision:
+    """Top-level safety evaluation for one cycle.
+
+    Precedence (highest wins, lower levels not reached once a higher one fires):
+
+    1. KILLED        — hard kill active; output zero regardless of all else.
+    2. SCAN STALE    — scan_age_ms > scan_timeout_ms, or no valid returns in
+                       arcs (loss of perception); output zero, state STOPPED,
+                       reason "scan_stale".
+    2.5. ODOM STALE  — inputs.odom_stale is True (node computed from odom age
+                       vs odom_timeout_ms); proprioception lost; output zero,
+                       state STOPPED, reason "odom_stale".  Placed here because
+                       it is a perception/proprioception-loss condition that must
+                       precede command and zone checks.  latch/counter passed
+                       through unchanged (same as scan_stale branch).
+    3. STOP ZONE     — either the estop is already latched (and reset_latch is
+                       False), or the consecutive counter reaches the trigger
+                       threshold this cycle.  Latch is set; output zero, state
+                       STOPPED.
+    4. COMMAND STALE — command_age_ms > command_timeout_ms; output zero,
+                       state STOPPED.
+    5. SLOW ZONE     — obstacle in slow zone: scale velocity, state SLOW.
+    6. NOMINAL       — velocity clamping + acceleration limiting; state OK.
+
+    Fail-closed: any unhandled exception inside this function is caught and
+    returns a zeroed STOPPED Decision with reason "internal_error".
+
+    Parameters
+    ----------
+    inputs:
+        All sensor readings, ages, and prior FSM state for this cycle.
+    limits:
+        Loaded safety limits.
+
+    Returns
+    -------
+    Decision:
+        Safe velocity to publish and updated FSM state for next cycle.
+    """
+    try:
+        return _evaluate_inner(inputs, limits)
+    except Exception:
+        # Catch-all: any programming error → fail closed.
+        return _zero_decision(
+            reason="internal_error",
+            state=State.STOPPED,
+            min_range=math.inf,
+            estop_latched=inputs.estop_latched,
+            consecutive_stop_count=inputs.consecutive_stop_count,
+        )
+
+
+def _evaluate_inner(inputs: EvalInputs, limits: Limits) -> Decision:
+    """Inner implementation of evaluate — exceptions propagate to evaluate()."""
+
+    # ------------------------------------------------------------------
+    # Precedence 1: KILLED
+    # ------------------------------------------------------------------
+    if inputs.is_killed:
+        return _zero_decision(
+            reason="killed",
+            state=State.KILLED,
+            min_range=math.inf,
+            estop_latched=inputs.estop_latched,
+            consecutive_stop_count=inputs.consecutive_stop_count,
+        )
+
+    # ------------------------------------------------------------------
+    # Lidar processing — done early so subsequent levels can use min_range
+    # and counter regardless of which branch wins.
+    # ------------------------------------------------------------------
+
+    # Filter ranges by sensor spec (range_min / range_max from LaserScan).
+    # Produce a cleaned list for min_range_in_arcs (NaN/inf/out-of-spec → inf).
+    def _sensor_valid(r: float) -> bool:
+        return (
+            math.isfinite(r)
+            and r > inputs.scan_range_min
+            and r <= inputs.scan_range_max
+        )
+
+    cleaned_ranges: List[float] = [
+        r if _sensor_valid(r) else math.inf
+        for r in inputs.scan_ranges
+    ]
+
+    min_r = min_range_in_arcs(
+        cleaned_ranges,
+        inputs.scan_angle_min,
+        inputs.scan_angle_increment,
+        limits,
+    )
+
+    # ------------------------------------------------------------------
+    # Precedence 2: SCAN STALE or NO VALID PERCEPTION
+    # ------------------------------------------------------------------
+    scan_stale = inputs.scan_age_ms > limits.timeouts.scan_timeout_ms
+    # No valid returns anywhere in the monitored arcs (inf) means loss of
+    # perception — whether the list is empty, all-NaN, all-out-of-range, or
+    # all-behind-the-robot.  Treat as an e-stop condition.  Fail-closed.
+    no_perception = (min_r == math.inf)
+
+    if scan_stale or no_perception:
+        return _zero_decision(
+            reason="scan_stale",
+            state=State.STOPPED,
+            min_range=min_r,
+            estop_latched=inputs.estop_latched,
+            consecutive_stop_count=inputs.consecutive_stop_count,
+        )
+
+    # ------------------------------------------------------------------
+    # Precedence 2.5: ODOM STALE
+    # Proprioception loss — /odom has not arrived within odom_timeout_ms.
+    # This is a first-class stop condition with its own reason string so that
+    # Phase 5 diagnostics can distinguish "odom dropped" from "command timed
+    # out".  The node computes odom_stale from the actual odom arrival time and
+    # passes it here; we do not see clocks directly (this module is clockless).
+    # Latch and counter are passed through unchanged, matching the scan_stale
+    # branch — we do not want to disturb the lidar noise filter state.
+    # ------------------------------------------------------------------
+    if inputs.odom_stale:
+        return _zero_decision(
+            reason="odom_stale",
+            state=State.STOPPED,
+            min_range=min_r,
+            estop_latched=inputs.estop_latched,
+            consecutive_stop_count=inputs.consecutive_stop_count,
+        )
+
+    # ------------------------------------------------------------------
+    # Consecutive-scan noise filter and latch management
+    # ------------------------------------------------------------------
+    zone = estop_zone(min_r, limits)
+    is_stop_zone = (zone == "stop")
+
+    new_count = update_stop_counter(
+        inputs.consecutive_stop_count, is_stop_zone, limits
+    )
+
+    # Apply reset before evaluating latch.
+    if inputs.reset_latch:
+        if is_stop_zone:
+            # Operator called /safety/reset but the obstacle is still in the
+            # stop zone.  Re-latch immediately so the reset cycle itself
+            # outputs zero velocity — the robot must not move with a foot in
+            # the stop zone.  Reset only re-arms when the path is genuinely
+            # clear.
+            new_latched = True
+            new_count   = limits.estop.consecutive_scans_to_trigger
+        else:
+            new_latched = False
+            new_count   = 0
+    else:
+        triggered_this_cycle = (
+            is_stop_zone
+            and new_count >= limits.estop.consecutive_scans_to_trigger
+        )
+        new_latched = inputs.estop_latched or triggered_this_cycle
+
+    # ------------------------------------------------------------------
+    # Precedence 3: STOP ZONE (latched)
+    # ------------------------------------------------------------------
+    if new_latched:
+        return Decision(
+            state=State.STOPPED,
+            reason="stop_zone",
+            out_vx=0.0,
+            out_vy=0.0,
+            out_wz=0.0,
+            clamping_active=False,
+            min_range=min_r,
+            estop_latched=True,
+            consecutive_stop_count=new_count,
+        )
+
+    # ------------------------------------------------------------------
+    # Precedence 4: COMMAND STALE
+    # ------------------------------------------------------------------
+    if inputs.command_age_ms > limits.timeouts.command_timeout_ms:
+        return Decision(
+            state=State.STOPPED,
+            reason="command_timeout",
+            out_vx=0.0,
+            out_vy=0.0,
+            out_wz=0.0,
+            clamping_active=False,
+            min_range=min_r,
+            estop_latched=new_latched,
+            consecutive_stop_count=new_count,
+        )
+
+    # ------------------------------------------------------------------
+    # Velocity pipeline (levels 5 and 6)
+    # ------------------------------------------------------------------
+    clamping_active = False
+
+    # Policy vy check (before clamping so the violation is always surfaced).
+    raw_vy = inputs.cmd_vy
+    if inputs.is_policy_source:
+        raw_vy, vy_violated = policy_vy_check(inputs.cmd_vy, limits)
+        if vy_violated:
+            clamping_active = True
+    else:
+        vy_violated = False
+
+    # Velocity clamping.
+    vx, vy, wz, vel_clamped = clamp_velocity(
+        inputs.cmd_vx, raw_vy, inputs.cmd_wz, limits
+    )
+    if vel_clamped:
+        clamping_active = True
+
+    # Acceleration limiting.
+    vx, vy, wz, accel_limited = apply_accel_limit(
+        vx, vy, wz,
+        inputs.last_vx, inputs.last_vy, inputs.last_wz,
+        inputs.dt,
+        limits,
+    )
+    if accel_limited:
+        # Bad dt → zeros; those zeros are already in vx/vy/wz.
+        clamping_active = True
+
+    # ------------------------------------------------------------------
+    # Precedence 5: SLOW ZONE — scale the clamped+limited velocities.
+    # ------------------------------------------------------------------
+    if zone == "slow":
+        scale = slow_scale(min_r, limits)
+        vx *= scale
+        vy *= scale
+        wz *= scale
+        return Decision(
+            state=State.SLOW,
+            reason="slow_zone",
+            out_vx=vx,
+            out_vy=vy,
+            out_wz=wz,
+            clamping_active=clamping_active,
+            min_range=min_r,
+            estop_latched=new_latched,
+            consecutive_stop_count=new_count,
+        )
+
+    # ------------------------------------------------------------------
+    # Precedence 6: NOMINAL (OK)
+    # ------------------------------------------------------------------
+    return Decision(
+        state=State.OK,
+        reason="ok",
+        out_vx=vx,
+        out_vy=vy,
+        out_wz=wz,
+        clamping_active=clamping_active,
+        min_range=min_r,
+        estop_latched=new_latched,
+        consecutive_stop_count=new_count,
+    )
