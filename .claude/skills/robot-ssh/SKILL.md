@@ -33,10 +33,12 @@ Previous team's calibrated range: 9.0 V (flat) – 11.0 V. 3S pack.
 10.0-11.0  →  usable, but say so in the log; expect dropouts under motor load.
 ```
 
-The lidar's motor is the first thing to brown out, so a flat pack looks exactly
-like a dead lidar. (As of 2026-08-08 the lidar is a *confirmed* hardware fault —
-zero bytes to raw serial with the motor irrelevant — so a good battery will not
-fix it. Don't re-diagnose that one; see CLAUDE.md §4.)
+The lidar's motor is the first thing to brown out, so a flat pack looks like a
+dead lidar. (The lidar is **working** as of 2026-08-12 s3 — it is a YDLIDAR TG30
+that was misdiagnosed as a dead RPLIDAR A1 for three sessions because the wrong
+driver, SLAMTEC `sllidar`, was used against it. It needs `ydlidar_ros2_driver`
+and external motor power via the micro-USB into the powered hub. See the launch
+reference below and CLAUDE.md §3/§4. Do NOT use `sllidar` on this unit.)
 
 ## 1. Every remote command needs the source prelude
 
@@ -109,14 +111,19 @@ This was the actual root cause, found 2026-08-08.
 # PID (not pkill -f — pattern self-match) and relaunch bringup. Recurs each boot.
 ros2 launch yahboomcar_bringup yahboomcar_bringup_X3_launch.py
 
-# Lidar — MUST override the frame_id; the launch file defaults to "laser",
-# which is not in the TF tree and makes every scan untransformable.
-# NOTE (2026-08-12): this install ships NO sllidar_a1_launch.py — use the
-# generic launch. scan_mode:=Standard is required; the generic default
-# 'Sensitivity' is an A2/A3 mode the A1 rejects. (Lidar is a confirmed HW
-# fault — SL_RESULT_OPERATION_TIMEOUT on the non-motor GET_INFO handshake even
-# with the port free — so this will still fail until the hardware is fixed.)
-ros2 launch sllidar_ros2 sllidar_launch.py frame_id:=laser_link scan_mode:=Standard
+# Lidar — the unit is a YDLIDAR TG30, NOT an RPLIDAR. Use ydlidar_ros2_driver,
+# never sllidar (SLAMTEC's protocol times out on a YDLidar — that was the
+# three-session "hardware fault" red herring, resolved 2026-08-12 s3). Needs
+# external motor power via the adapter's micro-USB into the powered USB hub
+# (USB-C = data to the Jetson). MUST set frame_id:=laser_link (default "laser"
+# is not in the TF tree). Working plain-node launch (matches Yahboom's "4ROS"
+# config, yahboomcar_multi/launch/4ROS_multi.launch.xml):
+ros2 run ydlidar_ros2_driver ydlidar_ros2_driver_node --ros-args \
+  -p port:=/dev/rplidar -p baudrate:=512000 -p lidar_type:=0 -p device_type:=0 \
+  -p sample_rate:=20 -p isSingleChannel:=false -p support_motor_dtr:=true \
+  -p reversion:=true -p inverted:=true -p range_max:=64.0 -p range_min:=0.01 \
+  -p frequency:=10.0 -p frame_id:=laser_link
+# Yields /scan (sensor_msgs/LaserScan) at ~10.17 Hz, 360°, 2020 pts, 0.01-64 m.
 
 # Camera — this unit is an Astra Plus, not the Astra Pro the old team documented
 ros2 launch astra_camera astro_pro_plus.launch.xml

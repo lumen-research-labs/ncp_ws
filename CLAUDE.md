@@ -232,26 +232,58 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   command_timeout → slow_zone → ok. Remaining Phase 2 (replay + hardware tests,
   safety_validation.md sign-off) is BLOCKED on the lidar/baseline bag.
 
+- 2026-08-12 (session 3): **THE LIDAR WORKS — the "hardware fault" was a
+  three-session misdiagnosis.** The unit is a **YDLIDAR TG30** (TOF; serial
+  2025092500100084), NOT an RPLIDAR A1. It was being driven the whole time by
+  SLAMTEC's `sllidar_ros2`, whose protocol a YDLidar cannot answer — so every
+  `GET_INFO`/`GET_HEALTH` returned `SL_RESULT_OPERATION_TIMEOUT`. The port always
+  opened (generic CP2102 USB-UART, VID:PID `10c4:ea60` — the same chip RPLIDAR
+  uses, which is why both `rplidar.rules` and `ydlidar.rules` symlink it and the
+  A1 label stuck). Two things had to change together: (1) **driver** —
+  `ydlidar_ros2_driver` (SDK + driver already installed on the robot) at
+  **baudrate 512000**, `lidar_type:=0` (TOF), `isSingleChannel:=false`,
+  `support_motor_dtr:=true`; (2) **power** — the TG30 needs external motor power
+  the A1 never did; the operator plugged the adapter's **micro-USB (power-only)
+  into the powered USB hub** while USB-C stays the data link to the Jetson. Yahboom
+  calls this the **"4ROS"** lidar variant; ground-truth config is in
+  `yahboomcar_ws/.../yahboomcar_multi/launch/4ROS_multi.launch.xml`. Result:
+  `/scan` (`sensor_msgs/LaserScan`) at a **rock-steady 10.17 Hz** (std dev ~1.5 ms),
+  360° (−π..π), **2020 pts/scan**, range 0.01–64 m, `frame_id:=laser_link` (our
+  override; the launch default `laser` is not in the TF tree). Battery 10.6 V,
+  base board healthy. **This unblocks Phase 1 tasks 3/4/5 and Phase 2 validation.**
+  Working launch (plain node, matches the 4ROS xml):
+  `ros2 run ydlidar_ros2_driver ydlidar_ros2_driver_node --ros-args -p port:=/dev/rplidar
+  -p baudrate:=512000 -p lidar_type:=0 -p device_type:=0 -p sample_rate:=20
+  -p isSingleChannel:=false -p support_motor_dtr:=true -p reversion:=true
+  -p inverted:=true -p range_max:=64.0 -p range_min:=0.01 -p frequency:=10.0
+  -p frame_id:=laser_link`.
+
 
 ## 4. Current Goal
 
-Phase 1 is **substantially complete except the lidar**. Tasks 1 (SSH + DDS,
-now re-verified on the new network), 3 (partial), 4 (rates) done; tasks 3
-(lidar), 4 (`/scan` rate), 5 (baseline bag) blocked. **Phase 2 code is written
-and reviewed** (see below); its replay + hardware validation is blocked on the
-same lidar/baseline-bag gap.
+Phase 1 is **substantially complete and the lidar is now UNBLOCKED.** Tasks 1
+(SSH + DDS, re-verified on the new network), 3 (lidar — now working), 4 (rates,
+incl. `/scan` at 10.17 Hz) done; task 5 (baseline bag) still to record but no
+longer blocked. **Phase 2 code is written and reviewed** (see §3); its replay +
+hardware validation is now unblocked too (needs the baseline bag recorded).
 
-**BLOCKER — the lidar is a hardware fault.** Re-confirmed 2026-08-12 (session 2)
-and now stronger than before: with `/dev/ttyUSB0` (`/dev/rplidar`) **free** and
-the Yahboom autostart app **dead**, the `sllidar_ros2` driver opened the port
-(SDK banner printed) then failed the `GET_INFO`/`GET_HEALTH` handshake with
-`SL_RESULT_OPERATION_TIMEOUT`. That handshake does not spin the motor, so this
-is not the 9.8 V battery, and the port was uncontended, so it is not the serial
-contention found this session either. Consistent with the 2026-08-08 raw-serial
-"zero bytes" result. The fault is between the adapter board and the lidar.
-Operator to check, in order: (1) does it physically spin? (2) the JST connector
-between lidar and adapter board, (3) try a different USB port to rule out the
-adapter itself. Do **not** re-diagnose in software — that ground is covered.
+**RESOLVED 2026-08-12 (session 3) — the lidar was never a hardware fault; it is a
+YDLIDAR TG30 driven by the wrong driver.** Full detail in §3. Summary: it needs
+`ydlidar_ros2_driver` at **baudrate 512000** (`lidar_type:=0`, TOF, non-single-
+channel, `support_motor_dtr:=true`) PLUS **external motor power** via the adapter's
+micro-USB into the powered USB hub (USB-C = data to Jetson). Every prior session
+used SLAMTEC's `sllidar_ros2`, which a YDLidar cannot answer — hence the
+`SL_RESULT_OPERATION_TIMEOUT` that looked like dead hardware. `/scan` now streams
+at 10.17 Hz, 360°, 2020 pts, `frame_id:=laser_link`. The device is a generic
+CP2102 (`10c4:ea60`), so `/dev/rplidar` and `/dev/ydlidar` both symlink it — the
+name means nothing; only the physical label (YDLidar) and the working driver do.
+**Do not reintroduce `sllidar` for this unit.** Yahboom's name for this variant
+is "4ROS"; ground-truth config is `4ROS_multi.launch.xml` in `yahboomcar_multi`.
+
+Still TODO on the lidar, now that it runs: record the baseline/static bag and a
+single `/scan` fixture (tasks 4/5 below); set `lidar.range_max` and the self-
+occlusion mask in `config/interface.yaml` from a real captured scan (2020 pts,
+0.01–64 m); write the `rm_bringup` lidar launch using the 4ROS params above.
 
 **STANDING TRAP — Yahboom autostart grabs the base-board serial.** A factory
 autostart, `python3 …/Rosmaster/rosmaster/rosmaster_main.py`, holds
@@ -263,8 +295,8 @@ Preflight: `sudo fuser -v /dev/ttyUSB1`; if `rosmaster_main.py` holds it, kill
 that PID (exact PID, not `pkill -f`) and relaunch bringup. See the robot-ssh
 skill. (The durable fix is to disable the autostart on the Jetson, not yet done.)
 
-Battery read **9.8 V** under bringup this session (below the 10.0 V floor);
-operator is charging. Not the lidar's cause — see above.
+Battery **charged — 10.6 V** under bringup at the start of session 3 (above the
+10.0 V floor). Base board healthy after the standing-trap autostart kill.
 
 **RESOLVED 2026-08-12 by removal — the IMU rotation no longer blocks Phase 3.**
 `imu_link` is rotated 180°/0°/−90° (RPY) from `base_link`, so the 6 raw IMU
@@ -282,9 +314,9 @@ rotation first. The `imu_link` entry in `config/interface.yaml` stays for that
 reason; it is not dead config.
 
 Settled, do not re-open:
-- Observation stays **forward-180°, 36 bins** despite the lidar being a 360° A1
-  (operator, 2026-08-07). The robot is therefore blind behind — the safety
-  layer treats reverse as unguarded motion.
+- Observation stays **forward-180°, 36 bins** despite the lidar being 360°
+  (a YDLIDAR TG30, 2020 pts/scan; operator, 2026-08-07). The robot is therefore
+  blind behind — the safety layer treats reverse as unguarded motion.
 - Base velocity is **`/odom`** (EKF, has a header) not `/vel_raw` (bare Twist,
   no timestamp — cannot support honest staleness detection).
 - IMU source, *if one is ever re-added*, is **`/imu/data_raw`**; `/imu/data` is
@@ -301,13 +333,14 @@ Settled, do not re-open:
 0. **Robot preflight:** battery ≥ 10 V; re-copy the DDS profile to `/tmp`; after
    bringup, run `sudo fuser -v /dev/ttyUSB1` and kill `rosmaster_main.py` if it
    holds the port (the standing trap above), then confirm `/voltage` is non-zero.
-1. **Lidar hardware check** (above). Everything below except 5 depends on it.
-2. Relaunch: bringup, then lidar **with `frame_id:=laser_link`** — the launch
-   file defaults to `laser`, which is not in the TF tree and makes every scan
-   untransformable.
-3. Measure `/scan` rate → `docs/deployment.md` §6. **This is the last input to
-   the Phase 3 control-rate decision.** Everything else sensor-side is ~10 Hz,
-   so 10 Hz control would leave zero headroom; 5 Hz is the conservative option.
+1. ~~Lidar hardware check.~~ **DONE 2026-08-12 s3 — not a fault; YDLIDAR TG30,
+   wrong driver. Use `ydlidar_ros2_driver` at baud 512000, see §3.**
+2. ~~Relaunch lidar with `frame_id:=laser_link`.~~ **DONE — `/scan` streams with
+   `frame_id:=laser_link`.** (The `laser` default is still the trap to avoid.)
+3. ~~Measure `/scan` rate.~~ **DONE — 10.17 Hz, std dev ~1.5 ms.** Everything
+   sensor-side is ~10 Hz, so 10 Hz control leaves zero headroom; **5 Hz is the
+   conservative option** and now the standing recommendation for Phase 3. Still
+   to write the rate into `docs/deployment.md` §6.
 4. **Record a short static bag** — all sensor topics, robot stationary, ~60 s,
    no teleop, so an agent can do it unattended. Gives re-analyzable rate/jitter
    data (the current table is summary numbers only — `topic hz` discards its
