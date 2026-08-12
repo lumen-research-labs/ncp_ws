@@ -258,6 +258,23 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   -p inverted:=true -p range_max:=64.0 -p range_min:=0.01 -p frequency:=10.0
   -p frame_id:=laser_link`.
 
+- 2026-08-12 (session 3, cont.): Locked Phase 1 measurements into the contract
+  (commit 94cad3e). **Control rate DECIDED = 5 Hz** (`/scan` 10.17 Hz, all
+  sensors ~10 Hz → 10 Hz has no headroom; 5 Hz = 2:1 margin, matches cpt_b2).
+  Set `interface.yaml` lidar `range_min_m 0.01 / range_max_m 30.0` (TG30 spec
+  reach; the driver's advertised 64.0 is a generic Yahboom default, ignored for
+  normalization) and corrected `sensor: rplidar_a1 → ydlidar_tg30`. **NEW
+  SAFETY-CRITICAL FINDING** from a live scan (`tests/fixtures/tg30_scan_sample.yaml`,
+  28% no-return in a static room): the TG30 encodes **no-return as `0.0`, NOT
+  inf** (`invalid_range_is_inf:=false`). Untreated, 0.0 reads as an obstacle at
+  zero distance, min-pools to 0, and would **latch the e-stop in every bin with
+  a no-return**. The observation builder MUST map `0.0` and any `< range_min` to
+  no-return → range_max, exactly like inf/NaN; preferred belt-and-braces is to
+  also launch the driver with `invalid_range_is_inf:=true`. Documented in the
+  `interface.yaml` preprocessing block. Also captured the first scan as a polar
+  plot (`docs/tg30_first_scan.png`) and the raw message as a fixture. Robot left
+  running (operator was about to power it down manually).
+
 
 ## 4. Current Goal
 
@@ -341,18 +358,17 @@ Settled, do not re-open:
    sensor-side is ~10 Hz, so 10 Hz control leaves zero headroom; **5 Hz is the
    conservative option** and now the standing recommendation for Phase 3. Still
    to write the rate into `docs/deployment.md` §6.
-4. **Record a short static bag** — all sensor topics, robot stationary, ~60 s,
-   no teleop, so an agent can do it unattended. Gives re-analyzable rate/jitter
-   data (the current table is summary numbers only — `topic hz` discards its
-   samples) and an early replay fixture. Trim and commit to `tests/fixtures/`.
-   Also run `ros2 topic delay`, which was never captured; BUILD-PLAN task 4
-   asks for latency as well as rate.
-5. **Capture one raw `/scan` message to a file** and commit it to
-   `tests/fixtures/`. A few KB. This is what the self-occlusion mask must be
-   derived from — the previous team's `[-6,+6]` zone is NOT inheritable (their
-   unit had an Astra Pro; ours is an Astra Plus, and on our measured geometry
-   `camera_link` sits 1.4 cm forward of `laser_link` but 7.2 cm below it, so it
-   may not occlude the scan plane at all).
+4. ~~Record a short static bag.~~ **DONE 2026-08-12 s3** —
+   `tests/fixtures/ncp_static_bag` (60 s, 6125 msgs, all sensor topics, real
+   data). Still TODO: `ros2 topic delay` for latency (BUILD-PLAN task 4 wants it).
+5. ~~Capture one raw `/scan` message.~~ **DONE** —
+   `tests/fixtures/tg30_scan_sample.yaml`. NOTE it was captured in a cluttered
+   room, NOT open space, so it is a poor basis for the self-occlusion mask.
+   **Still needed: one static scan in OPEN space** to derive the mask — the
+   previous team's `[-6,+6]` zone is NOT inheritable (their unit had an Astra
+   Pro; ours is an Astra Plus, and on our measured geometry `camera_link` sits
+   1.4 cm forward of `laser_link` but 7.2 cm below it, so it may not occlude the
+   scan plane at all). Confirm empirically whether the camera occludes at all.
 6. Verify all five sensor streams in RVIZ2 from the workstation, no X11.
 7. Teleop baseline bag — **operator only, never an agent**.
 8. ~~Resolve the IMU rotation before touching Phase 3.~~ Closed 2026-08-12 by
