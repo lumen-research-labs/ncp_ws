@@ -361,14 +361,18 @@ Settled, do not re-open:
 4. ~~Record a short static bag.~~ **DONE 2026-08-12 s3** —
    `tests/fixtures/ncp_static_bag` (60 s, 6125 msgs, all sensor topics, real
    data). Still TODO: `ros2 topic delay` for latency (BUILD-PLAN task 4 wants it).
-5. ~~Capture one raw `/scan` message.~~ **DONE** —
-   `tests/fixtures/tg30_scan_sample.yaml`. NOTE it was captured in a cluttered
-   room, NOT open space, so it is a poor basis for the self-occlusion mask.
-   **Still needed: one static scan in OPEN space** to derive the mask — the
-   previous team's `[-6,+6]` zone is NOT inheritable (their unit had an Astra
-   Pro; ours is an Astra Plus, and on our measured geometry `camera_link` sits
-   1.4 cm forward of `laser_link` but 7.2 cm below it, so it may not occlude the
-   scan plane at all). Confirm empirically whether the camera occludes at all.
+5. ~~Capture one raw `/scan` message.~~ **DONE** — two fixtures:
+   `tg30_scan_sample.yaml` (cluttered room) and `tg30_open_scan.yaml` (open
+   space, the better basis). **PRELIMINARY occlusion finding (open-space scan,
+   1 frame):** ZERO close returns (<0.35 m) anywhere in the forward 180° arc —
+   all 43 near-returns were rear/side. Strong hint that on our unit the camera/
+   body does NOT occlude the forward scan plane (matches geometry: `camera_link`
+   is 7.2 cm BELOW `laser_link`), so the previous team's `[-6,+6]` Astra-Pro zone
+   likely does not apply and the forward arc may need NO mask. **NOT yet
+   final** — confirm with a multi-scan capture (~20 frames) that no forward angle
+   has a *persistent* close return before removing the `self_occlusion_zones_deg`
+   from `interface.yaml`. That multi-scan check is the one remaining robot task
+   for the mask.
 6. Verify all five sensor streams in RVIZ2 from the workstation, no X11.
 7. Teleop baseline bag — **operator only, never an agent**.
 8. ~~Resolve the IMU rotation before touching Phase 3.~~ Closed 2026-08-12 by
