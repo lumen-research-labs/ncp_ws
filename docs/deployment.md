@@ -287,12 +287,13 @@ Phase 1 task 4. These determine the control rate in `config/interface.yaml`;
 they are measured, never guessed.
 
 Reference point: the previous team's engine ran its decision cycle at **5 Hz**
-with a 200 ms latency target. The lidar is an RPLidar A1 (5.5–10 Hz spin). So
-expect the answer to land in 5–10 Hz — but measure it.
+with a 200 ms latency target. **DECIDED 2026-08-12 (s3): control rate = 5 Hz** —
+`/scan` measured at 10.17 Hz and every other sensor is ~10 Hz, so 10 Hz control
+leaves no headroom; 5 Hz gives a 2:1 margin. See `config/interface.yaml`.
 
 | Topic | Type | Measured `hz` | QoS | Notes |
 |---|---|---|---|---|
-| `/scan` | `sensor_msgs/LaserScan` | **not measured** | — | lidar did not start — hardware fault |
+| `/scan` | `sensor_msgs/LaserScan` | **10.17** | — | YDLIDAR TG30 (not RPLidar); 360°, 2020 pts, std dev ~1.5 ms |
 | `/odom` | `nav_msgs/Odometry` | **10.74** | RELIABLE / VOLATILE | EKF-fused; `child_frame_id: base_footprint` |
 | `/odom_raw` | `nav_msgs/Odometry` | 10.74 | — | pre-EKF |
 | `/vel_raw` | `geometry_msgs/Twist` | 9.22 | RELIABLE / VOLATILE | no header/timestamp |

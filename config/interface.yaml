@@ -75,13 +75,13 @@ control:
   # The whole Yahboom stack runs at ~10 Hz: /odom 10.74, /imu/data_raw 10.74,
   # /vel_raw 9.22, /voltage 9.05. Nothing sensor-side is faster than ~10 Hz.
   #
-  # Still null because the LIDAR rate is unmeasured — the lidar did not start
-  # this session (hardware fault, see docs/phase1_session_2026-08-08.md) and
-  # it is expected to be the slowest contributor. Decide once /scan is
-  # measured. Note 10 Hz control against 10 Hz sensors leaves NO headroom,
-  # which is the situation BUILD-PLAN §Phase 3 task 1 warns about; 5 Hz (the
-  # previous team's choice) is the conservative option.
-  rate_hz: null
+  # DECIDED 2026-08-12 (session 3): 5 Hz. /scan measured at 10.17 Hz (YDLIDAR
+  # TG30, see docs/deployment.md §6 / CLAUDE.md §3). Every sensor feeding the
+  # observation is ~10 Hz, so 10 Hz control leaves NO headroom — the situation
+  # BUILD-PLAN §Phase 3 task 1 warns against — and would risk feeding the policy
+  # repeated scans. 5 Hz matches the previous team's cpt_b2_engine rate on this
+  # exact hardware and gives a clean 2:1 margin over the sensor cadence.
+  rate_hz: 5
   prior_hz: 5   # not a decision — the previous stack's rate, for reference
   measured_source_rates_hz:
     odom: 10.74
@@ -93,7 +93,7 @@ control:
     joint_states: 20.01
     tf: 29.99
     voltage: 9.05
-    scan: null   # lidar did not start
+    scan: 10.17  # YDLIDAR TG30, measured 2026-08-12 s3 (std dev ~1.5 ms)
   frame_id: base_link
 
 observation:
@@ -109,24 +109,38 @@ observation:
         36 bins of 10 deg each (nearest obstacle per sector — min, NOT mean,
         so a narrow obstacle is never averaged away). Drop self-occlusion
         rays FIRST, then clip to [range_min, range_max], then replace
-        non-finite returns (inf/NaN, i.e. no-return) with range_max, then
-        min-pool, then divide by range_max giving [0, 1].
-      # TODO(phase1): from the datasheet of the lidar actually fitted, cross
-      # checked against the range_min/range_max fields of a live LaserScan.
-      range_min_m: null
-      range_max_m: null
+        no-return rays with range_max, then min-pool, then divide by range_max
+        giving [0, 1].
+      # CRITICAL (measured 2026-08-12 s3): the YDLIDAR TG30 encodes a no-return
+      # as 0.0, NOT inf/NaN — the driver was launched with
+      # invalid_range_is_inf:=false. A 0.0 left untreated reads as an obstacle
+      # at zero distance, min-pools to 0, and would LATCH the e-stop in every
+      # bin containing a no-return (28% of rays in the static test). The
+      # observation builder MUST treat range==0.0 (and any value < range_min)
+      # as a no-return -> range_max, exactly like inf/NaN. Preferred belt-and-
+      # braces: also flip the driver to invalid_range_is_inf:=true so the wire
+      # format matches the standard LaserScan convention. Either way both cases
+      # must be handled — do not assume inf.
+      no_return_encoding: zero   # TG30 with invalid_range_is_inf:=false
+      # MEASURED 2026-08-12 s3 against a live TG30 LaserScan (range_min/range_max
+      # fields = 0.010 / 64.0, but 64.0 is Yahboom's generic 4ROS default, not
+      # the TG30 spec). range_max below is the TG30 datasheet reach (30 m), the
+      # honest normalization ceiling; the driver's advertised 64.0 is ignored.
+      range_min_m: 0.01
+      range_max_m: 30.0
       arc_deg: 180
       bin_deg: 10
       pooling: min
 
-      # The sensor itself is a 360 deg RPLidar A1 (confirmed from the previous
-      # team's cpt_b2_engine, which decomposed full FRONT/RIGHT/REAR/LEFT
-      # sectors and used the rear one for reverse-motion obstacle avoidance).
+      # The sensor is a 360 deg YDLIDAR TG30 (TOF; identified 2026-08-12 s3 —
+      # the "rplidar_a1" the previous team documented was wrong, it was never an
+      # RPLidar, see CLAUDE.md §3). 2020 pts/scan, ~0.178 deg angular resolution.
       # Restricting to the forward 180 deg is our deliberate choice, not a
       # hardware limit — the rear half is discarded, not absent. Widening the
       # arc later is an interface_version bump.
-      sensor: rplidar_a1
+      sensor: ydlidar_tg30
       sensor_fov_deg: 360
+      points_per_scan: 2020
       scan_convention: index 0 at angle_min; angle = angle_min + i*angle_increment
 
       # Rays that hit the robot's own body. These MUST be dropped before
@@ -299,10 +313,10 @@ coordinate_frames:
     note: /odom child_frame_id is base_footprint, NOT base_link.
   laser_link:
     definition: Lidar optical center.
-    # NOTE the frame is `laser_link`. sllidar_launch.py defaults frame_id to
-    # `laser`, which is NOT in the TF tree — launch it with
+    # NOTE the frame is `laser_link`. The ydlidar_ros2_driver defaults frame_id
+    # to `laser`, which is NOT in the TF tree — launch it with
     # frame_id:=laser_link or every scan is untransformable and RVIZ shows
-    # nothing.
+    # nothing. (Confirmed present in our captured scan: frame_id == laser_link.)
     transform_from_base_link:
       translation_m: [0.043, 0.000, 0.110]
       rotation_rpy_deg: [0.0, 0.0, 0.0]
