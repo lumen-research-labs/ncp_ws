@@ -14,8 +14,26 @@ velocity_limits:
   # or below the action scaling in interface.yaml so the safety layer is
   # always the tighter of the two.
   max_vx: 0.25          # m/s   — forward/back
-  max_vy: 0.25          # m/s   — lateral (mecanum; do not omit)
+  max_vy: 0.25          # m/s   — lateral (mecanum; do not omit — see below)
   max_wz: 0.4           # rad/s — yaw
+
+  # max_vy is deliberately RETAINED after interface 2.0.0 dropped vy from the
+  # policy's action space. The safety layer clamps every source, and
+  # /teleop/cmd_vel is also a source — an operator may legitimately strafe
+  # while repositioning the robot. The base is still mecanum and the driver
+  # still accepts linear.y.
+  #
+  # So: the policy emitting vy = 0 is a property of the POLICY NODE, not of
+  # the safety layer, and the two must not be collapsed. Deleting lateral
+  # handling here because "the policy doesn't strafe any more" would leave the
+  # teleop path unclamped on an axis the robot can physically drive.
+  #
+  # A non-zero linear.y arriving on /policy/cmd_vel is a BUG, not a command:
+  # the policy has no vy output. Zero it and log a warning rather than
+  # clamping it silently — silent clamping would hide a real interface
+  # mismatch (e.g. a stale 3-dim model loaded against a 2-dim contract).
+  policy_vy_expected: 0.0
+  policy_vy_violation_action: zero_and_warn
 
 acceleration_limits:
   # Clamped by comparing against the last published command and elapsed time.
@@ -31,7 +49,11 @@ estop:
   slow_zone_m: 0.80     # scale commanded velocity down proportionally
   stop_zone_m: 0.35     # zero velocity and LATCH
   forward_arc_deg: 90   # centered on +x
-  lateral_arc_deg: 60   # each side, for the mecanum lateral DOF
+  lateral_arc_deg: 60   # each side. Retained after interface 2.0.0: the policy
+                        # no longer commands lateral motion, but teleop can,
+                        # and the robot can still be pushed or drift sideways
+                        # on mecanum rollers. Monitoring is not conditional on
+                        # the policy's action space.
   consecutive_scans_to_trigger: 3   # noise filter; a single bad return must
                                     # never latch a stop
   latching: true        # once stopped, stays stopped until /safety/reset

@@ -137,11 +137,13 @@ The safety node is the **sole publisher** of `/cmd_vel`. Command sources publish
 
 1. **Velocity & acceleration clamping**
    - Clamp linear x, linear y (mecanum — X3 is omnidirectional, do not forget lateral), and angular z to limits from `config/safety_limits.yaml`.
+     - **Still true after interface 2.0.0 removed `vy` from the policy's action space.** The safety layer clamps *every* source, and `/teleop/cmd_vel` is also a source — an operator may legitimately strafe while repositioning. Deleting lateral handling here because "the policy doesn't strafe any more" would leave the teleop path unclamped on an axis the robot can physically drive.
+     - A non-zero `linear.y` arriving on `/policy/cmd_vel` is a **bug, not a command** — the policy has no `vy` output. Zero it *and warn*; clamping it silently would hide an interface mismatch such as a stale 3-dim model loaded against the 2-dim contract.
    - Clamp *acceleration* by comparing against the last published command and the elapsed time. This is what protects the STM32 and the drivetrain from step commands.
    - Start limits deliberately low. Raise them only after Phase 4 is stable.
 
 2. **Lidar-based emergency stop**
-   - Maintain a rolling minimum range within a configurable forward arc (and, for a mecanum base, lateral arcs too).
+   - Maintain a rolling minimum range within a configurable forward arc (and, for a mecanum base, lateral arcs too). Keep the lateral arcs after 2.0.0: the robot can still be pushed or drift sideways on its rollers, so monitoring is not conditional on the policy's action space.
    - Two-tier: **slow zone** (scale commanded velocity down proportionally) and **stop zone** (zero velocity, latch).
    - Filter lidar noise — require N consecutive scans below threshold before triggering, so a single bad return doesn't latch a stop. Make N configurable.
    - **Latching:** once stopped, stay stopped until explicitly reset via service call. Do not auto-resume when the obstacle clears.
@@ -203,12 +205,12 @@ observation:
       units: meters
     - name: base_velocity
       source_topic: /odom
-      shape: [3]               # vx, vy, wz — mecanum
+      shape: [3]               # vx, vy, wz — all three MEASURED and retained
       units: [m/s, m/s, rad/s]
-    - name: imu_orientation
-      source_topic: /imu
-      shape: [<N>]
-      note: <sin/cos representation if angles are used>
+    - name: previous_action
+      source_topic: null       # internal node state
+      shape: [2]
+      units: dimensionless
   total_dim: <sum>
   dtype: float32
 
@@ -217,13 +219,10 @@ action:
     - name: cmd_vx
       range: [<min>, <max>]
       units: m/s
-    - name: cmd_vy
-      range: [<min>, <max>]
-      units: m/s
     - name: cmd_wz
       range: [<min>, <max>]
       units: rad/s
-  total_dim: 3
+  total_dim: 2
   dtype: float32
   scaling: <how [-1,1] network output maps to physical units>
 
@@ -233,6 +232,26 @@ coordinate_frames:
   laser: <transform from base_link>
   camera_link: <...>
 ```
+
+> **Superseded in places — `config/interface.yaml` is the authority.** The
+> schema above is the original template. As of interface version **2.0.0**
+> (operator decision, 2026-08-12) the real contract differs from it in two
+> ways, both deliberate:
+>
+> - **Action is 2 dims `[vx, wz]`.** Lateral strafe was removed from the
+>   policy's action space to shrink the exploration problem. The X3 is still
+>   mecanum and the base driver still accepts `linear.y` — this constrains the
+>   controller, not the robot. See the Phase 2 clamping note below, which is
+>   *not* superseded.
+> - **No IMU block in the observation.** The 6 raw IMU dims were dropped;
+>   `/odom` is EKF-fused from the encoders and this same IMU and already
+>   arrives rotated into the body frame, whereas raw `/imu/data_raw` is in
+>   `imu_link`, which is rotated −180°/0°/−90° from `base_link`.
+>
+> Observation is therefore **41 dims**: 36 lidar + 3 base velocity + 2 previous
+> action. Note base velocity keeps `vy` even though the action space does not —
+> observed lateral velocity is a disturbance signal, and observation/action
+> symmetry is not a goal.
 
 ### Tasks
 

@@ -3,8 +3,13 @@
 Machine-readable source of truth: `config/interface.yaml`. If the two ever
 disagree, the YAML wins and this file is the bug.
 
-**Status: DRAFT, version 1.0.0, not yet frozen.** Freezing happens in Phase 3,
+**Status: DRAFT, version 2.0.0, not yet frozen.** Freezing happens in Phase 3,
 which blocks on Phase 1 measured sensor rates.
+
+**Changed in 2.0.0** (operator decision, 2026-08-12), both breaking:
+- Action is **2 dims `[vx, wz]`** — lateral strafe removed from the policy's
+  action space to shrink the exploration problem. The base is still mecanum.
+- **IMU block removed** from the observation. 48 → 41 dims.
 
 ## Context
 
@@ -17,17 +22,21 @@ Consequences of that, deliberately: no goal pose, no localization source, no
 camera and no depth in the observation. Adding any of them is an
 `interface_version` bump.
 
-## Observation — 48 dims, float32
+## Observation — 41 dims, float32
 
 Order is load-bearing. Built in exactly this order by the shared schema loader.
 
 | # | Component | Dims | Source | Units |
 |---|---|---|---|---|
 | 1 | Lidar ranges | 36 | `/scan` | normalized [0,1] |
-| 2 | Base velocity (vx, vy, wz) | 3 | `/odom` or `/vel_raw` — **unresolved** | m/s, m/s, rad/s |
-| 3 | IMU angular velocity | 3 | `/imu/data_raw` `angular_velocity` | rad/s |
-| 4 | IMU linear acceleration | 3 | `/imu/data_raw` `linear_acceleration` | m/s² |
-| 5 | Previous commanded action | 3 | internal node state | [-1,1] |
+| 2 | Base velocity (vx, vy, wz) | 3 | `/odom` | m/s, m/s, rad/s |
+| 3 | Previous commanded action (vx, wz) | 2 | internal node state | [-1,1] |
+
+Base velocity keeps all three components even though the action space no longer
+has `vy`. Observed lateral velocity is now purely a *disturbance* signal —
+roller drift, a push, a caught wheel, a slope — and with the IMU gone it is the
+only place that information enters the observation. Symmetry between the
+observation and action spaces is not a goal; don't "tidy" it to 2 dims.
 
 ### Lidar preprocessing
 
@@ -111,7 +120,7 @@ silently shift the observation distribution away from training.
 ### Normalization
 
 Only the lidar block is normalized, by the fixed `/range_max` scaling above.
-Velocity and IMU components stay in raw physical units.
+The base velocity component stays in raw physical units.
 
 No learned normalizer exists yet because no training has happened. Placeholder
 mean/std statistics are **not** to be fabricated — a wrong normalizer is far
@@ -121,49 +130,81 @@ model and loaded by the inference node. The hook for that is marked with a TODO
 in `src/rm_policy/rm_policy/observation_builder.py`. Adding it is an
 `interface_version` bump.
 
-## Action — 3 dims, float32
-
-Mecanum. The lateral DOF `vy` is real and is included; this is not
-differential-drive.
+## Action — 2 dims, float32
 
 | # | Name | Network range | Scale | Physical |
 |---|---|---|---|---|
 | 1 | `cmd_vx` | [-1, 1] tanh | `vx_max` = 0.3 | m/s |
-| 2 | `cmd_vy` | [-1, 1] tanh | `vy_max` = 0.3 | m/s |
-| 3 | `cmd_wz` | [-1, 1] tanh | `wz_max` = 0.5 | rad/s |
+| 2 | `cmd_wz` | [-1, 1] tanh | `wz_max` = 0.5 | rad/s |
 
 `physical = tanh_output * max`.
+
+### No lateral strafe — what that does and doesn't mean
+
+The X3 is mecanum and physically omnidirectional. Removing `vy` is a
+constraint on the **controller**, chosen to shrink the exploration problem, not
+a statement about the hardware. Three consequences that are easy to get wrong:
+
+1. **The policy node sets `linear.y = 0.0` explicitly** on every published
+   Twist rather than leaving the field at its default. The zero is a claim the
+   node makes; it should be visible in the code and in the bag.
+2. **`rm_safety` keeps its `max_vy` clamp.** `/teleop/cmd_vel` is also an input
+   to the safety layer and an operator may legitimately strafe while
+   repositioning. Deleting lateral handling from the safety layer because "the
+   policy doesn't strafe" would leave the teleop path unclamped on an axis the
+   robot can physically drive.
+3. **A non-zero `linear.y` on `/policy/cmd_vel` is a bug, not a command.** The
+   safety layer zeroes it *and warns* rather than clamping silently — silent
+   clamping would hide a real interface mismatch, e.g. a stale 3-dim model
+   loaded against a 2-dim contract.
+
+The lateral e-stop arcs in `safety_limits.yaml` are likewise retained: the
+robot can still be pushed or drift sideways on its rollers, and monitoring is
+not conditional on the policy's action space.
 
 Those maxima are **provisional and deliberately conservative**, matching the
 safety layer's start-low principle. They are raised only after Phase 2 safety
 validation is signed off in `docs/safety_validation.md`. They live in
 `config/interface.yaml`, never hardcoded in a node.
 
-Note the safety layer's own clamps (`config/safety_limits.yaml`: 0.25 / 0.25 /
-0.4) are *tighter* than the action scaling. That is intentional — the safety
+Note the safety layer's own clamps (`config/safety_limits.yaml`: 0.25 vx /
+0.4 wz) are *tighter* than the action scaling. That is intentional — the safety
 layer is always the binding constraint, so a mistake in the interface scaling
 cannot outrun it.
 
-## Base velocity source — unresolved
+## Base velocity source — resolved (Phase 1, 2026-08-08)
 
-The previous team subscribed to **`/vel_raw`**, a bare `geometry_msgs/Twist`.
-They never used `/odom`, and it does not appear in the topic list their runbook
-records, so whether it exists on this bringup is unverified.
+**`/odom`.** It exists — published by the `robot_localization` EKF that
+`yahboomcar_bringup_X3_launch.py` launches, fusing wheel encoders with the IMU.
+The previous team simply never used it.
 
-This matters for fail-closed: `/vel_raw` has **no header and therefore no
-timestamp**. Staleness could only be inferred from arrival time at the
-subscriber, which cannot distinguish a stalled driver from a stalled network —
-and "the driver died but the last velocity looks recent" is precisely the case
-the watchdog exists to catch. **Prefer `/odom` if it exists.** Resolve in
-Phase 1 before freezing.
+Chosen over `/vel_raw` because `nav_msgs/Odometry` carries a header and a bare
+`geometry_msgs/Twist` does not. Staleness inferred from arrival time at the
+subscriber cannot distinguish a stalled driver from a stalled network — and
+"the driver died but the last velocity looks recent" is precisely the case the
+watchdog exists to catch.
 
-## IMU source — pick one
+## IMU — removed from the observation (2.0.0)
 
-Three IMU topics are published: `/imu/data_raw`, `/imu/data`, `/imu/mag`. The
-previous team used `/imu/data_raw`. Whether `/imu/data` is filter-fused, and at
-what rate, is unverified. Raw versus fused is a real difference a policy would
-learn around, so it is named explicitly in the contract rather than left to
-whichever happens to be wired up.
+There is no IMU block any more. The 6 raw IMU dims were dropped in 2.0.0.
+
+The IMU's contribution has not vanished: `/odom` is EKF-fused from the encoders
+*and* this IMU, published with `child_frame_id: base_footprint`, i.e. already
+rotated into the body frame by `robot_localization`'s own TF lookup. What is
+genuinely given up is high-frequency linear acceleration and roll/pitch rate —
+the least valuable part of the vector for a flat-ground indoor base.
+
+This also retired a live blocker. `imu_link` is rotated RPY −180°/0°/−90° from
+`base_link`, so those 6 dims were the only part of the observation in a
+non-`base_link` frame, and feeding them in unrotated would have silently
+mislabelled axes and flipped at least one sign.
+
+**That rotation is sidestepped, not solved.** It remains live for the EKF
+(which handles it correctly, which is exactly why `/odom` is safe and raw
+`/imu/data_raw` was not), and it comes back the moment anyone re-adds a raw IMU
+channel. Re-adding the IMU is an `interface_version` bump **and** requires
+resolving the rotation first. The `imu_link` entry in `interface.yaml` stays
+for that reason — do not delete it as dead config.
 
 ## Control rate
 

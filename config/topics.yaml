@@ -32,8 +32,12 @@ sensors:
   # previous team's own code carries the note "verify with `ros2 topic list`
   # on the flashed Orin before relying on them".
   scan: /scan                              # sensor_msgs/LaserScan, RPLidar A1, 360 deg
+  # NOT IN THE OBSERVATION as of interface 2.0.0 (2026-08-12). Listed because
+  # they are published and get recorded into bags, not because anything we
+  # build subscribes to them. Raw IMU is in imu_link, which is rotated
+  # -180/0/-90 from base_link; resolve that before re-adding any of these.
   imu_raw: /imu/data_raw                   # sensor_msgs/Imu — what cpt_b2 used
-  imu_filtered: /imu/data                  # sensor_msgs/Imu — fusion status UNVERIFIED
+  imu_filtered: /imu/data                  # sensor_msgs/Imu — Madgwick-fused
   imu_mag: /imu/mag                        # sensor_msgs/MagneticField
   vel_raw: /vel_raw                        # geometry_msgs/Twist — NO header/timestamp
   voltage: /voltage                        # std_msgs/Float32

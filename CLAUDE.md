@@ -60,13 +60,32 @@ unblock Phases 1–3; those phases are exercised with a random/hand-scripted
 placeholder policy and a stub inference call, not a real model. No ONNX
 artifact exists yet.
 
-Observation = 48 dims, in this order: lidar 36, base velocity 3, IMU angular
-velocity 3, IMU linear acceleration 3, previous action 3. Action = 3 dims
-`[vx, vy, wz]`, tanh `[-1,1]`, mecanum lateral DOF included. Lidar is
-chassis-occluded to the rear: only the forward 180° is real, min-pooled into
-36×10° bins. Only the lidar block is normalized (fixed `/range_max`); velocity
-and IMU stay in raw units and **no placeholder normalizer stats are to be
-fabricated**.
+Observation = **41 dims** (interface 2.0.0), in this order: lidar 36, base
+velocity 3, previous action 2. Action = **2 dims `[vx, wz]`**, tanh `[-1,1]`.
+Lidar is chassis-occluded to the rear: only the forward 180° is real,
+min-pooled into 36×10° bins. Only the lidar block is normalized (fixed
+`/range_max`); base velocity stays in raw units and **no placeholder normalizer
+stats are to be fabricated**.
+
+Two operator decisions on 2026-08-12 took this from 48/3 to 41/2:
+
+- **No lateral strafe in the action space.** Shrinks the exploration problem.
+  The X3 is still mecanum and the driver still accepts `linear.y` — this
+  constrains the *controller*, not the robot. Three things must not be
+  "tidied": the policy node sets `linear.y = 0.0` explicitly; `rm_safety` keeps
+  its `max_vy` clamp and lateral e-stop arcs, because `/teleop/cmd_vel` is also
+  an input and an operator may strafe while repositioning; and a non-zero
+  `linear.y` on `/policy/cmd_vel` is a **bug, not a command** — zero it and
+  warn, never clamp it silently.
+- **No IMU block in the observation.** `/odom` is EKF-fused from the encoders
+  and this same IMU, and arrives already rotated into the body frame; raw
+  `/imu/data_raw` is in `imu_link`. What is given up is high-frequency linear
+  acceleration and roll/pitch rate.
+
+Base velocity keeps all 3 components (`vx, vy, wz`) despite the 2-dim action.
+Observed lateral velocity is now purely a disturbance signal — roller drift, a
+push, a caught wheel — and with the IMU gone it is the only route by which that
+reaches the policy. Observation/action symmetry is not a goal.
 
 ## 2. Structure & Architecture
 
@@ -152,6 +171,25 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   base_link** — blocks the Phase 3 freeze. Lidar is a **hardware fault**:
   zero bytes over raw serial to STOP/GET_INFO/GET_HEALTH.
 
+- 2026-08-12: **Interface 2.0.0** — two operator decisions, both breaking.
+  Action 3 -> 2 dims `[vx, wz]`: lateral strafe removed from the policy's
+  action space to shrink the exploration problem (the base is still mecanum;
+  this constrains the controller, not the robot). IMU block removed from the
+  observation, 48 -> 41 dims, which retired the `imu_link` rotation blocker by
+  sidestepping it — `/odom` is EKF-fused from the encoders and the same IMU and
+  already arrives body-frame. Base velocity deliberately keeps all 3 components
+  as a disturbance signal. Updated `config/interface.yaml` (authority),
+  `config/safety_limits.yaml`, `docs/interface_contract.md`, `BUILD-PLAN.md`
+  and this file. The safety layer keeps its `max_vy` clamp and lateral e-stop
+  arcs — teleop is also an input to it. Contract is still DRAFT, still blocked
+  on `/scan` for `control.rate_hz`.
+
+  Also this session: fixed the Claude Code config. `build-check.sh` had never
+  run (unregistered, and gated on a nonexistent agent name); the `/cmd_vel`
+  ownership hook moved PostToolUse -> PreToolUse so violations never land; added
+  a `robot-ssh` skill encoding the SSH/DDS/battery traps. Commit 5bf166e.
+
+
 ## 4. Current Goal
 
 Phase 1 is **substantially complete except the lidar**. Tasks 1 (SSH + DDS),
@@ -172,14 +210,20 @@ Battery is a secondary concern, not the cause: 9.5 V → 10.1 V after a short
 charge → 9.9 V under load by session end. Still low for a 3S pack. Charge fully
 to remove it as a confounder.
 
-**BLOCKS PHASE 3 FREEZE — the IMU is rotated** 180°/0°/−90° (RPY) relative to
-`base_link`. `/imu/data_raw`'s `angular_velocity` and `linear_acceleration` are
-in `imu_link`, so 6 of the 48 observation dims have axes that do not match the
-frame every other component uses. Unrotated, forward acceleration lands on the
-wrong component and at least one sign flips — silently. Resolve before
-freezing; see the warning block in `config/interface.yaml`. Preferred fix:
-rotate into `base_link` in `observation_builder.py`, because a mixed-frame
-observation vector is a trap for whoever trains next.
+**RESOLVED 2026-08-12 by removal — the IMU rotation no longer blocks Phase 3.**
+`imu_link` is rotated 180°/0°/−90° (RPY) from `base_link`, so the 6 raw IMU
+observation dims were the only part of the vector in a non-`base_link` frame:
+unrotated, forward acceleration lands on the wrong component and at least one
+sign flips, silently. Interface 2.0.0 drops the IMU block entirely, so nothing
+we build reads `/imu/data_raw` any more.
+
+**Sidestepped, not solved.** The rotation is still live for
+`robot_localization`'s EKF, which consumes the IMU to produce `/odom` and does
+its own TF lookup — that is exactly why `/odom` is safe to use and raw
+`/imu/data_raw` was not. It comes back the moment anyone re-adds a raw IMU
+channel, which is an `interface_version` bump **and** requires resolving the
+rotation first. The `imu_link` entry in `config/interface.yaml` stays for that
+reason; it is not dead config.
 
 Settled, do not re-open:
 - Observation stays **forward-180°, 36 bins** despite the lidar being a 360° A1
@@ -187,9 +231,14 @@ Settled, do not re-open:
   layer treats reverse as unguarded motion.
 - Base velocity is **`/odom`** (EKF, has a header) not `/vel_raw` (bare Twist,
   no timestamp — cannot support honest staleness detection).
-- IMU source is **`/imu/data_raw`**; `/imu/data` is Madgwick-fused and its
-  value is the orientation quaternion we do not use.
+- IMU source, *if one is ever re-added*, is **`/imu/data_raw`**; `/imu/data` is
+  Madgwick-fused and its value is the orientation quaternion we do not use.
+  Moot as of 2.0.0 — nothing subscribes to either.
 - `ROS_DOMAIN_ID` is **28**, dictated by the Jetson host.
+- Action space is **2 dims `[vx, wz]`**, no lateral strafe (operator,
+  2026-08-12). The safety layer nonetheless keeps lateral clamps and arcs.
+- **No IMU in the observation** (operator, 2026-08-12). Proprioception comes
+  via `/odom`, which is EKF-fused from the encoders and IMU.
 
 ### Next session, in order
 
@@ -214,7 +263,8 @@ Settled, do not re-open:
    may not occlude the scan plane at all).
 6. Verify all five sensor streams in RVIZ2 from the workstation, no X11.
 7. Teleop baseline bag — **operator only, never an agent**.
-8. Resolve the IMU rotation before touching Phase 3.
+8. ~~Resolve the IMU rotation before touching Phase 3.~~ Closed 2026-08-12 by
+   removing the IMU from the observation (interface 2.0.0). Nothing to do.
 
 ### Robot state at session end (2026-08-08)
 

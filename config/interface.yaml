@@ -10,7 +10,16 @@
 # The policy node asserts the version embedded in the exported model metadata
 # against this value and refuses to start on a mismatch.
 
-interface_version: "1.0.0"
+# CHANGE LOG
+# 2.0.0 (2026-08-12, operator decision) — two breaking layout changes:
+#   * Action reduced 3 -> 2 dims: [vx, wz]. Lateral strafe (vy) removed from
+#     the policy's action space to shrink the exploration problem. The BASE is
+#     still mecanum and still physically capable of strafing; we are choosing
+#     not to command it. The policy node emits linear.y = 0.0 structurally.
+#   * IMU block removed from the observation, 48 -> 41 dims. Rationale in the
+#     observation section; this also retires the imu_link frame blocker.
+# 1.0.0 — initial draft.
+interface_version: "2.0.0"
 
 network:
   # CONFIRMED 2026-08-08 from the Jetson host's own login banner:
@@ -165,42 +174,53 @@ observation:
         EKF-fused, not raw encoder output. /odom_raw and /vel_raw carry the
         unfused encoder velocity if that turns out to be preferable — but
         /vel_raw has no timestamp. TODO(phase1): confirm measured rate.
-      shape: [3]             # vx, vy, wz — mecanum, lateral DOF is real
+      shape: [3]             # vx, vy, wz — MEASURED, all three retained
       units: [m/s, m/s, rad/s]
       preprocessing: none    # raw physical units, see normalization note below
+      vy_retained_note: >-
+        Kept at 3 dims even though v2.0.0 removed vy from the ACTION space.
+        Observed lateral velocity is no longer something the policy commands,
+        which makes it purely a disturbance signal: mecanum roller drift, being
+        pushed, a caught wheel, or a slope. That is information the policy
+        cannot get anywhere else now that the IMU block is gone, and it costs
+        one dim. Do not "tidy" this to 2 dims to match the action space —
+        observation and action symmetry is not a goal here.
       staleness_warning: >-
         A bare Twist has no timestamp. If we end up on /vel_raw, staleness
         must be tracked by arrival time at the subscriber, which cannot
         distinguish a stalled driver from a stalled network. Prefer /odom.
 
-    - name: imu_angular_velocity
-      # RESOLVED 2026-08-08: /imu/data is produced by imu_filter_madgwick,
-      # launched as part of yahboomcar_bringup_X3_launch.py, from /imu/data_raw.
-      # So /imu/data IS fused and /imu/data_raw is the unfiltered sensor.
-      #
-      # We stay on /imu/data_raw (also the previous team's choice): the
-      # observation wants raw angular velocity and linear acceleration, and
-      # Madgwick's value is in the orientation quaternion, which we do not use.
-      # Feeding filtered inertial channels would add lag we cannot characterise.
-      # TODO(phase1): confirm measured rates for both.
-      source_topic: /imu/data_raw
-      source_topic_alternatives: [/imu/data]
-      subfield: angular_velocity
-      shape: [3]             # x, y, z
-      units: [rad/s, rad/s, rad/s]
-      preprocessing: none
-
-    - name: imu_linear_acceleration
-      source_topic: /imu/data_raw
-      source_topic_alternatives: [/imu/data]
-      subfield: linear_acceleration
-      shape: [3]             # x, y, z
-      units: [m/s^2, m/s^2, m/s^2]
-      preprocessing: none
+    # ------------------------------------------------------------------
+    # REMOVED in 2.0.0 (operator decision, 2026-08-12): imu_angular_velocity
+    # and imu_linear_acceleration, 6 dims from /imu/data_raw.
+    #
+    # Why this is a cheap cut, not a loss of proprioception: /odom above is
+    # published by the robot_localization EKF, which already fuses this same
+    # IMU with the wheel encoders, and publishes the result with
+    # child_frame_id base_footprint — i.e. correctly rotated into the body
+    # frame by robot_localization's own TF lookup. The IMU's contribution
+    # still reaches the observation, via /odom, with the frame handling done
+    # by upstream code that was already getting it right.
+    #
+    # What is genuinely given up: high-frequency linear acceleration and
+    # roll/pitch rate. For a flat-ground indoor mecanum base, the least
+    # valuable part of the vector.
+    #
+    # Side effect, and the reason to do it now: this retires the imu_link
+    # frame blocker. imu_link is rotated RPY [-180, 0, -90] from base_link
+    # (see coordinate_frames below), so those 6 dims were the only part of
+    # the observation in a non-base_link frame. They were blocking the Phase 3
+    # freeze. Note the rotation itself is NOT resolved and the entry below
+    # stays — it still matters to the EKF, and it would matter again the
+    # moment anyone re-adds a raw IMU channel.
+    #
+    # Re-adding the IMU is an interface_version bump AND requires resolving
+    # the rotation first.
+    # ------------------------------------------------------------------
 
     - name: previous_action
       source_topic: null     # internal node state, not a subscription
-      shape: [3]             # the previous cmd_vx, cmd_vy, cmd_wz, post-tanh
+      shape: [2]             # the previous cmd_vx, cmd_wz, post-tanh
       units: dimensionless   # [-1, 1], as emitted by the network
       preprocessing: none
       note: >-
@@ -210,14 +230,14 @@ observation:
         that, and feeding the clamped value back would silently change the
         observation distribution relative to training.
 
-  total_dim: 48              # 36 + 3 + 3 + 3 + 3
+  total_dim: 41              # 36 lidar + 3 base_velocity + 2 previous_action
   dtype: float32
 
   normalization:
     # No policy has been trained yet, so no learned normalizer exists.
     # The lidar block carries a fixed /range_max scaling (declared above).
-    # Velocity and IMU components are deliberately left in raw physical
-    # units — placeholder statistics are NOT to be fabricated.
+    # The base_velocity component is deliberately left in raw physical units —
+    # placeholder statistics are NOT to be fabricated.
     scheme: fixed_lidar_only
     stats_source: null
     note: >-
@@ -228,19 +248,32 @@ observation:
       interface_version bump.
 
 action:
+  # 2.0.0: DIFFERENTIAL-DRIVE-STYLE action space on a mecanum base.
+  # Lateral strafe was removed from the policy's action space by operator
+  # decision (2026-08-12) to shrink the exploration problem. This is a
+  # deliberate constraint on the CONTROLLER, not a statement about the robot:
+  # the X3 is still omnidirectional and the base driver still accepts
+  # linear.y. See vy_removed_note below for what must not be simplified away.
   layout:
     - name: cmd_vx
       range: [-1.0, 1.0]
       units: dimensionless   # network output, tanh
-    - name: cmd_vy
-      range: [-1.0, 1.0]
-      units: dimensionless
     - name: cmd_wz
       range: [-1.0, 1.0]
       units: dimensionless
-  total_dim: 3
+  total_dim: 2
   dtype: float32
   activation: tanh
+
+  vy_removed_note: >-
+    The policy node must set linear.y = 0.0 EXPLICITLY on every published
+    Twist, rather than leaving the field at its default. A structurally-zero
+    field is a claim the node makes, and it should be visible in the code and
+    in the bag. rm_safety keeps its own max_vy clamp regardless — see
+    safety_limits.yaml. Do not delete lateral handling from the safety layer:
+    /teleop/cmd_vel is also an input to it and an operator may legitimately
+    strafe while repositioning, so the safety layer still has to clamp an axis
+    the policy never uses.
 
   scaling:
     # Maps network output [-1, 1] to physical units: physical = output * max.
@@ -248,9 +281,10 @@ action:
     # "start low" principle. To be raised only after Phase 2 safety validation
     # is signed off in docs/safety_validation.md. Not final.
     vx_max: 0.3   # m/s
-    vy_max: 0.3   # m/s
     wz_max: 0.5   # rad/s
     provisional: true
+    # vy_max removed in 2.0.0 — the policy has no vy output to scale. The
+    # safety layer's max_vy is a clamp on the teleop path, not a scaling.
 
 coordinate_frames:
   # MEASURED 2026-08-08 from the live TF tree.
@@ -284,16 +318,25 @@ coordinate_frames:
     # THE IMU IS ROTATED RELATIVE TO base_link. Roll 180 deg, yaw -90 deg.
     # /imu/data_raw angular_velocity and linear_acceleration are expressed in
     # imu_link, so their axes do NOT correspond to base_link's x-forward,
-    # y-left, z-up. Feeding them into the observation unrotated silently
-    # mislabels the axes: base_link x-forward acceleration appears on a
-    # different IMU component, and the sign of at least one axis flips.
+    # y-left, z-up. Unrotated, base_link x-forward acceleration appears on a
+    # different IMU component and the sign of at least one axis flips —
+    # silently.
     #
-    # TODO(phase3): decide and implement ONE of
-    #   (a) rotate imu vectors into base_link in observation_builder, or
-    #   (b) declare the observation IMU block to be in imu_link and keep it
-    #       consistent between training and deployment.
-    # (a) is preferred — every other observation component is base_link-ish,
-    # and a mixed-frame observation vector is a trap for whoever trains next.
-    # Whichever is chosen must be stated here explicitly before freezing.
+    # STATUS 2.0.0: no longer blocking. The raw IMU block was removed from the
+    # observation, so nothing we build reads /imu/data_raw directly any more
+    # and no part of the observation is in imu_link.
+    #
+    # This is SIDESTEPPED, NOT SOLVED. Keep this entry. It is still live for:
+    #   * robot_localization's EKF, which consumes the IMU to produce /odom.
+    #     That code does its own TF lookup and handles the rotation correctly,
+    #     which is precisely why /odom is safe to use and raw /imu/data_raw
+    #     was not.
+    #   * anyone re-adding a raw IMU channel later. Re-adding the IMU is an
+    #     interface_version bump AND requires resolving this first: rotate
+    #     into base_link in observation_builder (preferred — a mixed-frame
+    #     observation vector is a trap for whoever trains next), or declare
+    #     the block to be in imu_link and keep training and deployment
+    #     consistent about it.
     # ============================================================
-    observation_frame_unresolved: true
+    observation_frame_unresolved: false   # moot: no raw IMU in the observation
+    rotation_still_live_for: [robot_localization_ekf, any_future_imu_channel]
