@@ -275,6 +275,36 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   plot (`docs/tg30_first_scan.png`) and the raw message as a fixture. Robot left
   running (operator was about to power it down manually).
 
+- 2026-08-13: **Phase 2 replay validation + safety launch file — offline
+  session, robot untouched.** Three deliverables, all committed to the software
+  test tiers (no hardware). (1) **Replay tests** (`tests/replay/`, 9 tests, pass):
+  real recorded scans fed through the exact `safety_logic.evaluate()` with the
+  real `safety_limits.yaml`, ROS-free. The 600-scan baseline bag is decoded
+  straight from its sqlite3 store by a minimal, self-checking little-endian CDR
+  reader (`tests/replay/laserscan_bag_reader.py`) — no rclpy/container needed on
+  the workstation. **Validated the TG30 `0.0`-no-return safety finding: across
+  all 600 scans (~27% zeros each) `safety_logic` never loses perception and
+  never reads a `0.0` as a zero-distance obstacle** — `min_range` always finite,
+  always the real ~0.21 m return. Also proved the all-`0.0` scan fails closed
+  (STOPPED) and the latch engages after N=3 sustained stop-zone scans. (2) NOTE:
+  the baseline bag was recorded in a **cluttered room with a real object ~0.21 m
+  dead-ahead** (+6.7°, inside the 0.35 m stop zone), so its e-stop latch is
+  CORRECT, not spurious — the bag validates 0.0-handling + latching, NOT a
+  clear path. A **clear-path open-space bag is still an operator task**. (3) **New
+  FINDING flagged, not fixed:** during the consecutive-scan filter window a
+  sustained *stop*-zone obstacle emits OK/FULL velocity for the first (N−1)
+  ticks (slow-zone scaling only fires on *slow*-zone readings), i.e. ~400 ms
+  un-slowed at 5 Hz before the latch. Pinned by a regression test; written up in
+  `docs/safety_validation.md` §2b for operator decision (recommendation: apply
+  slow-scaling to un-latched stop-zone readings). (4) **`rm_bringup` safety
+  launch file written** — `src/rm_bringup/launch/safety.launch.py` (Phase 2 task
+  a), params from `safety_limits.yaml`, killed-on-startup preserved, `setup.py`
+  now installs `launch/`. Byte-compiled + path-resolution checked offline; NOT
+  colcon-built (ROS is containerised here). `docs/safety_validation.md` updated:
+  unit (81) + replay (9) tiers marked PASS 2026-08-13; hardware tier still
+  operator-only. Stray empty `src/rm_safety/logic.md` (0 bytes, untracked) left
+  in place — origin unknown, flagged for the operator to delete.
+
 
 ## 4. Current Goal
 
@@ -378,16 +408,31 @@ Settled, do not re-open:
 8. ~~Resolve the IMU rotation before touching Phase 3.~~ Closed 2026-08-12 by
    removing the IMU from the observation (interface 2.0.0). Nothing to do.
 
-**Phase 2 (safety layer) — code done, validation blocked.** `rm_interfaces`,
-`rm_safety/safety_logic.py` (81 unit tests pass) and `rm_safety/safety_node.py`
-are written and reviewed. Not yet done, in order: (a) `rm_bringup` launch file
-for `safety_node` with params from `config/safety_limits.yaml` (never written —
-node is runnable via its entry point but has no launch); (b) replay tests against
-the Phase 1 baseline bag — **blocked** until task 4/5 produce a bag; (c) the
-hardware safety checklist (BUILD-PLAN Phase 2 §Testing item 3) — operator + kill
-switch in hand, wheels off the ground first, **never an agent**; (d) sign-off in
-`docs/safety_validation.md`. Do not `colcon build` on the workstation shell — ROS
-lives in a container here; the node was syntax-checked only.
+**Phase 2 (safety layer) — software tiers done; hardware tier + one decision
+remain.** `rm_interfaces`, `rm_safety/safety_logic.py` and
+`rm_safety/safety_node.py` are written and reviewed. Status of the four items:
+(a) **DONE 2026-08-13** — `rm_bringup` launch file
+`src/rm_bringup/launch/safety.launch.py` (params from `safety_limits.yaml`,
+killed-on-startup preserved; `setup.py` installs `launch/`; byte-compiled +
+path-checked offline, NOT colcon-built). (b) **DONE 2026-08-13** — replay tests
+`tests/replay/` (9 pass) against the baseline bag + TG30 captures, ROS-free via
+a self-checking CDR reader; unit tier still 81 pass (total **90**). (c) hardware
+safety checklist (BUILD-PLAN Phase 2 §Testing item 3) — operator + kill switch
+in hand, wheels off the ground first, **never an agent** — STILL TODO. (d)
+sign-off in `docs/safety_validation.md` — unit + replay rows filled PASS; the
+hardware rows and final signature are the operator's — STILL TODO. Do not
+`colcon build` on the workstation shell — ROS lives in a container here.
+
+**OPERATOR DECISION PENDING (pre-hardware):** replay surfaced that a sustained
+*stop*-zone obstacle emits full velocity for the first (N−1) filter ticks
+(~400 ms un-slowed at 5 Hz) before latching, while a farther *slow*-zone
+obstacle slows immediately. Written up in `docs/safety_validation.md` §2b.
+Recommendation: apply slow-zone scaling to un-latched stop-zone readings. Not
+changed by an agent — it is a safety-logic design call.
+
+Also still open for Phase 2/1: a **clear-path open-space bag** (the current
+baseline bag has a real 0.21 m forward obstacle, so it cannot serve as the
+"no spurious e-stop on a clear path" replay case) — operator recording task.
 
 ### Robot state at session end (2026-08-08)
 
