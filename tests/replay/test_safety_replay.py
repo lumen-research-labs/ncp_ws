@@ -27,14 +27,15 @@ What these tests establish (and, equally, what they do NOT):
     recorded in genuinely open space (an operator task; noted in
     docs/safety_validation.md).
 
-  * FINDING surfaced by this replay (documented, asserted here to lock it in,
-    flagged for operator review — NOT changed unilaterally): during the
-    consecutive-scan noise-filter window, a sustained stop-zone obstacle
-    produces OK / FULL commanded velocity for the first
-    (consecutive_scans_to_trigger - 1) control ticks, then latches to zero.
-    A slow-zone obstacle scales velocity down immediately, but a closer
-    stop-zone obstacle does not slow the robot until the latch trips.  At 5 Hz
-    control and N=3 that is ~400 ms of un-slowed motion before the stop.
+  * FINDING surfaced by this replay, FIXED by operator decision 2026-08-14
+    (see safety_validation.md §2b): during the consecutive-scan noise-filter
+    window, a sustained stop-zone obstacle used to produce OK / FULL commanded
+    velocity for the first (consecutive_scans_to_trigger - 1) control ticks,
+    then latch to zero — a closer stop-zone obstacle braked LATER than a
+    farther slow-zone one. Fixed in safety_logic.evaluate() by routing
+    un-latched stop-zone readings through the same slow_scale() as the slow
+    zone, which evaluates to 0.0 there — an immediate soft-stop instead of
+    ~400 ms of un-slowed motion at 5 Hz/N=3.
 """
 
 from __future__ import annotations
@@ -177,8 +178,10 @@ class TestBaselineBag:
         assert states.get("STOPPED", 0) >= 595, (
             f"expected the bag to hold STOPPED once latched; got {states}"
         )
-        # Only the pre-trigger noise-filter window is non-STOPPED.
-        assert states.get("OK", 0) <= limits.estop.consecutive_scans_to_trigger
+        # Only the pre-trigger noise-filter window is non-STOPPED, and it must
+        # be SLOW (soft-stop), not OK — see safety_validation.md §2b.
+        assert states.get("OK", 0) == 0, states
+        assert states.get("SLOW", 0) <= limits.estop.consecutive_scans_to_trigger - 1, states
 
 
 # ---------------------------------------------------------------------------
@@ -215,8 +218,11 @@ class TestTG30Captures:
             dec = _eval_scan(scan, limits, latched=latched, count=count)
             latched, count = dec.estop_latched, dec.consecutive_stop_count
             states.append(State(dec.state).name)
-        # First (n-1) ticks not yet latched; latched by tick n.
-        assert states[: n - 1] == ["OK"] * (n - 1), states
+        # First (n-1) ticks not yet latched: pre-latch stop-zone window now
+        # soft-stops (SLOW state, scaled to 0.0) rather than OK/full-speed
+        # (operator decision, 2026-08-14 — see safety_validation.md §2b).
+        # Latched by tick n.
+        assert states[: n - 1] == ["SLOW"] * (n - 1), states
         assert states[n - 1] == "STOPPED", states
         assert latched is True
 
@@ -231,26 +237,30 @@ class TestTG30Captures:
 # 3. Regression lock: the pre-latch full-speed window (FLAGGED finding)
 # ---------------------------------------------------------------------------
 
-def test_prelatch_window_emits_full_velocity(limits):
-    """LOCK-IN of a flagged behaviour (see module docstring + safety_validation.md).
+def test_prelatch_window_emits_zero_velocity(limits):
+    """LOCK-IN of the fixed behaviour (see module docstring + safety_validation.md
+    §2b, operator decision 2026-08-14).
 
-    A sustained stop-zone obstacle yields OK / FULL commanded velocity for the
-    first (N-1) control ticks before the latch trips.  This test documents and
-    pins the CURRENT behaviour so any future change to it is caught and reviewed
-    — it is not an endorsement.  If the safety design is changed to slow or zero
-    during the filter window, update this test deliberately.
+    A sustained stop-zone obstacle now soft-stops (SLOW state, velocity scaled
+    via slow_scale()) for the first (N-1) control ticks, then latches to
+    STOPPED. slow_scale() returns 0.0 for min_r <= stop_zone_m, so pre-latch
+    ticks emit zero velocity, not the commanded value — no more "closer
+    obstacle brakes later" inversion. Previously this test pinned the opposite
+    (full-velocity) behaviour as test_prelatch_window_emits_full_velocity.
     """
     scan = _load_echo_yaml_scan(_SAMPLE_SCAN)
     n = limits.estop.consecutive_scans_to_trigger
     latched, count = False, 0
+    pre_latch_states = []
     pre_latch_vx = []
     for tick in range(n):
         dec = _eval_scan(scan, limits, latched=latched, count=count, cmd_vx=0.2)
         if tick < n - 1:
+            pre_latch_states.append(State(dec.state).name)
             pre_latch_vx.append(dec.out_vx)
         latched, count = dec.estop_latched, dec.consecutive_stop_count
-    # Every pre-latch tick emitted the full commanded 0.2 m/s, un-slowed.
-    assert all(abs(v - 0.2) < 1e-9 for v in pre_latch_vx), pre_latch_vx
+    assert pre_latch_states == ["SLOW"] * (n - 1), pre_latch_states
+    assert all(abs(v) < 1e-9 for v in pre_latch_vx), pre_latch_vx
 
 
 # ---------------------------------------------------------------------------

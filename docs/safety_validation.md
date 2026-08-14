@@ -56,26 +56,27 @@ path — it is **not** a clear-path recording. The "no spurious e-stop on a clea
 path" case still needs a **new bag recorded in genuinely open space** (operator
 task; noted in CLAUDE.md next-session list).
 
-### 2b. FINDING flagged for operator review — pre-latch full-speed window
+### 2b. RESOLVED 2026-08-14 (operator decision) — pre-latch full-speed window
 
-Surfaced by replay, **not** changed unilaterally (the safety logic is reviewed
-and unit-covered; this is a design question for the operator, not an agent fix):
+Surfaced by replay 2026-08-13: during the consecutive-scan noise-filter
+window, a **sustained stop-zone obstacle produced OK / FULL commanded
+velocity for the first (`consecutive_scans_to_trigger` − 1) control ticks**,
+then latched to zero. A *slow*-zone obstacle scaled velocity down
+immediately, but a closer *stop*-zone obstacle did **not** slow the robot
+until the latch tripped. At 5 Hz control and N=3 that was ~400 ms of
+un-slowed motion before the stop (≈15 cm at the 0.25 m/s clamp).
 
-> During the consecutive-scan noise-filter window, a **sustained stop-zone
-> obstacle produces OK / FULL commanded velocity for the first
-> (`consecutive_scans_to_trigger` − 1) control ticks**, then latches to zero. A
-> *slow*-zone obstacle scales velocity down immediately, but a closer
-> *stop*-zone obstacle does **not** slow the robot until the latch trips. At
-> 5 Hz control and N=3 that is ~400 ms of un-slowed motion before the stop
-> (≈15 cm at the 0.25 m/s clamp).
-
-The current behaviour is pinned by `test_prelatch_window_emits_full_velocity`
-so any change is caught. **Decision needed before hardware sign-off:** accept as
-designed (the 0.35 m stop zone already budgets for this), or change the logic to
-apply slow-zone scaling to un-latched stop-zone readings so the robot is already
-decelerating during the filter window. Recommendation: apply slow scaling in the
-filter window — it removes the counter-intuitive "closer obstacle brakes later"
-inversion at negligible cost. Either way it is an operator call.
+**Decision: apply slow-zone scaling to un-latched stop-zone readings.** Fixed
+in `safety_logic.evaluate()` — the SLOW-ZONE branch (precedence 5) now covers
+`zone in ("slow", "stop")`; `slow_scale()` already evaluates to 0.0 for
+`min_r <= stop_zone_m`, so an un-latched stop-zone reading is scaled to zero
+immediately (state SLOW, reason `stop_zone_prelatch`) instead of passing
+through at full commanded velocity. Removes the counter-intuitive "closer
+obstacle brakes later" inversion. The previously-pinning test
+`test_prelatch_window_emits_full_velocity` was replaced with
+`test_prelatch_window_emits_zero_velocity`, which pins the new behaviour;
+`test_sample_scan_latches_after_consecutive_window` updated to expect `SLOW`
+(not `OK`) on pre-latch ticks. Both pass.
 
 ## 3. Hardware tests — no policy, wheels off ground first
 

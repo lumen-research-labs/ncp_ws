@@ -25,7 +25,7 @@ the authority; this file is the working-state summary of it.
 | Physical E-stop | **NONE.** `/safety/kill` is the only stop; battery pull is last resort |
 | Network | Same subnet, direct DDS — no NAT/VLAN, no discovery server |
 | `ROS_DOMAIN_ID` | **28** — confirmed from the host banner 2026-08-08 |
-| Robot address | `bernard-2` / `10.0.0.107` (mDNS `bernard-2.local`) — updated 2026-08-12 after network move |
+| Robot address | `bernard-2.local` (mDNS) — IP has changed 3x this project (last seen `192.168.0.190`, 2026-08-14); `~/.ssh/config` now resolves by mDNS, not a hardcoded IP |
 | Camera | `astraplus` per host banner — NOT the Astra Pro the previous team documented |
 
 ### Prior art — `LumenLabs/firmware` (cpt_b2)
@@ -305,172 +305,144 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   operator-only. Stray empty `src/rm_safety/logic.md` (0 bytes, untracked) left
   in place — origin unknown, flagged for the operator to delete.
 
+- 2026-08-14: **Both pending operator decisions closed; robot clone attempted.**
+  (1) Slow-scaling fix applied to `safety_logic.evaluate()`: the SLOW-ZONE
+  branch (precedence 5) now covers `zone in ("slow", "stop")`, not just
+  `"slow"`. `slow_scale()` already returns 0.0 for `min_r <= stop_zone_m`, so
+  an un-latched stop-zone reading now scales to zero immediately (state SLOW,
+  reason `stop_zone_prelatch`) instead of passing through at full commanded
+  velocity for the pre-latch window. Removes the "closer obstacle brakes
+  later" inversion flagged 2026-08-13. `docs/safety_validation.md` §2b marked
+  RESOLVED. Three tests updated to match (`test_prelatch_window_emits_full_velocity`
+  renamed to `test_prelatch_window_emits_zero_velocity`;
+  `test_sample_scan_latches_after_consecutive_window` and
+  `test_bag_latches_stop_on_real_forward_obstacle` updated to expect SLOW, not
+  OK, on pre-latch ticks). Unit 81/81 + replay 9/9 still pass. (2) Occlusion
+  mask dropped: operator confirmed (live scans, this session) no persistent
+  close return anywhere in the forward 180° arc, consistent with the
+  preliminary open-space-scan finding from 2026-08-12 s3 (camera_link sits
+  7.2 cm below laser_link, so it likely never occluded the scan plane).
+  `config/interface.yaml` `self_occlusion_zones_deg` set to `[]`; previous
+  team's Astra-Pro-era values kept in a comment for reference only, not
+  reinstated. `empty_bin_policy: fault` unchanged — still guards against
+  genuine sensor fault/dropout, independent of masking. Not an
+  `interface_version` bump (preprocessing detail, not a layout change). (3)
+  **Robot clone attempted, blocked on GitHub access.** `~/ncp_ws` does not
+  exist on the robot. `git remote` for this repo switched from HTTPS to SSH
+  on the workstation (`git@github.com:devpatel2003/ncp_ws.git`) since HTTPS
+  password auth is retired GitHub-side. The robot's existing deploy keys
+  (`lumen_deploy`, `cradle_deploy`) are scoped to other repos, so a new
+  dedicated deploy key was generated on the robot (`~/.ssh/ncp_ws_deploy`,
+  alias `github-ncp` in the robot's `~/.ssh/config`), matching the existing
+  per-repo pattern. **Waiting on the operator to register the pubkey as a
+  read-only deploy key on `devpatel2003/ncp_ws`** before the clone can
+  complete. Also confirmed live: `bernard-2`'s IP has moved again (now
+  reachable only by `bernard-2.local` mDNS — the workstation's
+  `~/.ssh/config` was repointed from a hardcoded IP to the mDNS hostname to
+  stop this from recurring). The standing ttyUSB1 autostart trap
+  (`rosmaster_main.py`) was confirmed still live and holding the base-board
+  serial port; not killed, no nodes touched, robot left clean. `colcon` is
+  present on the robot and the workspace layout matches
+  `yahboomcar_ros2_ws/yahboomcar_ws` — build was not attempted, blocked on
+  the clone.
+
 
 ## 4. Current Goal
 
-Phase 1 is **substantially complete and the lidar is now UNBLOCKED.** Tasks 1
-(SSH + DDS, re-verified on the new network), 3 (lidar — now working), 4 (rates,
-incl. `/scan` at 10.17 Hz) done; task 5 (baseline bag) still to record but no
-longer blocked. **Phase 2 code is written and reviewed** (see §3); its replay +
-hardware validation is now unblocked too (needs the baseline bag recorded).
+Phase 1 is **effectively done.** SSH+DDS, lidar (YDLIDAR TG30, working),
+sensor rates (5 Hz control decided), baseline bag, and the occlusion-mask
+question are all closed — see §3. Phase 2 (safety layer) has both software
+test tiers passing (unit 90, replay 9 — see §3 2026-08-14) and both pending
+design decisions closed. The only thing separating this project from
+"robot control working" is the robot-side deploy: the project has never been
+cloned onto `bernard-2`.
 
-**RESOLVED 2026-08-12 (session 3) — the lidar was never a hardware fault; it is a
-YDLIDAR TG30 driven by the wrong driver.** Full detail in §3. Summary: it needs
-`ydlidar_ros2_driver` at **baudrate 512000** (`lidar_type:=0`, TOF, non-single-
-channel, `support_motor_dtr:=true`) PLUS **external motor power** via the adapter's
-micro-USB into the powered USB hub (USB-C = data to Jetson). Every prior session
-used SLAMTEC's `sllidar_ros2`, which a YDLidar cannot answer — hence the
-`SL_RESULT_OPERATION_TIMEOUT` that looked like dead hardware. `/scan` now streams
-at 10.17 Hz, 360°, 2020 pts, `frame_id:=laser_link`. The device is a generic
-CP2102 (`10c4:ea60`), so `/dev/rplidar` and `/dev/ydlidar` both symlink it — the
-name means nothing; only the physical label (YDLidar) and the working driver do.
-**Do not reintroduce `sllidar` for this unit.** Yahboom's name for this variant
-is "4ROS"; ground-truth config is `4ROS_multi.launch.xml` in `yahboomcar_multi`.
+**BLOCKER — robot has no GitHub access for this repo.** `~/ncp_ws` does not
+exist on the robot. A dedicated deploy key was generated there
+(`~/.ssh/ncp_ws_deploy`, alias `github-ncp`), matching the existing
+per-repo pattern (`lumen_deploy`, `cradle_deploy`). **Operator must register
+the pubkey as a read-only deploy key on `devpatel2003/ncp_ws`** before the
+clone can proceed — public key and clone command are in §3, 2026-08-14 entry.
+Once registered: `ssh bernard-2 'GIT_SSH_COMMAND="ssh -F ~/.ssh/config" git
+clone git@github-ncp:devpatel2003/ncp_ws.git ~/ncp_ws'`, then `colcon build`
+inside it (colcon is present; workspace layout should match
+`yahboomcar_ros2_ws/yahboomcar_ws`).
 
-Still TODO on the lidar, now that it runs: record the baseline/static bag and a
-single `/scan` fixture (tasks 4/5 below); set `lidar.range_max` and the self-
-occlusion mask in `config/interface.yaml` from a real captured scan (2020 pts,
-0.01–64 m); write the `rm_bringup` lidar launch using the 4ROS params above.
+**STANDING TRAP — Yahboom autostart grabs the base-board serial, every boot.**
+`python3 …/Rosmaster/rosmaster/rosmaster_main.py` holds `/dev/myserial`
+(ttyUSB1). If it's up when `yahboomcar_bringup` starts, the driver's
+serial-receive thread crashes and **all** base data — `/voltage`,
+`/imu/data_raw`, `/vel_raw` — silently reads zero while topics keep
+publishing normally. Confirmed live again 2026-08-14 (PID 4218). Preflight:
+`sudo fuser -v /dev/ttyUSB1`; if held, kill that exact PID (never `pkill -f`
+— see robot-ssh skill) and relaunch bringup. Durable fix (disable the
+autostart) not yet done.
 
-**STANDING TRAP — Yahboom autostart grabs the base-board serial.** A factory
-autostart, `python3 …/Rosmaster/rosmaster/rosmaster_main.py`, holds
-`/dev/myserial` (ttyUSB1, the STM32) and recurs **every boot**. If it is up when
-`yahboomcar_bringup` starts, the driver's serial-receive thread crashes
-("multiple access on port") and **all** base data — `/voltage`, `/imu/data_raw`,
-`/vel_raw` — silently reads zero while topics keep publishing at normal rate.
-Preflight: `sudo fuser -v /dev/ttyUSB1`; if `rosmaster_main.py` holds it, kill
-that PID (exact PID, not `pkill -f`) and relaunch bringup. See the robot-ssh
-skill. (The durable fix is to disable the autostart on the Jetson, not yet done.)
-
-Battery **charged — 10.6 V** under bringup at the start of session 3 (above the
-10.0 V floor). Base board healthy after the standing-trap autostart kill.
-
-**RESOLVED 2026-08-12 by removal — the IMU rotation no longer blocks Phase 3.**
-`imu_link` is rotated 180°/0°/−90° (RPY) from `base_link`, so the 6 raw IMU
-observation dims were the only part of the vector in a non-`base_link` frame:
-unrotated, forward acceleration lands on the wrong component and at least one
-sign flips, silently. Interface 2.0.0 drops the IMU block entirely, so nothing
-we build reads `/imu/data_raw` any more.
-
-**Sidestepped, not solved.** The rotation is still live for
-`robot_localization`'s EKF, which consumes the IMU to produce `/odom` and does
-its own TF lookup — that is exactly why `/odom` is safe to use and raw
-`/imu/data_raw` was not. It comes back the moment anyone re-adds a raw IMU
-channel, which is an `interface_version` bump **and** requires resolving the
-rotation first. The `imu_link` entry in `config/interface.yaml` stays for that
-reason; it is not dead config.
+**Robot network keeps moving.** Third address change this project
+(`192.168.1.154` → `10.0.0.107` → `192.168.0.190`, confirmed 2026-08-14).
+Workstation `~/.ssh/config`'s `bernard-2` alias now points at the mDNS
+hostname `bernard-2.local` instead of a hardcoded IP — should stop this from
+recurring as a blocker. `origin` for this repo is also now SSH
+(`git@github.com:devpatel2003/ncp_ws.git`), not HTTPS — GitHub retired
+password auth for git operations.
 
 Settled, do not re-open:
 - Observation stays **forward-180°, 36 bins** despite the lidar being 360°
-  (a YDLIDAR TG30, 2020 pts/scan; operator, 2026-08-07). The robot is therefore
-  blind behind — the safety layer treats reverse as unguarded motion.
-- Base velocity is **`/odom`** (EKF, has a header) not `/vel_raw` (bare Twist,
-  no timestamp — cannot support honest staleness detection).
-- IMU source, *if one is ever re-added*, is **`/imu/data_raw`**; `/imu/data` is
-  Madgwick-fused and its value is the orientation quaternion we do not use.
-  Moot as of 2.0.0 — nothing subscribes to either.
+  (a YDLIDAR TG30, 2020 pts/scan; operator, 2026-08-07). The robot is
+  therefore blind behind — the safety layer treats reverse as unguarded
+  motion.
+- **No self-occlusion mask** (operator, 2026-08-14, confirmed against live
+  scans on this unit — `self_occlusion_zones_deg: []` in `interface.yaml`).
+  The previous team's Astra-Pro-era zones do not apply to this build.
+- **Pre-latch stop-zone reads soft-stop to zero, not full velocity**
+  (operator, 2026-08-14; see §3 and `safety_validation.md` §2b). Fixed in
+  `safety_logic.evaluate()`.
+- Base velocity is **`/odom`** (EKF, has a header) not `/vel_raw` (bare
+  Twist, no timestamp — cannot support honest staleness detection).
+- IMU source, *if one is ever re-added*, is **`/imu/data_raw`**; moot as of
+  interface 2.0.0 — nothing subscribes to either IMU topic.
 - `ROS_DOMAIN_ID` is **28**, dictated by the Jetson host.
 - Action space is **2 dims `[vx, wz]`**, no lateral strafe (operator,
   2026-08-12). The safety layer nonetheless keeps lateral clamps and arcs.
 - **No IMU in the observation** (operator, 2026-08-12). Proprioception comes
-  via `/odom`, which is EKF-fused from the encoders and IMU.
+  via `/odom`, EKF-fused from the encoders and IMU. The `imu_link` rotation
+  (180°/0°/−90° RPY from `base_link`) is sidestepped, not solved — it comes
+  back the moment anyone re-adds a raw IMU channel.
 
 ### Next session, in order
 
-0. **Robot preflight:** battery ≥ 10 V; re-copy the DDS profile to `/tmp`; after
-   bringup, run `sudo fuser -v /dev/ttyUSB1` and kill `rosmaster_main.py` if it
-   holds the port (the standing trap above), then confirm `/voltage` is non-zero.
-1. ~~Lidar hardware check.~~ **DONE 2026-08-12 s3 — not a fault; YDLIDAR TG30,
-   wrong driver. Use `ydlidar_ros2_driver` at baud 512000, see §3.**
-2. ~~Relaunch lidar with `frame_id:=laser_link`.~~ **DONE — `/scan` streams with
-   `frame_id:=laser_link`.** (The `laser` default is still the trap to avoid.)
-3. ~~Measure `/scan` rate.~~ **DONE — 10.17 Hz, std dev ~1.5 ms.** Everything
-   sensor-side is ~10 Hz, so 10 Hz control leaves zero headroom; **5 Hz is the
-   conservative option** and now the standing recommendation for Phase 3. Still
-   to write the rate into `docs/deployment.md` §6.
-4. ~~Record a short static bag.~~ **DONE 2026-08-12 s3** —
-   `tests/fixtures/ncp_static_bag` (60 s, 6125 msgs, all sensor topics, real
-   data). Still TODO: `ros2 topic delay` for latency (BUILD-PLAN task 4 wants it).
-5. ~~Capture one raw `/scan` message.~~ **DONE** — two fixtures:
-   `tg30_scan_sample.yaml` (cluttered room) and `tg30_open_scan.yaml` (open
-   space, the better basis). **PRELIMINARY occlusion finding (open-space scan,
-   1 frame):** ZERO close returns (<0.35 m) anywhere in the forward 180° arc —
-   all 43 near-returns were rear/side. Strong hint that on our unit the camera/
-   body does NOT occlude the forward scan plane (matches geometry: `camera_link`
-   is 7.2 cm BELOW `laser_link`), so the previous team's `[-6,+6]` Astra-Pro zone
-   likely does not apply and the forward arc may need NO mask. **NOT yet
-   final** — confirm with a multi-scan capture (~20 frames) that no forward angle
-   has a *persistent* close return before removing the `self_occlusion_zones_deg`
-   from `interface.yaml`. That multi-scan check is the one remaining robot task
-   for the mask.
-6. Verify all five sensor streams in RVIZ2 from the workstation, no X11.
-7. Teleop baseline bag — **operator only, never an agent**.
-8. ~~Resolve the IMU rotation before touching Phase 3.~~ Closed 2026-08-12 by
-   removing the IMU from the observation (interface 2.0.0). Nothing to do.
+1. **Register the robot's deploy-key pubkey on GitHub** (§3, 2026-08-14
+   entry) — this unblocks everything else.
+2. Clone + `colcon build` `rm_interfaces`, `rm_safety`, `rm_bringup` on the
+   robot.
+3. Robot preflight: `sudo fuser -v /dev/ttyUSB1`, kill `rosmaster_main.py` by
+   exact PID if it holds the port, launch bringup, confirm `/voltage`
+   non-zero and battery ≥ 10 V.
+4. Launch `rm_safety` via `safety.launch.py` on the robot for the first
+   time — it has only been path-checked offline, never actually run. This is
+   the real unknown standing between now and "robot control working."
+5. Hardware safety checklist (`safety_validation.md` §3) — operator + kill
+   switch in hand, wheels off the ground first, **never an agent**: teleop
+   clamping, walk-toward-lidar slow/stop zones, kill service mid-motion,
+   command-publisher-killed watchdog, cover-the-lidar stale-scan e-stop,
+   restart-while-killed.
+6. Sign off `safety_validation.md`'s hardware rows once 5 passes.
+7. Only after safety is proven live on hardware: wire up teleop or a
+   placeholder `/policy/cmd_vel` publisher through `rm_safety` to actually
+   drive the robot.
 
-**Phase 2 (safety layer) — software tiers done; hardware tier + one decision
-remain.** `rm_interfaces`, `rm_safety/safety_logic.py` and
-`rm_safety/safety_node.py` are written and reviewed. Status of the four items:
-(a) **DONE 2026-08-13** — `rm_bringup` launch file
-`src/rm_bringup/launch/safety.launch.py` (params from `safety_limits.yaml`,
-killed-on-startup preserved; `setup.py` installs `launch/`; byte-compiled +
-path-checked offline, NOT colcon-built). (b) **DONE 2026-08-13** — replay tests
-`tests/replay/` (9 pass) against the baseline bag + TG30 captures, ROS-free via
-a self-checking CDR reader; unit tier still 81 pass (total **90**). (c) hardware
-safety checklist (BUILD-PLAN Phase 2 §Testing item 3) — operator + kill switch
-in hand, wheels off the ground first, **never an agent** — STILL TODO. (d)
-sign-off in `docs/safety_validation.md` — unit + replay rows filled PASS; the
-hardware rows and final signature are the operator's — STILL TODO. Do not
-`colcon build` on the workstation shell — ROS lives in a container here.
+Still open, lower priority: `ros2 topic delay` latency capture (BUILD-PLAN
+task 4 wants it alongside rate); a clear-path open-space bag (current
+baseline bag has a real 0.21 m forward obstacle, so it can't serve as the
+"no spurious e-stop on a clear path" case); teleop baseline bag
+(**operator only, never an agent**).
 
-**OPERATOR DECISION PENDING (pre-hardware):** replay surfaced that a sustained
-*stop*-zone obstacle emits full velocity for the first (N−1) filter ticks
-(~400 ms un-slowed at 5 Hz) before latching, while a farther *slow*-zone
-obstacle slows immediately. Written up in `docs/safety_validation.md` §2b.
-Recommendation: apply slow-zone scaling to un-latched stop-zone readings. Not
-changed by an agent — it is a safety-logic design call.
+### Remote-command gotchas
 
-Also still open for Phase 2/1: a **clear-path open-space bag** (the current
-baseline bag has a real 0.21 m forward obstacle, so it cannot serve as the
-"no spurious e-stop on a clear path" replay case) — operator recording task.
-
-### Robot state at session end (2026-08-08)
-
-I tried to stop the nodes I had launched (bringup + camera) at wrap-up, but the
-robot had already gone off the network — either powered down or the battery
-gave out again after reading 9.9 V under load. So they were not stopped
-cleanly; they died with the machine. No harm done: none of them run at boot and
-nothing persists, but the disorderly stop is worth knowing if the next session
-finds anything odd.
-
-The robot is otherwise untouched: no files written outside `/tmp`, no packages
-installed, no repo cloned on it yet.
-
-**Check the battery first thing next session** — this is twice now that it has
-dropped off mid-session. If a full charge does not hold, the pack itself is
-suspect, and that would need settling before any Phase 2 hardware testing,
-where losing power mid-run with a policy driving is a genuine safety issue.
-
-`/tmp/ncp_fastdds_peers.xml` is a copy of `config/fastdds_unicast_peers.xml`
-placed there for this session; `/tmp` does not survive reboot, so re-copy it
-next session (`scp config/fastdds_unicast_peers.xml bernard-2:/tmp/ncp_fastdds_peers.xml`).
-The durable fix is to clone this repo onto the robot and point
-`FASTRTPS_DEFAULT_PROFILES_FILE` at the in-repo copy.
-
-### Remote-command gotchas (cost real time — do not rediscover)
-
-- **Non-interactive SSH does not source `~/.bashrc`.** Ubuntu's bashrc returns
-  early for non-interactive shells, before the ROS lines. `ssh bernard-2
-  'ros2 topic list'` fails with an empty `ROS_DISTRO`. Every remote command
-  needs the explicit source prelude — see `docs/phase1_session_2026-08-08.md`.
-- **Never `pkill -f <pattern>` where the pattern appears in your own SSH
-  command line.** It matches the remote shell running it and kills the session.
-- `ros2 multicast send/receive` passing proves **nothing** about DDS. It uses
-  group 225.0.0.1; FastDDS discovery uses 239.255.0.1, which this AP drops.
-- A portless FastDDS initial-peer locator only covers participant IDs
-  0..`maxInitialPeersRange`, **default 4**. The robot runs 8 nodes, so the
-  default gives partial, silent discovery failure that looks like a flaky
-  network. Set to 20 in our profile.
+Full detail now lives in the `robot-ssh` skill (source prelude requirement,
+`pkill -f` self-match trap, multicast-proves-nothing, `maxInitialPeersRange`
+default-4 trap) — load that skill before any robot SSH command rather than
+duplicating it here.
 
 ---
 

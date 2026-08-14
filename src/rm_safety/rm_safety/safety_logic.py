@@ -702,7 +702,12 @@ def evaluate(inputs: EvalInputs, limits: Limits) -> Decision:
                        STOPPED.
     4. COMMAND STALE — command_age_ms > command_timeout_ms; output zero,
                        state STOPPED.
-    5. SLOW ZONE     — obstacle in slow zone: scale velocity, state SLOW.
+    5. SLOW ZONE     — obstacle in slow zone, OR in the stop zone but not yet
+                       latched (pre-latch window): scale velocity via
+                       slow_scale(), state SLOW. The stop-zone case scales to
+                       0.0 (min_r <= stop_zone_m), so it behaves as an
+                       immediate soft-stop rather than full speed until the
+                       latch trips (operator decision, 2026-08-14).
     6. NOMINAL       — velocity clamping + acceleration limiting; state OK.
 
     Fail-closed: any unhandled exception inside this function is caught and
@@ -907,15 +912,24 @@ def _evaluate_inner(inputs: EvalInputs, limits: Limits) -> Decision:
 
     # ------------------------------------------------------------------
     # Precedence 5: SLOW ZONE — scale the clamped+limited velocities.
+    #
+    # Also covers the pre-latch stop-zone window (operator decision,
+    # 2026-08-14, see safety_validation.md §2b): a stop-zone reading that
+    # hasn't yet reached consecutive_scans_to_trigger falls into "stop" here,
+    # not "slow". Without this branch it fell through to NOMINAL and emitted
+    # full velocity for (N-1) ticks — a closer obstacle braked *later* than a
+    # farther one in the slow zone. slow_scale() already returns 0.0 for
+    # min_r <= stop_zone_m, so a pre-latch stop-zone reading is scaled to zero
+    # immediately, same effect as SLOW state ramping to zero at the boundary.
     # ------------------------------------------------------------------
-    if zone == "slow":
+    if zone in ("slow", "stop"):
         scale = slow_scale(min_r, limits)
         vx *= scale
         vy *= scale
         wz *= scale
         return Decision(
             state=State.SLOW,
-            reason="slow_zone",
+            reason="slow_zone" if zone == "slow" else "stop_zone_prelatch",
             out_vx=vx,
             out_vy=vy,
             out_wz=wz,

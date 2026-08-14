@@ -107,10 +107,10 @@ observation:
       preprocessing: >-
         Operator decision: use the forward 180 deg arc only, min-pooled into
         36 bins of 10 deg each (nearest obstacle per sector — min, NOT mean,
-        so a narrow obstacle is never averaged away). Drop self-occlusion
-        rays FIRST, then clip to [range_min, range_max], then replace
-        no-return rays with range_max, then min-pool, then divide by range_max
-        giving [0, 1].
+        so a narrow obstacle is never averaged away). Clip to
+        [range_min, range_max], then replace no-return rays with range_max,
+        then min-pool, then divide by range_max giving [0, 1]. No
+        self-occlusion masking step — see self_occlusion_zones_deg below.
       # CRITICAL (measured 2026-08-12 s3): the YDLIDAR TG30 encodes a no-return
       # as 0.0, NOT inf/NaN — the driver was launched with
       # invalid_range_is_inf:=false. A 0.0 left untreated reads as an obstacle
@@ -143,29 +143,25 @@ observation:
       points_per_scan: 2020
       scan_convention: index 0 at angle_min; angle = angle_min + i*angle_increment
 
-      # Rays that hit the robot's own body. These MUST be dropped before
-      # pooling: a min-pool over a bin containing a self-hit returns the
-      # distance to the robot's own chassis, i.e. a permanent phantom
-      # obstacle, and the e-stop would latch the moment it is enabled.
+      # REMOVED 2026-08-14 (operator decision). The previous team's zones
+      # (below, inherited from their Astra Pro build) do NOT apply to this
+      # unit: camera_link sits 7.2 cm BELOW laser_link (see coordinate_frames
+      # below), so the camera body does not sit in the scan plane. Confirmed
+      # by the operator against live scans on this robot — no persistent
+      # close return anywhere in the forward 180 deg arc. No masking step is
+      # applied; every ray in range is pooled.
       #
-      # Values below are the previous team's, calibrated 2026-02-23 on this
-      # platform. TODO(phase1): re-verify on OUR unit from a static diagnostic
-      # scan in open space — mounting differs between builds.
-      #
-      # Note the first zone straddles 0 deg (the Astra Pro camera body sits
-      # directly in front of the lidar). That is dead centre of our forward
-      # arc and lands in the most safety-critical bin.
-      self_occlusion_zones_deg:
-        - [-6.0, 6.0]      # Astra Pro camera body, directly ahead
-        - [18.0, 24.0]     # cable/bracket at ~20 deg
-        - [38.0, 41.0]     # structure at ~39 deg
-      # At 10 deg bins over [-90, +90] none of the three zones covers a whole
-      # bin (the widest, -6..+6, takes 60% of the two bins adjacent to 0), so
-      # every bin retains valid rays. That must be ASSERTED, not assumed:
-      #   - a bin left with zero valid rays after masking is a sensor fault,
-      #     not "clear". The observation builder returns None and the safety
-      #     layer treats it as a stale scan -> e-stop. Filling it with
-      #     range_max would be fail-OPEN and is forbidden.
+      # Previous team's values, kept for reference only — DO NOT reinstate
+      # without re-measuring on this unit:
+      #   - [-6.0, 6.0]      # Astra Pro camera body, directly ahead
+      #   - [18.0, 24.0]     # cable/bracket at ~20 deg
+      #   - [38.0, 41.0]     # structure at ~39 deg
+      self_occlusion_zones_deg: []
+      # A bin left with zero valid rays (e.g. a genuine sensor fault) is still
+      # not "clear": the observation builder returns None and the safety
+      # layer treats it as a stale scan -> e-stop. Filling it with range_max
+      # would be fail-OPEN and is forbidden. This policy stays even with an
+      # empty mask list — it now only guards against scan corruption/dropout.
       empty_bin_policy: fault   # never range_max — that would be fail-open
 
     - name: base_velocity
