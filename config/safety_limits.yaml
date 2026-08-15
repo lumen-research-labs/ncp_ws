@@ -54,6 +54,61 @@ estop:
                         # and the robot can still be pushed or drift sideways
                         # on mecanum rollers. Monitoring is not conditional on
                         # the policy's action space.
+                        #
+                        # Full 60 deg restored 2026-08-14 — self-occlusion is
+                        # now handled by self_occlusion_zones_deg below
+                        # instead of shrinking real coverage. See that key's
+                        # comment for the measurement and rationale.
+
+  # Rays that hit the robot's own chassis. Mirrors interface.yaml's lidar
+  # observation mask (self_occlusion_zones_deg there), but independent of it
+  # — min_range_in_arcs() has its own arc definition (forward_arc_deg +
+  # lateral_arc_deg) and previously had NO occlusion masking at all.
+  #
+  # MEASURED 2026-08-14: two symmetric chassis standoffs read stable, real
+  # (non-zero) returns well inside the 0.35 m stop zone, confirmed across 5
+  # independent scans in an open room with nothing else within 1 m, and
+  # present both before and after repositioning the robot (angle/range
+  # unchanged by moving the robot -> self-hit, not an environmental object):
+  #   LEFT  standoff: ~97 to 118 deg,  range ~0.25-0.26 m
+  #   RIGHT standoff: ~-108 to -130 deg, range ~0.106-0.125 m
+  # Both fall inside the old unmasked 60-120 deg lateral bands, so
+  # min_range_in_arcs() always saw < stop_zone_m there. latching: true means
+  # the estop triggered within consecutive_scans_to_trigger of every launch
+  # and never cleared -- /safety/reset re-latches immediately whenever
+  # is_stop_zone is still true, which it always was. This is what made the
+  # robot appear permanently stuck after every reset attempt.
+  #
+  # A symmetric narrowing of lateral_arc_deg was tried first and rejected:
+  # clearing both standoffs that way required shrinking to ~10-12 deg total,
+  # which would have gutted real lateral obstacle coverage on both sides to
+  # work around a mounting artifact on both sides. This explicit mask keeps
+  # the full 60 deg lateral arc everywhere except the standoffs themselves.
+  #
+  # Zones given ~5 deg of margin beyond the measured extent (widened from an
+  # initial ~2-3 deg pass after safety review flagged it as too tight against
+  # measurement jitter: angle varied ~1 deg scan-to-scan, plus the TG30's
+  # 0.178 deg angular quantization -- a standoff edge landing outside a
+  # too-tight mask would silently reproduce the exact permanent-latch bug
+  # this fix exists to solve. No coverage cost to widening further here,
+  # since this whole sector was already a dead zone (the beam terminates on
+  # the standoff at any range, so there was no real detection capability to
+  # give up). Format matches interface.yaml: list of [lo_deg, hi_deg] pairs,
+  # NOT wrapping across +-180 (neither zone needs to). A ray inside any zone
+  # is dropped before the forward/lateral arc check, exactly like the lidar
+  # observation mask -- this is occlusion removal, not "treat as clear": if
+  # the ONLY returns in a monitored arc happen to be masked ones, the
+  # monitored zone correctly falls back to no-signal-in-zone (not an
+  # obstacle), never to a phantom "no obstacle" verdict.
+  #
+  # NOTE: this is a SEPARATE mask from config/interface.yaml's
+  # self_occlusion_zones_deg (the lidar OBSERVATION pipeline's forward-180
+  # mask, currently empty -- see that file's 2026-08-14 note). The two
+  # configs monitor different arcs for different purposes and do not
+  # interact; do not conflate them.
+  self_occlusion_zones_deg:
+    - [92.0, 123.0]     # LEFT standoff (measured ~97.3-117.7 deg)
+    - [-135.0, -103.0]  # RIGHT standoff (measured ~-108.2 to -130.0 deg)
   consecutive_scans_to_trigger: 3   # noise filter; a single bad return must
                                     # never latch a stop
   latching: true        # once stopped, stays stopped until /safety/reset

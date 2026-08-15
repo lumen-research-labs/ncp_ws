@@ -15,7 +15,8 @@ the ground, and a hand on the power switch, and cannot be run by an agent.
 ## 1. Unit tests (no ROS runtime)
 
 Pure functions in `rm_safety/safety_logic.py`. Run: `pytest tests/unit/`
-(81 tests, all passing 2026-08-13).
+(83 tests, all passing 2026-08-14 — 81 as of 2026-08-13 plus 2 added for the
+self-occlusion masking fix, §2c).
 
 | Case | Expected | Result | Date | Operator |
 |---|---|---|---|---|
@@ -77,6 +78,68 @@ obstacle brakes later" inversion. The previously-pinning test
 `test_prelatch_window_emits_zero_velocity`, which pins the new behaviour;
 `test_sample_scan_latches_after_consecutive_window` updated to expect `SLOW`
 (not `OK`) on pre-latch ticks. Both pass.
+
+### 2c. RESOLVED 2026-08-14 (operator decision) — chassis standoffs permanently latching the e-stop, accepted blind sectors
+
+First live hardware session: `rm_safety` latched STOPPED within seconds of
+every launch and every `/safety/reset` call, with no way to clear it —
+correct behaviour for a genuine obstacle, but the robot was in an open room
+with nothing within 1 m at the time. Root-caused via multiple raw `/scan`
+captures (analyzed offline, not through `rm_safety`): two chassis-mounted
+mounting standoffs — one on each side of the robot — produce stable, real
+(non-zero, not the TG30 `0.0` no-return case) lidar returns well inside the
+0.35 m stop zone. Confirmed self-hit, not an environmental object: identical
+angle and range across 5+ independent scans, unchanged before and after
+physically repositioning the robot.
+
+- LEFT standoff: ~97.3–117.7°, range ~0.25–0.26 m
+- RIGHT standoff: ~-108.2 to -130.0°, range ~0.106–0.125 m
+
+Both fall inside the (then-unmasked) 60° lateral arcs centred at ±90°
+(`estop.lateral_arc_deg`), so `min_range_in_arcs()` always read < 0.35 m on
+both sides. Because `estop.latching: true`, and `/safety/reset` re-latches
+immediately whenever `is_stop_zone` is still true (by design — see
+`safety_logic.py`'s reset-with-obstacle-still-present branch), the robot
+could never actually clear.
+
+**Considered and REJECTED: symmetric fix.** Narrowing `lateral_arc_deg` to
+clear both standoffs would have required shrinking it to ~10–12° (from 60°)
+on each side — gutting real lateral obstacle coverage on both sides to work
+around a mounting artifact. Rejected as an unacceptable safety trade-off.
+
+**Decision: explicit self-occlusion mask in `min_range_in_arcs()`,
+mirroring `config/interface.yaml`'s lidar-observation mask but as a
+separate, independently-configured mask** (different function, different
+arc definition — the two do not interact; see the note in
+`safety_limits.yaml`). New `estop.self_occlusion_zones_deg` config:
+`[[92.0, 123.0], [-135.0, -103.0]]` (~5° margin beyond the measured extent
+on every edge — widened from an initial ~2–3° pass after safety review
+flagged that margin as too tight against measurement jitter, ~±1° scan-to-
+scan plus the TG30's 0.178° angular quantization). A ray inside either zone
+is dropped before the forward/lateral arc membership check — masked out
+entirely, not counted as "clear" — so a monitored arc whose only returns are
+masked still correctly falls back to no-signal-in-zone. Reviewed:
+`min_range_in_arcs()`'s existing `+inf`-on-no-valid-returns path, combined
+with `evaluate()`'s existing no-perception → `scan_stale` → `STOPPED`
+handling, means "everything in an arc is masked" still fails closed, not
+open. Two new unit tests pin the masking (`test_self_occlusion_zone_masks_chassis_standoff`,
+`test_just_outside_self_occlusion_zone_still_detected`); unit 83/83 and
+replay 9/9 pass.
+
+**Accepted risk — this is a permanent, angle-only blind sector, not just a
+standoff-range filter.** Any real obstacle at a bearing inside
+`[92°,123°]` or `[-135°,-103°]`, *at any range*, is now invisible to the
+e-stop, not only returns near the standoffs' own ~0.11–0.26 m. In practice
+this is very likely a non-issue: at those exact bearings the beam already
+terminated on the standoff before this fix, so there was no real detection
+capability there to give up — the mask formalizes an existing blind spot
+rather than creating a new one. Recorded here alongside the existing
+accepted blind spot (rear hemisphere, chassis-occluded, "the robot must be
+treated as blind behind" — CLAUDE.md §1/§4) as the same category of
+decision. Not yet validated on real hardware beyond the hardware tier in
+§3 below — the "walk toward lidar" test should specifically include an
+approach from directly behind each standoff's bearing to confirm the accepted
+blind sector behaves as expected in practice, not just in the scan math.
 
 ## 3. Hardware tests — no policy, wheels off ground first
 

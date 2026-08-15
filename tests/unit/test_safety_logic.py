@@ -517,6 +517,42 @@ class TestMinRangeInArcs:
         result = min_range_in_arcs(ranges, amin, ainc, real_limits)
         assert result == pytest.approx(0.3)
 
+    def test_self_occlusion_zone_masks_chassis_standoff(
+        self, real_limits: Limits
+    ) -> None:
+        """A close return INSIDE a self_occlusion_zones_deg zone (real
+        config: LEFT standoff ~95-120 deg, RIGHT ~-132 to -105 deg) must be
+        masked out entirely, not reported as an obstacle -- this is the fix
+        for the 2026-08-14 chassis standoff finding (see safety_limits.yaml
+        estop.self_occlusion_zones_deg and CLAUDE.md).
+        """
+        n = 3600  # 0.1 deg resolution, enough to land inside a narrow zone
+        ranges, amin, ainc = _flat_scan(5.0, n)
+        for deg in (100.0, 110.0, -110.0, -120.0):
+            idx = round((math.radians(deg) - amin) / ainc)
+            idx = max(0, min(n - 1, idx))
+            ranges[idx] = 0.05  # deep inside the 0.35 m stop zone
+        result = min_range_in_arcs(ranges, amin, ainc, real_limits)
+        # All four close returns are masked; the flat 5.0 m background wins.
+        assert result == pytest.approx(5.0)
+
+    def test_just_outside_self_occlusion_zone_still_detected(
+        self, real_limits: Limits
+    ) -> None:
+        """A close return just past a masked zone's edge (still inside the
+        forward/lateral arcs) must still be treated as a real obstacle --
+        the mask must not swallow more than its configured span.
+        """
+        n = 3600
+        ranges, amin, ainc = _flat_scan(5.0, n)
+        # 90 deg is inside lateral_arc_deg (60-120) but outside the LEFT
+        # occlusion zone (95-120).
+        idx = round((math.radians(90.0) - amin) / ainc)
+        idx = max(0, min(n - 1, idx))
+        ranges[idx] = 0.2
+        result = min_range_in_arcs(ranges, amin, ainc, real_limits)
+        assert result == pytest.approx(0.2)
+
 
 # ===========================================================================
 # Tests: evaluate — high-level FSM behaviour

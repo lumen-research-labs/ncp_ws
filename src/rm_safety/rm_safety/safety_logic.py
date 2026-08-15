@@ -91,6 +91,11 @@ class EstopLimits:
     lateral_arc_deg: float
     consecutive_scans_to_trigger: int
     latching: bool
+    # Chassis self-hit exclusion zones, degrees, [(lo, hi), ...]. A ray whose
+    # angle falls in any zone is dropped before the forward/lateral arc
+    # check in min_range_in_arcs(). See safety_limits.yaml estop.
+    # self_occlusion_zones_deg for the measurement behind this.
+    self_occlusion_zones_deg: Tuple[Tuple[float, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -169,6 +174,10 @@ class Limits:
                 lateral_arc_deg=float(e["lateral_arc_deg"]),
                 consecutive_scans_to_trigger=int(e["consecutive_scans_to_trigger"]),
                 latching=bool(e["latching"]),
+                self_occlusion_zones_deg=tuple(
+                    (float(lo), float(hi))
+                    for lo, hi in e.get("self_occlusion_zones_deg", [])
+                ),
             ),
             timeouts=TimeoutLimits(
                 command_timeout_ms=float(t["command_timeout_ms"]),
@@ -471,6 +480,16 @@ def min_range_in_arcs(
 
     The rear hemisphere is chassis-occluded and NOT monitored.
 
+    Rays whose angle falls inside any of ``limits.estop.self_occlusion_zones_deg``
+    are dropped before the arc check — these are known chassis self-hits
+    (e.g. mounting standoffs), not real obstacles. This mirrors the lidar
+    observation pipeline's self-occlusion mask (interface.yaml) but is a
+    separate mask, since this function's arcs are independently configured
+    (forward_arc_deg + lateral_arc_deg, not the observation's forward-180).
+    Masking a ray removes it from consideration entirely — it does not count
+    as "clear" evidence, so a monitored arc whose only returns are masked
+    correctly falls back to no-signal-in-zone, not a phantom all-clear.
+
     Invalid returns (NaN, inf, <= 0, outside ``[range_min, range_max]``) are
     skipped.  If NO valid returns exist in the monitored arcs, ``+inf`` is
     returned.  The caller (``evaluate``) MUST treat a no-valid-returns result
@@ -526,6 +545,10 @@ def min_range_in_arcs(
         angle_raw = angle_min + i * angle_increment
         # Normalise to (-pi, pi]
         angle = (angle_raw + math.pi) % (2 * math.pi) - math.pi
+        angle_deg = math.degrees(angle)
+
+        if any(lo <= angle_deg <= hi for lo, hi in limits.estop.self_occlusion_zones_deg):
+            continue
 
         in_forward = abs(angle) <= half_fwd
         in_left    = abs(angle - lat_centre_left)  <= half_lat
