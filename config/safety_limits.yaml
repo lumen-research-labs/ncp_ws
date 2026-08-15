@@ -106,9 +106,27 @@ estop:
   # mask, currently empty -- see that file's 2026-08-14 note). The two
   # configs monitor different arcs for different purposes and do not
   # interact; do not conflate them.
+  #
+  # RIGHT WIDENED 2026-08-14 (same session, operator decision): the first
+  # pass ([-132,-105], then margin-widened to [-135,-103]) still left
+  # -99 to -103 deg exposed. A second close feature was found there, live,
+  # while chasing a permanently-relatching e-stop: ~-99.3 to -101.9 deg,
+  # ~0.48-0.54 m, hovering close enough to the 0.35 m stop_zone_m boundary
+  # that ordinary reading jitter pushed it under the threshold on roughly
+  # half of all control ticks, re-latching instantly on every reset. The
+  # LEFT side has the same feature, mirrored (measured ~97.1-100.2 deg, down
+  # to 0.217 m) but was already inside the existing [92,123] LEFT zone.
+  # Operator confirmed nothing is physically present at either location and
+  # asked to mask the whole remaining sector back to the standoffs rather
+  # than keep chasing individual close readings one at a time. RIGHT widened
+  # from -103 to -97 (matching LEFT's 92 deg margin, mirrored) to bring both
+  # sides to parity; a small residual asymmetry ([92,123] vs [-135,-97], 31
+  # vs 38 deg wide) is left as-is rather than hand-tuned further without
+  # another live measurement pass.
   self_occlusion_zones_deg:
-    - [92.0, 123.0]     # LEFT standoff (measured ~97.3-117.7 deg)
-    - [-135.0, -103.0]  # RIGHT standoff (measured ~-108.2 to -130.0 deg)
+    - [92.0, 123.0]     # LEFT standoff (measured ~97.1-118 deg)
+    - [-135.0, -97.0]   # RIGHT standoff + adjacent close feature (measured
+                         # ~-99.3 to -130 deg)
   consecutive_scans_to_trigger: 3   # noise filter; a single bad return must
                                     # never latch a stop
   latching: true        # once stopped, stays stopped until /safety/reset
