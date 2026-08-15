@@ -132,12 +132,12 @@ def _make_inputs(
 
 class TestLimitsFromDict:
     def test_loads_velocity_limits(self, real_limits: Limits) -> None:
-        assert real_limits.velocity.max_vx == pytest.approx(0.25)
+        assert real_limits.velocity.max_vx == pytest.approx(0.15)
         assert real_limits.velocity.max_vy == pytest.approx(0.25)
         assert real_limits.velocity.max_wz == pytest.approx(0.4)
 
     def test_loads_acceleration_limits(self, real_limits: Limits) -> None:
-        assert real_limits.acceleration.max_ax == pytest.approx(0.5)
+        assert real_limits.acceleration.max_ax == pytest.approx(0.75)
         assert real_limits.acceleration.max_ay == pytest.approx(0.5)
         assert real_limits.acceleration.max_alpha_z == pytest.approx(1.0)
 
@@ -161,7 +161,7 @@ class TestLimitsFromDict:
 
 class TestClampVelocity:
     def test_in_range_passes_unchanged(self, real_limits: Limits) -> None:
-        # max_vx=0.25, max_vy=0.25, max_wz=0.4
+        # max_vx=0.15, max_vy=0.25, max_wz=0.4
         vx, vy, wz, clamped = clamp_velocity(0.1, 0.1, 0.2, real_limits)
         assert vx == pytest.approx(0.1)
         assert vy == pytest.approx(0.1)
@@ -176,7 +176,7 @@ class TestClampVelocity:
         assert clamped is False
 
     def test_over_range_clamped_positive(self, real_limits: Limits) -> None:
-        # 0.5 > max_vx=0.25
+        # 0.5 > max_vx=0.15
         vx, vy, wz, clamped = clamp_velocity(0.5, 0.0, 0.0, real_limits)
         assert vx == pytest.approx(real_limits.velocity.max_vx)
         assert clamped is True
@@ -223,8 +223,8 @@ class TestClampVelocity:
 
 class TestApplyAccelLimit:
     def test_small_step_passes_unchanged(self, real_limits: Limits) -> None:
-        # delta = 0.05 m/s over dt=0.1 s → accel = 0.5 m/s² = max_ax → allowed
-        # Use slightly less than max to confirm no limiting.
+        # delta = 0.04 m/s over dt=0.1 s → accel = 0.4 m/s^2 < max_ax=0.75 →
+        # allowed, no limiting.
         vx, vy, wz, limited = apply_accel_limit(
             0.04, 0.0, 0.0,   # target
             0.0,  0.0, 0.0,   # last
@@ -235,26 +235,26 @@ class TestApplyAccelLimit:
         assert limited is False
 
     def test_large_step_limited_to_max_a_times_dt(self, real_limits: Limits) -> None:
-        # max_ax=0.5, dt=0.1 → max_delta=0.05
-        # target=0.3, last=0 → delta=0.3, should be clamped to 0.05
+        # max_ax=0.75, dt=0.1 → max_delta=0.075
+        # target=0.3, last=0 → delta=0.3, should be clamped to 0.075
         vx, vy, wz, limited = apply_accel_limit(
             0.3, 0.0, 0.0,
             0.0, 0.0, 0.0,
             0.1,
             real_limits,
         )
-        assert vx == pytest.approx(0.05)
+        assert vx == pytest.approx(0.075)
         assert limited is True
 
     def test_negative_step_limited(self, real_limits: Limits) -> None:
-        # target=-0.3, last=0, max_ax=0.5, dt=0.1 → allowed=-0.05
+        # target=-0.3, last=0, max_ax=0.75, dt=0.1 → allowed=-0.075
         vx, vy, wz, limited = apply_accel_limit(
             -0.3, 0.0, 0.0,
             0.0,  0.0, 0.0,
             0.1,
             real_limits,
         )
-        assert vx == pytest.approx(-0.05)
+        assert vx == pytest.approx(-0.075)
         assert limited is True
 
     def test_zero_dt_returns_zeros(self, real_limits: Limits) -> None:
@@ -301,14 +301,14 @@ class TestApplyAccelLimit:
         assert limited is True
 
     def test_exact_max_accel_step_not_limited(self, real_limits: Limits) -> None:
-        # max_ax=0.5, dt=0.1 → max_delta=0.05; target exactly at max
+        # max_ax=0.75, dt=0.1 → max_delta=0.075; target exactly at max
         vx, vy, wz, limited = apply_accel_limit(
-            0.05, 0.0, 0.0,
+            0.075, 0.0, 0.0,
             0.0,  0.0, 0.0,
             0.1,
             real_limits,
         )
-        assert vx == pytest.approx(0.05)
+        assert vx == pytest.approx(0.075)
         assert limited is False
 
 
@@ -775,6 +775,10 @@ class TestEvaluate:
         self, real_limits: Limits
     ) -> None:
         # Place obstacle at midpoint → scale should be 0.5.
+        # Command exactly at max_vx so clamp_velocity() is a no-op and the
+        # slow-zone scale factor is isolated cleanly (was hardcoded 0.2,
+        # which exceeded max_vx after it was lowered to 0.15 2026-08-14 and
+        # got clamped before scaling, breaking this test's assumption).
         n = 360
         mid_range = (
             real_limits.estop.stop_zone_m + real_limits.estop.slow_zone_m
@@ -782,19 +786,20 @@ class TestEvaluate:
         slow_scan = [5.0] * n
         idx = round((0.0 - (-math.pi)) / math.radians(1.0))
         slow_scan[idx] = mid_range
+        cmd_vx = real_limits.velocity.max_vx
         inp = _make_inputs(
             real_limits,
             scan_ranges=slow_scan,
             scan_angle_min=-math.pi,
             scan_angle_increment=math.radians(1.0),
-            cmd_vx=0.2,
-            last_vx=0.2,   # no accel limit so we see the scale clearly
+            cmd_vx=cmd_vx,
+            last_vx=cmd_vx,   # no accel limit so we see the scale clearly
             dt=0.1,
         )
         dec = evaluate(inp, real_limits)
         assert dec.state == State.SLOW
         expected_scale = 0.5
-        assert dec.out_vx == pytest.approx(0.2 * expected_scale, abs=1e-3)
+        assert dec.out_vx == pytest.approx(cmd_vx * expected_scale, abs=1e-3)
 
     # -----------------------------------------------------------------------
     # Nominal (OK) path: clamping and accel limiting

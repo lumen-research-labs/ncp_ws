@@ -13,7 +13,8 @@ velocity_limits:
   # Absolute caps applied to every command regardless of source. These are at
   # or below the action scaling in interface.yaml so the safety layer is
   # always the tighter of the two.
-  max_vx: 0.25          # m/s   — forward/back
+  max_vx: 0.15          # m/s   — forward/back. Lowered from 0.25, 2026-08-14
+                        # operator decision during live teleop testing.
   max_vy: 0.25          # m/s   — lateral (mecanum; do not omit — see below)
   max_wz: 0.4           # rad/s — yaw
 
@@ -38,7 +39,11 @@ velocity_limits:
 acceleration_limits:
   # Clamped by comparing against the last published command and elapsed time.
   # This is what protects the STM32 and the drivetrain from step commands.
-  max_ax: 0.5           # m/s^2
+  max_ax: 0.75          # m/s^2 — raised from 0.5, 2026-08-14 operator decision
+                        # (paired with the max_vx drop to 0.15 m/s above: at
+                        # 0.75 m/s^2 the robot still reaches full commanded
+                        # speed in 0.2 s, well within one consecutive-scan
+                        # noise-filter window at 5 Hz).
   max_ay: 0.5           # m/s^2
   max_alpha_z: 1.0      # rad/s^2
 

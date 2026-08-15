@@ -466,5 +466,8 @@ duplicating it here.
   (`safety_limits.yaml: startup.start_killed`). A node launching must never be
   able to make the robot move.
 - Safety clamps are deliberately tighter than the interface action scaling
-  (0.25/0.25/0.4 vs 0.3/0.3/0.5) so the safety layer is always the binding
-  constraint. Both sets are provisional and raised only after Phase 2 sign-off.
+  so the safety layer is always the binding constraint. Both sets are
+  provisional and raised only after Phase 2 sign-off. Current values
+  (2026-08-14, live teleop tuning): safety `max_vx/vy/wz` = 0.15/0.25/0.4,
+  `max_ax` = 0.75 (was 0.25/0.25/0.4 and 0.5 respectively before today);
+  interface action scaling `vx_max/wz_max` = 0.3/0.5 unchanged.
