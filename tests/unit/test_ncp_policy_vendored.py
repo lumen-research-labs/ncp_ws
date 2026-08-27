@@ -13,6 +13,7 @@ These tests therefore run only where the deps exist; treat them as a
 robot-side / CI-side tier, not part of the workstation unit tier.
 """
 
+import math
 import os
 import sys
 
@@ -140,25 +141,64 @@ def test_actor_seed_reproducible():
     assert np.allclose(a1, a2)
 
 
-# --- LOCAL DIVERGENCE TEST (not from upstream) ------------------------------
-# Pins divergence 1 in rm_policy/vendor/ncp_policy.py's header: the TG30
-# encodes a no-return as 0.0, never inf, so prepare_scan must mask it.
-
-def test_prepare_scan_maps_tg30_zero_no_return_to_clip():
-    """A 0.0 must become LASER_CLIP, not survive as a zero-distance obstacle."""
-    out = policy.prepare_scan([0.0, 2.0, 0.0, 4.0])
-    assert np.allclose(out, [policy.LASER_CLIP, 2.0, policy.LASER_CLIP, 4.0])
-
-
-def test_prepare_scan_maps_sub_range_min_and_negative_to_clip():
-    out = policy.prepare_scan([-1.0, 0.005, 2.0])
-    assert np.allclose(out, [policy.LASER_CLIP, policy.LASER_CLIP, 2.0])
+# --- UPSTREAM BEHAVIOUR, PINNED (not a divergence) --------------------------
+# vendor/ncp_policy.py is a BYTE-EXACT copy of upstream and carries no local
+# edits (see vendor/VENDOR.md). An earlier revision patched prepare_scan to
+# mask the TG30's 0.0 no-return; that patch was removed and the protection
+# moved into rm_policy.scan_resampler, which is code we own.
+#
+# These tests therefore assert what upstream ACTUALLY does, including the
+# limitation. They exist so the limitation is explicit and cannot be
+# rediscovered the hard way -- not to demand it be fixed here.
 
 
-def test_zero_no_return_does_not_reach_obs_as_zero_distance():
-    """End-to-end: 0.0 rays must normalize to +1.0 (clear), never -1.0 (touching)."""
-    scan = policy.prepare_scan([0.0] * policy.BEAMS)
-    obs = policy.build_obs(scan, np.array([5.0, 0.0]), np.zeros(2))
+def test_upstream_prepare_scan_does_not_mask_zero_no_returns() -> None:
+    """UPSTREAM BEHAVIOUR: prepare_scan handles only non-finite values.
+
+    The TG30 emits 0.0 for a no-return and never inf, so a raw TG30 scan fed
+    straight to this function keeps its 0.0s and build_obs then normalizes
+    them to -1.0 -- "obstacle at zero distance". That is why nothing in this
+    project may call prepare_scan on a raw scan: rm_policy.scan_resampler runs
+    first and maps every no-return to range_max. See vendor/VENDOR.md.
+    """
+    out = policy.prepare_scan([0.0, 2.0, np.inf, np.nan])
+    assert out[0] == 0.0, "upstream leaves 0.0 untouched -- by design, not a bug"
+    assert out[1] == pytest.approx(2.0)
+    assert out[2] == pytest.approx(policy.LASER_CLIP)  # inf IS handled
+    assert out[3] == pytest.approx(policy.LASER_CLIP)  # nan IS handled
+
+
+def test_raw_zero_would_normalize_to_touching_which_is_why_we_resample() -> None:
+    """Demonstrates the hazard the resampler exists to prevent."""
+    obs = policy.build_obs(
+        policy.prepare_scan([0.0] * policy.BEAMS),
+        np.array([5.0, 0.0]),
+        np.zeros(2),
+    )
+    assert np.allclose(obs[: policy.BEAMS], -1.0), (
+        "a raw 0.0 normalizes to -1.0 = 'touching a wall'; scan_resampler "
+        "must always run first"
+    )
+
+
+def test_resampled_scan_is_safe_through_the_same_upstream_path() -> None:
+    """The pipeline we actually use: resampler first, then upstream verbatim."""
+    import os
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_REPO_ROOT, "src", "rm_policy"))
+    from rm_policy import scan_resampler
+
+    n = 2000
+    raw = [0.0] * n  # every ray a TG30 no-return
+    binned = scan_resampler.resample_forward_arc(
+        raw, -math.pi, 2.0 * math.pi / (n - 1),
+        n_bins=policy.BEAMS, arc_deg=policy.FOV_DEG,
+        range_min=0.01, range_max=30.0,
+    )
+    assert binned.fault is None
+    obs = policy.build_obs(
+        policy.prepare_scan(binned.bins), np.array([5.0, 0.0]), np.zeros(2)
+    )
     assert np.allclose(obs[: policy.BEAMS], 1.0), (
-        "a full no-return scan must read as clear, not as a wall at zero range"
+        "with the resampler in front, an all-dropout scan reads as CLEAR"
     )
