@@ -222,6 +222,50 @@ docker compose exec robot colcon build --symlink-install \
 
 `scripts/deploy.sh` wraps this once the robot's address is filled in above.
 
+**This path requires GitHub reachability on both ends** and is currently
+blocked for `bernard-2`, waiting on a deploy-key registration (see project
+CLAUDE.md §3/§4, 2026-08-14). For `bernard-1`, use §4b instead — it does not
+depend on GitHub at all.
+
+## 4b. Deliver code over LAN, no GitHub (bernard-1)
+
+`bernard-1` sits on the isolated `RobotLab` network with **no internet
+uplink whatsoever** — GitHub is unreachable from that network, full stop, so
+§4's `git pull` path cannot work there even once a deploy key exists. This
+route supersedes §4/the GitHub-deploy-key blocker for `bernard-1`: the
+workstation pushes the repo straight to the robot over LAN SSH, using the
+`bernard-1` alias already in `~/.ssh/config` (`192.168.4.100`, user
+`jetson`, key `~/.ssh/bernard-1`).
+
+```bash
+# workstation — pushes the current branch to ~/ncp_ws on the robot
+scripts/deploy_to_robot.sh bernard-1
+# or, since bernard-1 is the default:
+scripts/deploy_to_robot.sh
+```
+
+Mechanism: `git push` directly into a non-bare repo at `~/ncp_ws` on the
+robot, with `receive.denyCurrentBranch=updateInstead` set there so the push
+updates the working tree in place — the standard "git push to deploy"
+pattern. First run initialises the repo; every later run is an incremental,
+idempotent fast-forward. If the robot's working tree has been hand-edited
+(it never should be — code is only ever edited on the workstation) the push
+is rejected by git itself rather than silently overwritten; resolve that by
+hand on the robot before retrying.
+
+The script transfers only — it never runs `colcon build` and never launches
+a ROS node. Build and launch stay separate, operator-supervised steps (§3,
+§5 below and the hardware checklist in `safety_validation.md`), same as the
+GitHub path.
+
+Preflight fails fast (`ConnectTimeout=8`) with a clear message if the robot
+isn't reachable, rather than hanging — useful as a cheap "is the robot even
+up" check on its own. Run `scripts/deploy_to_robot.sh --help` for options
+(`--branch`, `--remote-path`); it also works for `bernard-2` once that
+robot's LAN details are current (`ROBOT=bernard-2 scripts/deploy_to_robot.sh`
+or `scripts/deploy_to_robot.sh bernard-2`), independent of whether its
+GitHub deploy key ever gets registered.
+
 ## 5. Sensor bringup
 
 These are the previous team's working commands
