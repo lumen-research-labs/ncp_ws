@@ -146,13 +146,23 @@ echo "    reachable."
 # to receive a push-to-deploy. Safe to run every time; only initialises on
 # the first run.
 #
-# Critically, HEAD must point at refs/heads/<branch> BEFORE the push
-# happens: updateInstead only updates the working tree when the ref being
-# pushed is the one HEAD currently points to. Pushing first and pointing
-# HEAD afterward (tried during offline testing) creates the branch in
-# .git/refs but leaves the working tree empty -- a silent-looking "deploy"
-# that actually shipped nothing. Setting HEAD via symbolic-ref works even
-# before the branch has any commits.
+# Branch handling, corrected 2026-08-27 after this broke a live robot repo:
+#
+# An earlier version ran `git symbolic-ref HEAD refs/heads/<branch>`
+# unconditionally before every push. Right for a FRESH repo; wrong on a repo
+# that already has commits on a DIFFERENT branch, where it repoints HEAD at an
+# unborn branch. The index still holds the old checkout, so every tracked file
+# reads as a staged addition, the tree looks filthy, updateInstead refuses the
+# push -- and the error blames phantom hand-edits on the robot.
+#
+# The flow below works in every case and never repoints HEAD at an unborn ref:
+#   1. push the branch as an ordinary ref. Allowed when it is NOT the remote's
+#      checked-out branch; when it IS, updateInstead handles the worktree.
+#   2. `git checkout <branch>` on the remote afterwards. A no-op when already
+#      there, and what populates the worktree otherwise. Plain checkout, never
+#      -f, so it still refuses rather than clobbering genuine local edits.
+#   3. verify remote HEAD equals what we pushed, so a deploy that silently
+#      shipped nothing cannot pass as success.
 echo "==> Ensuring remote repo exists at ${ROBOT}:~/${REMOTE_PATH}..."
 ssh "${SSH_OPTS[@]}" "$ROBOT" bash -s -- "$REMOTE_PATH" "$BRANCH" <<'REMOTE_INIT'
 set -euo pipefail
@@ -173,8 +183,9 @@ fi
 # refuse), which would otherwise turn future pushes into silent no-ops.
 git config receive.denyCurrentBranch updateInstead
 
-# Must happen before the push -- see comment above the ssh call.
-git symbolic-ref HEAD "refs/heads/${branch}"
+# Deliberately NOT touching HEAD here -- see comment above the ssh call.
+# HEAD is moved AFTER the push, by checkout, which is safe on a repo that
+# already has commits. Repointing it here is what broke the robot repo.
 REMOTE_INIT
 echo "    remote repo ready."
 
@@ -183,9 +194,13 @@ echo "    remote repo ready."
 # so we do not need (and deliberately do not add) a --force anywhere here. ---
 echo "==> Pushing ${BRANCH} to ${REMOTE_URL}..."
 if ! git push "$REMOTE_URL" "refs/heads/${BRANCH}:refs/heads/${BRANCH}"; then
-  echo "ERROR: push rejected. Most likely the robot's working tree at" >&2
-  echo "       ~/${REMOTE_PATH} has uncommitted or untracked changes that" >&2
-  echo "       would be overwritten -- refusing rather than clobbering them." >&2
+  echo "ERROR: push rejected. Two likely causes, in order:" >&2
+  echo "  (a) the robot is ON this branch and its working tree has" >&2
+  echo "      uncommitted/untracked changes that would be overwritten;" >&2
+  echo "  (b) the robot's HEAD points at an UNBORN branch, which makes a" >&2
+  echo "      clean tree look like all-staged-additions. Check there with" >&2
+  echo "      'git symbolic-ref HEAD' and 'git log --oneline -1'; repair by" >&2
+  echo "      pointing HEAD at a branch that actually has commits." >&2
   echo "       Investigate on the robot (git status inside ~/${REMOTE_PATH})" >&2
   echo "       before retrying. Code is never meant to be edited on the" >&2
   echo "       robot directly (see project CLAUDE.md); if that happened," >&2
@@ -193,7 +208,25 @@ if ! git push "$REMOTE_URL" "refs/heads/${BRANCH}:refs/heads/${BRANCH}"; then
   exit 1
 fi
 
-DEPLOYED_REV="$(git rev-parse --short "$BRANCH")"
-echo "==> Deployed ${DEPLOYED_REV} (${BRANCH}) to ${ROBOT}:~/${REMOTE_PATH}."
+DEPLOYED_REV="$(git rev-parse "$BRANCH")"
+
+# --- move the remote onto the pushed branch, then VERIFY it actually landed.
+# Plain checkout, never -f: it must still refuse rather than destroy edits. ---
+echo "==> Checking out ${BRANCH} on ${ROBOT}..."
+REMOTE_REV="$(ssh "${SSH_OPTS[@]}" "$ROBOT" bash -s -- "$REMOTE_PATH" "$BRANCH" <<'REMOTE_CO'
+set -euo pipefail
+cd "${HOME}/$1"
+git checkout --quiet "$2"
+git rev-parse HEAD
+REMOTE_CO
+)"
+
+if [[ "$REMOTE_REV" != "$DEPLOYED_REV" ]]; then
+  echo "ERROR: remote HEAD is ${REMOTE_REV:0:12}, expected ${DEPLOYED_REV:0:12}." >&2
+  echo "       The push reported success but the robot is not on that commit." >&2
+  exit 1
+fi
+
+echo "==> Deployed ${DEPLOYED_REV:0:7} (${BRANCH}) to ${ROBOT}:~/${REMOTE_PATH}, verified."
 echo "    Not built, not launched -- colcon build and any ROS launch remain"
 echo "    separate, operator-supervised steps."

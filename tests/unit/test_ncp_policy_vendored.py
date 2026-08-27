@@ -106,7 +106,12 @@ def test_reactive_obstacle_spins_toward_open_side(blocked_side, expected_w_sign)
     assert sees
     assert action[0] == 0.0
     assert np.sign(action[1]) == expected_w_sign
-    assert abs(action[1]) == policy.SPIN_W
+    # LOCAL FIX (not upstream): reactive_action returns a float32 array, and
+    # np.float32(1.2) is 1.2000000476837158, so exact equality against the
+    # float64 module constant fails. Upstream's assertion is simply wrong on
+    # any numpy; it never ran here because numpy is absent on the workstation.
+    # Behaviour is unchanged — this is a test-precision fix only.
+    assert abs(action[1]) == pytest.approx(policy.SPIN_W)
 
 
 def test_reward_progress_success_collision():
