@@ -77,14 +77,11 @@ from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
     IncludeLaunchDescription,
+    OpaqueFunction,
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import (
-    LaunchConfiguration,
-    PathJoinSubstitution,
-    PythonExpression,
-)
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 _LAUNCH_DIR = pathlib.Path(__file__).resolve().parent
@@ -102,14 +99,52 @@ _NCP_SCAN_TOPIC = "/ncp/scan"
 _POLICY_CMD_TOPIC = "/policy/cmd_vel"
 
 
+def _upstream_process(context, *args, **kwargs):
+    """Build the upstream node.py process, or nothing if it isn't selected.
+
+    This is an OpaqueFunction rather than a plain ExecuteProcess because the
+    `weights` argument must be OMITTED when empty, not passed as an empty
+    string. rcl cannot parse a parameter override with no value: launching
+    with `-p weights:=` aborts the process at rclpy.init() with
+
+        Couldn't parse parameter override rule: '-p weights:='
+
+    (found on hardware, 2026-08-28). An empty `weights` is the DEFAULT and
+    means "random weights", so this is the common path, not a corner case.
+    Resolving the substitutions here lets the list be built conditionally.
+    """
+    if context.perform_substitution(LaunchConfiguration("consumer")) != "upstream":
+        return []
+
+    upstream = context.perform_substitution(LaunchConfiguration("upstream_path"))
+    mode = context.perform_substitution(LaunchConfiguration("mode"))
+    weights = context.perform_substitution(LaunchConfiguration("weights"))
+
+    cmd = [
+        "python3", str(pathlib.Path(upstream) / "rosmaster" / "node.py"),
+        "--ros-args",
+        "-p", f"mode:={mode}",
+        "-p", f"scan_topic:={_NCP_SCAN_TOPIC}",
+        "-p", "odom_topic:=/odom",
+        # OVERRIDE. Upstream defaults cmd_topic to /cmd_vel, which would
+        # bypass rm_safety entirely at up to 2 m/s.
+        "-p", f"cmd_topic:={_POLICY_CMD_TOPIC}",
+    ]
+    if weights:
+        cmd += ["-p", f"weights:={weights}"]
+    return [ExecuteProcess(cmd=cmd, name="ncp_rosmaster", output="screen")]
+
+
 def generate_launch_description() -> LaunchDescription:
     consumer = LaunchConfiguration("consumer")
     mode = LaunchConfiguration("mode")
     upstream_path = LaunchConfiguration("upstream_path")
     weights = LaunchConfiguration("weights")
     with_safety = LaunchConfiguration("with_safety")
+    command_source = LaunchConfiguration("command_source")
 
-    is_upstream = IfCondition(PythonExpression(["'", consumer, "' == 'upstream'"]))
+    # `upstream` is selected inside _upstream_process (an OpaqueFunction), so
+    # only the policy_node branch needs a launch-time condition here.
     is_policy_node = IfCondition(
         PythonExpression(["'", consumer, "' == 'policy_node'"])
     )
@@ -137,10 +172,22 @@ def generate_launch_description() -> LaunchDescription:
             "with_safety", default_value="true",
             description="Also launch safety.launch.py.",
         ),
+        # Passed straight through to safety.launch.py. Defaults to "teleop",
+        # matching that file: with "teleop", rm_safety IGNORES /policy/cmd_vel
+        # entirely, so the whole NCP chain runs and publishes but CANNOT reach
+        # the base driver. That is the correct default for bringing the stack
+        # up and watching it. Set "policy" only when you intend the policy to
+        # drive, with an operator and a kill switch present.
+        DeclareLaunchArgument(
+            "command_source", default_value="teleop",
+            description="rm_safety's active source: 'teleop' (default, policy "
+                        "cannot drive) or 'policy'.",
+        ),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(_LAUNCH_DIR / "safety.launch.py")),
             condition=IfCondition(with_safety),
+            launch_arguments={"command_source": command_source}.items(),
         ),
 
         Node(
@@ -154,28 +201,7 @@ def generate_launch_description() -> LaunchDescription:
             }],
         ),
 
-        # Upstream node.py is a bare script, NOT an ament package, so it
-        # cannot be a launch_ros Node (which resolves `executable` inside
-        # `package`). It is run by interpreter, with its ROS parameters passed
-        # the way the script's own docstring documents: after --ros-args.
-        # Its `sys.path.insert` makes `from rosmaster import policy` resolve.
-        ExecuteProcess(
-            condition=is_upstream,
-            name="ncp_rosmaster",
-            output="screen",
-            cmd=[
-                "python3",
-                PathJoinSubstitution([upstream_path, "rosmaster", "node.py"]),
-                "--ros-args",
-                "-p", ["mode:=", mode],
-                "-p", f"scan_topic:={_NCP_SCAN_TOPIC}",
-                "-p", "odom_topic:=/odom",
-                # OVERRIDE. Upstream defaults cmd_topic to /cmd_vel, which
-                # would bypass rm_safety entirely at up to 2 m/s.
-                "-p", f"cmd_topic:={_POLICY_CMD_TOPIC}",
-                "-p", ["weights:=", weights],
-            ],
-        ),
+        OpaqueFunction(function=_upstream_process),
 
         Node(
             condition=is_policy_node,
