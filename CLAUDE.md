@@ -468,6 +468,35 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   LEFT RUNNING (sensing only, no motion) for the operator's motion tests.
   Motion tests NOT attempted — operator + kill switch only, per BUILD-PLAN.
 
+- 2026-08-28: **`joy_ctrl` /cmd_vel conflict RESOLVED; `ncp.launch.py` proven
+  end to end.** (1) The vendor bringup hardcodes `yahboom_joy_X3` (node
+  `joy_ctrl`) publishing `/cmd_vel`, with no launch arg to disable it. Measured:
+  idle it ADVERTISES but publishes nothing, so the clash was latent, not active.
+  Resolved by remap, not by deleting teleop —
+  `rm_bringup/launch/teleop_joy.launch.py` runs it with
+  `/cmd_vel -> /teleop/cmd_vel`, which is where the plan already wanted the
+  gamepad: an INPUT to rm_safety, so manual driving now sits BEHIND the same
+  clamps and e-stop arcs as the policy. Verified live: `/cmd_vel` 0 publishers,
+  `/teleop/cmd_vel` 1 (`joy_ctrl`), `/policy/cmd_vel` 1 (`ncp_rosmaster`).
+  **The vendor launch still starts its own copy every bringup — stop that PID
+  first** (`pgrep -af '[y]ahboom_joy_X3'`, then `kill <PID>`); the sequence is
+  documented in the launch file's docstring.
+  (2) **`ncp.launch.py` had never actually been run** — the 2026-08-27 session
+  exercised the nodes individually. Running it found two real bugs. **rcl
+  cannot parse a parameter override with no value:** an empty `weights` (the
+  DEFAULT, meaning random weights) emitted `-p weights:=` and killed upstream
+  node.py at `rclpy.init()` with "Couldn't parse parameter override rule". The
+  upstream process is now built by an `OpaqueFunction` that omits the argument
+  when empty. **And there was no `command_source` passthrough**, so
+  `safety.launch.py` always came up `teleop` and rm_safety ignored
+  `/policy/cmd_vel` — the NCP could never drive however it was launched. Added
+  as an explicit argument, still defaulting to `teleop` so bringing the stack
+  up to watch it cannot reach the base driver. After both fixes one command
+  brings up all three processes and debug mode runs:
+  `SEES OBSTACLE -> SPIN | min=0.89m | cmd=(+0.00,+1.20) | ncp=(+0.04,-0.08)`.
+  Left clean: all NCP-stack nodes stopped, `/cmd_vel` 0 publishers; Yahboom
+  bringup, remapped `joy_ctrl` and the lidar left RUNNING for the operator.
+
 ## 4. Current Goal
 
 **The full NCP pipeline runs on bernard-1 hardware** (2026-08-27 s2): lidar ->
@@ -476,12 +505,13 @@ with all three consumers validated and rm_safety's first hardware run passing.
 Phases 1-3 are effectively done. **Nothing has moved yet** — every rm_safety
 test used `-r /cmd_vel:=/cmd_vel_test`.
 
-**The one blocker to motion is `joy_ctrl`.** Yahboom's standard bringup already
-publishes `/cmd_vel`, so rm_safety cannot be its sole publisher. This is an
-operator decision and must be settled before the hardware safety checklist.
-Recommendation: remap `joy_ctrl` to `/teleop/cmd_vel` — the plan already treats
-teleop as an INPUT to rm_safety, and it makes the gamepad a genuine manual
-override, which matters more than usual given there is no physical E-stop.
+**The `joy_ctrl` blocker is resolved** (2026-08-28, remapped to
+`/teleop/cmd_vel`). `/cmd_vel` now has 0 publishers until rm_safety starts.
+Remaining caveat: the vendor bringup restarts its own `joy_ctrl` on every
+launch, so its PID must be killed and `teleop_joy.launch.py` started in its
+place, every session, until that is scripted.
+
+**Nothing blocks motion any more except the operator sign-off itself.**
 
 **Still no trained checkpoint.** `mode:=ncp` and `policy_node` both run RANDOM
 weights (`ncp_policy.NcpActor(seed=0)`); observed output was a near-constant
@@ -491,8 +521,8 @@ and deliberate; do not raise it to "let the policy through".
 
 ### Next session, in order
 
-1. Operator decision on `joy_ctrl` vs `/cmd_vel` (above). Nothing moves until
-   this is settled.
+1. Script the vendor `joy_ctrl` kill + `teleop_joy.launch.py` into one
+   bringup step so the remap is not a manual per-session ritual.
 2. Script the `/var/lib/rm_safety` creation into the deploy path — it was
    permission-denied on bernard-1 and will recur on bernard-2 and any reflash.
 3. Make `command_source` read-only on `safety_node` so `ros2 param set` is
