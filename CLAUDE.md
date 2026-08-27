@@ -391,90 +391,139 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   trap confirmed live here too and left untouched. Session ended with the robot
   taken offline to charge.
 
+- 2026-08-27 (session 2): **FULL NCP PIPELINE RUNNING ON bernard-1 HARDWARE.**
+  Battery 11.8 V (freshly charged). Clock pushed from the workstation (was
+  2026-05-24, ~3 months behind). **THE torch BLOCKER IS CLEARED:** the robot
+  already has torch 2.5.0a0+nv24.08 (JetPack build, CUDA available), ncps
+  0.0.2, numpy 1.23.5 — so no internet is needed to run the NCP.
+  `/dev/rplidar` pointed at the **base board** again this boot (the documented
+  symlink race); the by-id CP2102 path was used throughout. `rosmaster_main.py`
+  (PID 3485) held ttyUSB1 and was killed by exact PID before bringup.
+
+  **NEW — the 32-beam blocker and its fix.** `NCP-on-Rosmaster/rosmaster/node.py`
+  hard-refuses any scan whose length != `policy.BEAMS` (32); the TG30 delivers
+  ~2020. Pointed at the raw `/scan` that node NEVER builds an observation, its
+  1 s deadman never clears, and it publishes zero forever — in BOTH `mode:=debug`
+  and `mode:=ncp`. Fixed WITHOUT touching upstream (the vendored copy stays
+  byte-exact) by `rm_policy/scan_bridge_node.py`: `/scan` -> `/ncp/scan`, 32
+  beams over the forward 180 deg via the existing `scan_resampler`, publishing
+  bin CENTRES so upstream's own `check_scan()` passes unmodified (span 174.375
+  deg, centred 0 rad — both inside its 10 deg tolerance). Measured live:
+  `/ncp/scan` 10.141 Hz, 32 ranges, **0 zeros** (the TG30 no-return sentinel
+  fully absorbed), min 0.406 m. Plus `rm_bringup/launch/ncp.launch.py`
+  (safety + bridge + one consumer).
+
+  **NEW STANDING TRAP — QoS.** The bridge first published BEST_EFFORT (copied
+  from rm_safety's sensor QoS). Upstream's `create_subscription(..., 10)` is a
+  depth-only profile and therefore **RELIABLE**, and a RELIABLE subscriber
+  REFUSES a BEST_EFFORT publisher: rclpy logs "offering incompatible QoS … No
+  messages will be received" once, then upstream's deadman reports "no fresh
+  scan — stopped" forever *while `/ncp/scan` is visibly publishing at 10 Hz*.
+  That looks exactly like a dead lidar. The bridge now publishes RELIABLE
+  (serves both upstream and policy_node's BEST_EFFORT sub) and subscribes
+  BEST_EFFORT. **Do not "tidy" the two sides to match.**
+
+  **Validated live, all three consumers:**
+  * upstream `node.py mode:=debug` — `SEES OBSTACLE -> SPIN | min=0.4m |
+    cmd=(+0.00,+1.20) | ncp=(+0.03,-0.09)` at 5 Hz, NCP running in shadow.
+    Spin direction verified correct (left-half mean 5.5 m vs right 3.0 m ->
+    +1.2 rad/s toward the open side).
+  * `rm_policy/policy_node` — interface_version 3.0.0 check passed, goal fixed
+    from first `/odom` at (2.500, -0.007), `/policy/cmd_vel` at **4.999 Hz**
+    (std dev 1.7 ms), `/ncp_debug` `fault: null`.
+  * **`rm_safety` FIRST EVER HARDWARE RUN — passes.** Starts KILLED, publishes
+    continuous zeros at exactly **20.000 Hz** (std dev 0.19 ms), kill/reset
+    services work (state 3<->2), receives `/scan` and computes a real
+    `min_range` 0.374 m, fails closed to `command_timeout` with no command
+    source. End-to-end with `command_source:=policy`: IN `/policy/cmd_vel`
+    (0.008186, -0.10555) -> OUT (0.000309, -0.001843), `reason: slow_zone`,
+    `clamping_active: true`, min_range 0.367 m. The 0.0377 linear.x ratio is
+    exactly the slow-zone scale for that reading.
+
+  **NEW BLOCKER — two publishers on `/cmd_vel`.** Yahboom's own bringup runs
+  `joy_ctrl`, which **already publishes `/cmd_vel`**. rm_safety therefore
+  cannot be the sole publisher while standard bringup is up — the same
+  violation the plan forbids for `cpt_b2_engine`, but from a node we launch
+  every session. All of this session's rm_safety testing was done with
+  `-r /cmd_vel:=/cmd_vel_test` to avoid it, so **NOTHING MOVED**. Needs an
+  operator decision before any motion test (recommendation: remap joy_ctrl to
+  `/teleop/cmd_vel`, which is where the plan already wants it — it is an INPUT
+  to rm_safety, and that also makes the gamepad a real manual override).
+
+  **NEW — `command_source` is read once at init** (`safety_node.py:153`) with
+  no `add_on_set_parameters_callback`, so `ros2 param set /safety_node
+  command_source policy` prints "Set parameter successful" and changes
+  NOTHING. Fails safe, but silently. Recommendation: declare it read-only so
+  the attempt is rejected rather than accepted-and-ignored.
+
+  **NEW — kill-state persistence was broken on the robot:**
+  `/var/lib/rm_safety/kill_state` was `[Errno 13] Permission denied`, so the
+  node warned and degraded to memory-only every kill/reset. Fixed on bernard-1
+  (`install -d -o jetson -g jetson /var/lib/rm_safety`); 0 errors after. This
+  is a **deploy step that must be scripted** — it will recur on bernard-2 and
+  on any reflash.
+
+  Robot tier runs **183 tests** (workstation 145: no numpy/torch/ncps there).
+  Left clean: all rm_* nodes stopped; Yahboom bringup + lidar deliberately
+  LEFT RUNNING (sensing only, no motion) for the operator's motion tests.
+  Motion tests NOT attempted — operator + kill switch only, per BUILD-PLAN.
+
 ## 4. Current Goal
 
-**There are now two robots.** `bernard-1` (new, `RobotLab` network, brought up
-2026-08-27) and `bernard-2` (the original). Same lidar model, consecutive
-serials; different boards, cameras, networks and failure modes — see the table
-at the top of the `robot-ssh` skill before touching either.
+**The full NCP pipeline runs on bernard-1 hardware** (2026-08-27 s2): lidar ->
+32-beam bridge -> observation -> CfC -> `/policy/cmd_vel` -> rm_safety clamp,
+with all three consumers validated and rm_safety's first hardware run passing.
+Phases 1-3 are effectively done. **Nothing has moved yet** — every rm_safety
+test used `-r /cmd_vel:=/cmd_vel_test`.
 
-Phase 1 is **effectively done** on both units. Phase 2 (safety layer) has both
-software test tiers passing (unit 90, replay 9) and both pending design
-decisions closed. The gap to "robot control working" is unchanged and is
-entirely deploy-side: **`ncp_ws` has never been cloned onto either robot.**
+**The one blocker to motion is `joy_ctrl`.** Yahboom's standard bringup already
+publishes `/cmd_vel`, so rm_safety cannot be its sole publisher. This is an
+operator decision and must be settled before the hardware safety checklist.
+Recommendation: remap `joy_ctrl` to `/teleop/cmd_vel` — the plan already treats
+teleop as an INPUT to rm_safety, and it makes the gamepad a genuine manual
+override, which matters more than usual given there is no physical E-stop.
 
-**The GitHub deploy-key blocker is now bypassable.** bernard-1 has no internet
-at all (RobotLab has no WAN uplink), so cloning from GitHub was never going to
-work there anyway. Serve the repo from the workstation over the LAN instead —
-that removes the dependency on registering a deploy key, which is what stalled
-bernard-2 since 2026-08-14.
-
-**NEW DIRECTION under consideration (operator, 2026-08-27):** a trained policy
-now exists — `LumenLabs/NCP-on-Rosmaster`, a CfC/AutoNCP Neural Circuit Policy
-with its own ROS2 node. The assessment is to integrate it into `ncp_ws`
-(not into `cradle`, whose 18-scalar-channel free-energy architecture cannot
-carry a 32-beam vector). `src/rm_policy/` is an empty skeleton and is exactly
-the slot it fills. Three real mismatches to resolve, none blocking:
-1. **Beam count** — the node hard-refuses any scan that isn't 32 beams; the
-   TG30 delivers ~2000 pts over 360°. Needs a forward-180°→32-bin min-pool
-   resampler (same code shape as the planned 36-bin one).
-2. **No-return handling** — `policy.prepare_scan()` only maps non-finite to
-   clip; the TG30 emits `0.0`, ~39% of rays. Live bug on this hardware.
-3. **Contract collision** — `interface.yaml` is 41-dim (36 lidar + 3 base vel
-   + 2 prev action); the trained policy is 36-dim (32 beams + goal xy + last
-   action, clip 5 m). The trained checkpoint wins; this is an
-   `interface_version` 3.0.0 rewrite of a contract that was never implemented.
-   Note `ACTION_HIGH` v=2.0 m/s vs safety `max_vx` 0.15 — the safety layer will
-   clamp hard, which is correct; do not raise the clamp to compensate.
-   Minimum viable first step is `-p cmd_topic:=/policy/cmd_vel`, which puts the
-   existing node behind `rm_safety` unchanged.
+**Still no trained checkpoint.** `mode:=ncp` and `policy_node` both run RANDOM
+weights (`ncp_policy.NcpActor(seed=0)`); observed output was a near-constant
+(+0.03, -0.09). What has been proven is the PLUMBING, not a policy. Note
+`ACTION_HIGH` v = 2.0 m/s vs safety `max_vx` 0.15 — the ~13x clamp is correct
+and deliberate; do not raise it to "let the policy through".
 
 ### Next session, in order
 
-1. **Charge bernard-1** — taken offline 2026-08-27 to charge.
-2. Fix the robot clock (push time from the workstation; no NTP path exists).
-3. Give bernard-1 a distinct `ROS_DOMAIN_ID` (29) so the two robots can never
-   share `/cmd_vel`.
-4. Get `ncp_ws` onto the robot from the workstation over the LAN, then
-   `colcon build` `rm_interfaces`, `rm_safety`, `rm_bringup`.
-5. Robot preflight: `fuser -v /dev/myserial`, kill `rosmaster_main.py` by exact
-   PID if it holds the port, launch bringup, confirm `/voltage` non-zero and
-   battery >= 10 V.
-6. Launch `rm_safety` via `safety.launch.py` for the first time — it has only
-   ever been path-checked offline. This is the real unknown.
-7. Hardware safety checklist (`safety_validation.md` §3) — operator + kill
-   switch in hand, wheels off the ground first, **never an agent**.
-8. Sign off `safety_validation.md`'s hardware rows once 7 passes.
-9. Only after safety is proven live: wire the NCP node's `/policy/cmd_vel`
-   through `rm_safety`.
+1. Operator decision on `joy_ctrl` vs `/cmd_vel` (above). Nothing moves until
+   this is settled.
+2. Script the `/var/lib/rm_safety` creation into the deploy path — it was
+   permission-denied on bernard-1 and will recur on bernard-2 and any reflash.
+3. Make `command_source` read-only on `safety_node` so `ros2 param set` is
+   rejected rather than silently ignored.
+4. Hardware safety checklist (`safety_validation.md` §3) — wheels off the
+   ground first, operator + kill switch in hand, **never an agent**.
+5. Sign off `safety_validation.md`'s hardware rows once 4 passes.
+6. Only then: motion under `ncp.launch.py consumer:=upstream mode:=debug`,
+   which is the most legible first motion (stop-and-spin on a real obstacle).
+7. Get a trained checkpoint into `weights:=` and re-run `mode:=ncp`.
 
-Offline work available any time (no robot needed): the NCP resampler + its unit
-tests against `tests/fixtures/`, the 3.0.0 contract rewrite, and the local git
-remote.
-
-Still open, lower priority: `ros2 topic delay` latency capture; a clear-path
-open-space bag (the current baseline bag has a real 0.21 m forward obstacle);
-teleop baseline bag (**operator only, never an agent**); deleting cradle's
-`99-cpt-lidar.rules` on bernard-1 to end the `/dev/rplidar` symlink race.
+Offline work available any time: the 3.0.0 contract doc refresh, a clear-path
+open-space bag (operator), `ros2 topic delay` latency capture.
 
 Settled, do not re-open:
-- Observation stays **forward-180°** despite the lidar being 360° (operator,
-  2026-08-07). The robot is blind behind; the safety layer treats reverse as
-  unguarded motion. Bin count is now in play again only because the trained
-  policy uses 32, not 36.
+- Observation stays **forward-180 deg** despite the lidar being 360 deg
+  (operator, 2026-08-07).
 - **No self-occlusion mask** (operator, 2026-08-14, confirmed against live
-  scans). The previous team's Astra-Pro-era zones do not apply.
+  scans).
 - **Pre-latch stop-zone reads soft-stop to zero, not full velocity**
-  (operator, 2026-08-14). Fixed in `safety_logic.evaluate()`.
-- Base velocity is **`/odom`** (EKF, has a header) not `/vel_raw` (bare Twist,
-  no timestamp — cannot support honest staleness detection).
-- IMU source, *if ever re-added*, is **`/imu/data_raw`**; moot as of 2.0.0.
+  (operator, 2026-08-14).
+- Base velocity is **`/odom`** (EKF, has a header), not `/vel_raw`.
 - Action space is **2 dims `[vx, wz]`**, no lateral strafe (operator,
   2026-08-12). The safety layer nonetheless keeps lateral clamps and arcs.
-- **No IMU in the observation** (operator, 2026-08-12). The `imu_link` rotation
-  (180/0/-90 RPY) is sidestepped, not solved.
-- **`invalid_range_is_inf` is inert on this driver** (measured 2026-08-27, 0
-  inf in 1982 points). The `0.0 -> range_max` mapping is the only defence.
+- **No IMU in the observation** (operator, 2026-08-12).
+- **`invalid_range_is_inf` is inert on this driver.** The `0.0 -> range_max`
+  mapping in `scan_resampler` is the only defence.
+- **The vendored `ncp_policy.py` stays byte-exact.** Every hardware fix goes in
+  our own modules — that is what `scan_bridge_node` is.
+- **The scan bridge publishes RELIABLE and subscribes BEST_EFFORT.** Asymmetric
+  on purpose (2026-08-27 s2); matching them breaks upstream silently.
 
 ### Remote-command gotchas
 
