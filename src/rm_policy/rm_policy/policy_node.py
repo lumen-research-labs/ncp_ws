@@ -47,24 +47,6 @@ What it does:
     `previous_action` — a failed tick must not let a stale/garbage command
     persist, and must not corrupt the fed-back action history either.
 
-`observation_builder` API (landed in `rm_policy/observation_builder.py`
-concurrently with this file; reconciled against the real signature):
-    `build_observation(ranges, angle_min, angle_increment, pose_xy, yaw,
-    goal_xy, previous_action) -> ObservationResult`, a pure/ROS-free function
-    returning an object with an `.obs` field (36 floats, `config/
-    interface.yaml` order) that is `None` whenever `.fault` is set (a string
-    reason), mirroring `scan_resampler.ScanResampleResult`. `pose_xy`/`yaw`/
-    `goal_xy` are each `None` until `/odom` has arrived / the goal is fixed —
-    this node already refuses to call it before both are defined (see the
-    goal-undefined check below), so `None` is never actually passed for
-    those three in practice, but the builder also fails closed on its own if
-    it ever is. All lidar/goal/previous-action normalization formulas (the
-    vendored `ncp_policy` math) live INSIDE `observation_builder` — this node
-    passes only plain sensor/pose/goal/action values and never reimplements
-    any normalization itself. There is no `goal_local` field on the result
-    (only `obs`/`fault`), so the debug topic does not report the robot-frame
-    goal vector separately from the observation it's embedded in.
-
 Subscribes:  /scan   [sensor_msgs/LaserScan]   @ ~10.07 Hz (interface.yaml)
 Subscribes:  /odom   [nav_msgs/Odometry]       @ ~10.74 Hz (interface.yaml)
 Publishes:   /policy/cmd_vel  [geometry_msgs/Twist]  @ control.rate_hz (5 Hz)
@@ -111,6 +93,7 @@ Failure mode:
 
 from __future__ import annotations
 
+import json
 import math
 import pathlib
 import time
@@ -439,27 +422,19 @@ class PolicyNode(rclpy.node.Node):
         policy never asked for.
         """
         cmd = Twist()
-        cmd.linear.x = 0.0
         cmd.linear.y = 0.0  # explicit, never left at the field default
-        cmd.linear.z = 0.0
-        cmd.angular.x = 0.0
-        cmd.angular.y = 0.0
-        cmd.angular.z = 0.0
         self._cmd_pub.publish(cmd)
-        self._publish_debug(fault=reason, action=None, goal_local=None)
+        self._publish_debug(fault=reason, action=None)
 
     def _publish_debug(
         self,
         *,
         fault: Optional[str],
         action: Optional[Tuple[float, float]],
-        goal_local: Optional[Tuple[float, float]],
     ) -> None:
         """Publish a one-line JSON status, mirroring the upstream /ncp_debug
         convention, so "is it seeing anything?" is answerable from the
         terminal without decoding Twist messages."""
-        import json  # local import: only this debug path needs it
-
         min_range = None
         if self._scan_ranges:
             finite = [r for r in self._scan_ranges if math.isfinite(r) and r > 0.0]
@@ -469,11 +444,6 @@ class PolicyNode(rclpy.node.Node):
         status = {
             "fault": fault,
             "goal_defined": self._goal_world_x is not None,
-            "goal_local_m": (
-                [round(goal_local[0], 3), round(goal_local[1], 3)]
-                if goal_local is not None
-                else None
-            ),
             "min_range_m": min_range,
             "action": (
                 [round(action[0], 3), round(action[1], 3)]
@@ -615,9 +585,6 @@ class PolicyNode(rclpy.node.Node):
         # interface.yaml action.vy_removed_note. The action space has no
         # lateral component; leaving this field at its implicit zero default
         # would not be a visible claim in the code or the recorded bag.
-        cmd.linear.z = 0.0
-        cmd.angular.x = 0.0
-        cmd.angular.y = 0.0
         cmd.angular.z = float(w)
         self._cmd_pub.publish(cmd)
 
@@ -628,10 +595,7 @@ class PolicyNode(rclpy.node.Node):
         self._prev_action_v = float(v)
         self._prev_action_w = float(w)
 
-        # observation_builder's ObservationResult exposes only obs/fault (no
-        # separate robot-frame goal field), so the debug topic cannot report
-        # the goal vector independently of the observation it's embedded in.
-        self._publish_debug(fault=None, action=(v, w), goal_local=None)
+        self._publish_debug(fault=None, action=(v, w))
 
     @staticmethod
     def _age_ms(stamp: Optional[float], now: float) -> float:

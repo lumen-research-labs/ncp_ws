@@ -20,6 +20,7 @@ setup(
     entry_points={
         'console_scripts': [
             'policy_node = rm_policy.policy_node:main',
+            'scan_bridge_node = rm_policy.scan_bridge_node:main',
         ],
     },
 )
