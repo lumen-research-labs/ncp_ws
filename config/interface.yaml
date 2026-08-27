@@ -196,8 +196,15 @@ observation:
       # would LATCH the e-stop in every bin containing a no-return (28-39% of
       # rays in static tests). It ALSO normalizes to -1.0 here, i.e. "the robot
       # is touching a wall", across a third of the policy's field of view.
-      # Both the observation builder and ncp_policy.prepare_scan MUST treat
-      # range==0.0 (and any value < range_min) as a no-return.
+      # OWNERSHIP (changed 2026-08-27): this masking is done ONLY by
+      # rm_policy.scan_resampler, which maps 0.0 / sub-range_min / negative /
+      # inf / NaN to range_max BEFORE the 32-vector is built. It is deliberately
+      # NOT done in vendor/ncp_policy.py: that file is a BYTE-EXACT copy of
+      # upstream (operator requirement — see vendor/VENDOR.md) and carries zero
+      # local edits, so the protection has to live in code we own. Consequence:
+      # the vendored module is only safe when fed by scan_resampler. Calling
+      # ncp_policy.prepare_scan() directly on a raw TG30 scan reproduces the
+      # original bug — that is upstream's behaviour, faithfully preserved.
       #
       # RETRACTED 2026-08-27: an earlier revision recommended ALSO launching
       # the driver with invalid_range_is_inf:=true as "belt-and-braces". THAT

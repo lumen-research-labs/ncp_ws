@@ -1,204 +1,77 @@
 """
-observation_builder.py — Assembles the 36-dim observation vector for the
-trained NCP policy, per config/interface.yaml interface_version 3.0.0.
+observation_builder.py — assemble the trained NCP's 36-dim observation.
 
 What it does:
-    Combines a resampled forward-arc lidar scan (via rm_policy.scan_resampler),
-    a goal expressed in the robot's own frame, and the previously commanded
-    action into the exact 36-element vector the trained CfC/AutoNCP checkpoint
-    expects:
+    Turns one raw LaserScan plus the robot's pose and last action into the
+    exact 36-element vector the trained checkpoint expects, per
+    `config/interface.yaml` interface_version 3.0.0:
 
-        obs[0:32]  lidar    — 32 beams, forward 180 deg, right -> left,
-                              normalized to [-1, 1] against the TRAINING clip
-        obs[32:34] goal     — (x, y) in the robot frame, normalized
-        obs[34:36] action   — previous commanded (v, w), normalized
+        obs[0:32]   lidar, 32 beams across the forward 180 deg, right -> left
+        obs[32:34]  goal (x, y) in the ROBOT frame
+        obs[34:36]  previous action
 
-    Order and every formula/constant here are DICTATED BY THE TRAINED
-    CHECKPOINT and are reproduced from
-    `src/rm_policy/rm_policy/vendor/ncp_policy.py` (`build_obs`, `local_goal`,
-    `prepare_scan`, `ACTION_LOW`/`ACTION_HIGH`). They are reimplemented in
-    pure Python here, NOT imported, because the vendored module imports
-    numpy/torch/ncps at module scope and none of those are installed on this
-    workstation (deliberately — see that module's docstring). Reimplementing
-    a formula instead of importing it is exactly the kind of silent-drift risk
-    CLAUDE.md warns about, so equivalence to the vendored numpy implementation
-    is PROVEN, not assumed: see the numpy conformance test in
-    tests/unit/test_observation_builder.py, guarded by
-    `pytest.importorskip("numpy")` so it runs on the robot and skips here.
+    It is deliberately THIN. All normalization arithmetic is performed by the
+    VENDORED, BYTE-EXACT upstream module `vendor.ncp_policy`, called in
+    upstream's own order (prepare_scan -> local_goal -> build_obs), exactly as
+    `NCP-on-Rosmaster/rosmaster/node.py` does. This module contributes only
+    two things upstream has no equivalent for: reducing a ~2000-point 360 deg
+    TG30 scan to the 32 forward beams the network was trained on, and
+    fail-closed validation.
 
-    GOVERNING PRINCIPLE (operator, 2026-08-27): match what the trained policy
-    saw in training as closely as possible. Every formula below is copied
-    verbatim from the vendored module, including the LITERAL 3.14 angular
-    action bound (NOT math.pi — see `_ACTION_HIGH_W` below and
-    config/interface.yaml `pi_is_not_pi_note`).
+    NO FORMULA IS REIMPLEMENTED HERE. An earlier revision reimplemented the
+    normalization in pure Python so the tests could run without numpy on the
+    dev workstation. That duplicated every constant and formula, which is a
+    silent-drift risk against the checkpoint and was removed on operator
+    instruction (2026-08-27: keep the policy code an exact copy of upstream).
+    The cost is that this module now requires numpy, so its tests run on the
+    robot tier rather than the workstation tier. That is the correct trade:
+    the robot runs the full suite, and fidelity to the checkpoint outranks
+    test-runner convenience.
 
-Subscribes to:
-    (nothing — pure module, no ROS/topic access. Callers pass plain floats
-    and sequences: raw LaserScan ranges + geometry, the robot's current pose
-    (x, y, yaw) if known, a goal in the world frame if one is defined, and
-    the previously commanded action.)
-
-Publishes:
-    (nothing — pure module. The caller (policy_node) acts on the returned
-    ObservationResult.)
+Subscribes to:  (nothing — pure module; the node passes values in)
+Publishes:      (nothing — pure module; the node acts on the return)
 
 Failure mode:
-    Fail-closed, matching `rm_policy.scan_resampler` and
-    `rm_safety.safety_logic`'s discipline. `build_observation()` never raises
-    and never returns a partial vector: any of the following produces an
-    `ObservationResult` with `obs=None` and a non-None `fault`, and the
-    caller MUST check `fault` before reading `obs`:
-      * the lidar resample step faults — the reason is propagated, prefixed
-        "lidar:" (e.g. "lidar:empty_bin:4")
-      * a goal is defined (`goal_xy` is not None) but `pose_xy` or `yaw` is
-        None, OR a goal is simply undefined (`goal_xy` is None) — per
-        config/interface.yaml `goal_local.failure_mode`, a missing pose or
-        goal must NEVER be papered over with a plausible-looking default;
-        that would silently command motion in an arbitrary direction
-      * `previous_action` is None or not exactly 2 elements
-      * any input (pose, yaw, goal, previous_action) contains a non-finite
-        value
-      * the assembled vector is not exactly OBS_DIM (36) elements, or
-        contains a non-finite value after assembly
-      * an unexpected exception anywhere in assembly ("internal_error")
+    Fail-closed, matching `rm_safety.safety_logic`'s discipline. Every failure
+    returns `ObservationResult(obs=None, fault=<reason>)` — never a partial or
+    plausible-looking vector. The caller cannot reach `obs` without branching
+    on `fault` first. In particular a missing pose or goal is a FAULT and
+    never a substituted default: `config/interface.yaml` is explicit that a
+    plausible-looking goal silently commands motion in an arbitrary direction,
+    which is worse than not driving.
+
+Constants:
+    None of the contract numbers live here. Lidar geometry is passed in by the
+    caller (sourced from config/interface.yaml); every normalization constant
+    lives in the vendored module. This module holds no magic numbers, and no
+    copies of anything the checkpoint depends on.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
-from rm_policy.scan_resampler import SAMPLING_NEAREST_RAY, resample_forward_arc
+from rm_policy import scan_resampler
+from rm_policy.vendor import ncp_policy
 
-# ---------------------------------------------------------------------------
-# Constants — sourced from config/interface.yaml (observation.layout) and
-# src/rm_policy/rm_policy/vendor/ncp_policy.py. Retyped, not imported, because
-# the vendor module drags in numpy/torch/ncps at module scope, which are not
-# installed on this workstation. The numpy conformance test in
-# tests/unit/test_observation_builder.py is what keeps these two copies from
-# silently drifting apart — if you change a value here, that test must still
-# pass against the vendored module's own constant.
-# ---------------------------------------------------------------------------
-
-# -- lidar block: config/interface.yaml observation.layout[lidar_ranges] --
-LIDAR_BEAMS = 32  # vendor.ncp_policy.BEAMS
-LIDAR_ARC_DEG = 180.0
-LIDAR_RANGE_MIN_M = 0.01  # sensor floor; a ray at/below this is a no-return
-LIDAR_RANGE_MAX_M = 30.0  # sensor ceiling for resampling — NOT the training
-# clip below. Both numbers are correct and deliberately different; see
-# config/interface.yaml `laser_clip_note`. Do not reconcile them.
-LIDAR_SAMPLING = SAMPLING_NEAREST_RAY  # training-faithful mode; see scan_resampler
-LASER_CLIP_M = 5.0  # vendor.ncp_policy.LASER_CLIP — the TRAINING clip
-
-# -- goal_local block: config/interface.yaml observation.layout[goal_local] --
-GOAL_DIM = 2
-GOAL_NORM_SCALE_M = 5.0  # "xy / 5.0 - 1.0" — vendor.ncp_policy.build_obs
-GOAL_NORM_OFFSET = 1.0
-
-# -- previous_action block: config/interface.yaml observation.layout[previous_action] --
-# vendor.ncp_policy.ACTION_LOW / ACTION_HIGH. The angular bound is LITERALLY
-# 3.14, not math.pi — that is what the network was trained against
-# (config/interface.yaml action.pi_is_not_pi_note). Using math.pi here would
-# shift the observation ~0.05% with no error raised anywhere.
-ACTION_LOW_V = -1.0
-ACTION_HIGH_V = 2.0
-ACTION_LOW_W = -3.14
-ACTION_HIGH_W = 3.14
-ACTION_BIAS_V = (ACTION_HIGH_V + ACTION_LOW_V) / 2.0
-ACTION_SCALE_V = (ACTION_HIGH_V - ACTION_LOW_V) / 2.0
-ACTION_BIAS_W = (ACTION_HIGH_W + ACTION_LOW_W) / 2.0
-ACTION_SCALE_W = (ACTION_HIGH_W - ACTION_LOW_W) / 2.0
-ACTION_DIM = 2
-
-# -- total layout: config/interface.yaml observation.total_dim --
-OBS_DIM = LIDAR_BEAMS + GOAL_DIM + ACTION_DIM  # 36
-
-
-# ---------------------------------------------------------------------------
-# Result container
-# ---------------------------------------------------------------------------
+# Lidar reduction parameters. Defaults mirror config/interface.yaml's
+# observation.layout[lidar_ranges]; the node passes them explicitly.
+DEFAULT_N_BEAMS = ncp_policy.BEAMS          # 32, from the checkpoint itself
+DEFAULT_ARC_DEG = ncp_policy.FOV_DEG        # 180.0, from the checkpoint itself
+DEFAULT_RANGE_MIN_M = 0.01                  # TG30 spec floor
+DEFAULT_RANGE_MAX_M = 30.0                  # TG30 spec reach; NOT the training
+                                            # clip (5.0) — see interface.yaml
+                                            # laser_clip_note. Do not reconcile.
 
 
 @dataclass(frozen=True)
 class ObservationResult:
-    """Output of `build_observation`.
+    """Either a complete observation or a fault. Never both, never neither."""
 
-    Parameters
-    ----------
-    obs:
-        Exactly `OBS_DIM` (36) floats, in layout order, on success. `None`
-        whenever `fault` is set — the caller must check `fault` first and
-        must never substitute a default vector for `None`.
-    fault:
-        `None` on success. Otherwise a reason string identifying which
-        precondition failed; see this module's docstring "Failure mode".
-    """
-
-    obs: Optional[List[float]]
+    obs: Optional[Sequence[float]]
     fault: Optional[str]
-
-
-# ---------------------------------------------------------------------------
-# Pure-Python reimplementations of vendor.ncp_policy formulas
-# ---------------------------------------------------------------------------
-
-
-def _normalize_lidar(bins_m: Sequence[float]) -> List[float]:
-    """`vendor.ncp_policy.build_obs`'s lidar normalization, verbatim:
-    clip to [0, LASER_CLIP_M], then (x - LASER_CLIP_M/2) / LASER_CLIP_M * 2.
-    """
-    out = []
-    half = LASER_CLIP_M / 2.0
-    for r in bins_m:
-        clipped = min(max(r, 0.0), LASER_CLIP_M)
-        out.append((clipped - half) / LASER_CLIP_M * 2.0)
-    return out
-
-
-def _local_goal(
-    pose_xy: Tuple[float, float], yaw: float, goal_xy: Tuple[float, float]
-) -> Tuple[float, float]:
-    """`vendor.ncp_policy.local_goal`, verbatim: world-frame goal -> robot
-    frame, by subtracting position and rotating by -yaw."""
-    dx = goal_xy[0] - pose_xy[0]
-    dy = goal_xy[1] - pose_xy[1]
-    c = math.cos(-yaw)
-    s = math.sin(-yaw)
-    return (c * dx - s * dy, s * dx + c * dy)
-
-
-def _normalize_goal(local_xy: Tuple[float, float]) -> List[float]:
-    """`vendor.ncp_policy.build_obs`'s goal normalization, verbatim:
-    xy / GOAL_NORM_SCALE_M - GOAL_NORM_OFFSET. Deliberately unclipped — a 45
-    deg off-bow goal normalizes to -1.71, a goal behind to -2.00. These are
-    EXPECTED out-of-distribution values per config/interface.yaml
-    `normalization_warning`, not bugs to clip away."""
-    return [
-        local_xy[0] / GOAL_NORM_SCALE_M - GOAL_NORM_OFFSET,
-        local_xy[1] / GOAL_NORM_SCALE_M - GOAL_NORM_OFFSET,
-    ]
-
-
-def _normalize_previous_action(action: Sequence[float]) -> List[float]:
-    """`vendor.ncp_policy.build_obs`'s previous_action normalization,
-    verbatim: (a - bias) / scale per component. A zero action normalizes to
-    (-0.333..., 0.0), NOT to zeros — config/interface.yaml `init_note` is
-    explicit this must not be "fixed" to a zero vector."""
-    v, w = action[0], action[1]
-    return [
-        (v - ACTION_BIAS_V) / ACTION_SCALE_V,
-        (w - ACTION_BIAS_W) / ACTION_SCALE_W,
-    ]
-
-
-def _all_finite(values: Sequence[float]) -> bool:
-    return all(math.isfinite(v) for v in values)
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 
 def build_observation(
@@ -209,97 +82,73 @@ def build_observation(
     yaw: Optional[float],
     goal_xy: Optional[Tuple[float, float]],
     previous_action: Optional[Sequence[float]],
+    *,
+    n_beams: int = DEFAULT_N_BEAMS,
+    arc_deg: float = DEFAULT_ARC_DEG,
+    range_min: float = DEFAULT_RANGE_MIN_M,
+    range_max: float = DEFAULT_RANGE_MAX_M,
 ) -> ObservationResult:
-    """Assemble the 36-dim observation for one control tick.
+    """Build the 36-dim observation, or return a fault.
 
-    Parameters
-    ----------
-    ranges, angle_min, angle_increment:
-        Raw LaserScan fields, passed straight through to
-        `rm_policy.scan_resampler.resample_forward_arc`.
-    pose_xy:
-        Current (x, y) robot position in the odom frame, or `None` if `/odom`
-        has not yet arrived. Required whenever `goal_xy` is not `None`.
-    yaw:
-        Current robot yaw (radians) in the odom frame, or `None`. Required
-        whenever `goal_xy` is not `None`.
-    goal_xy:
-        The fixed goal point in the odom frame (see config/interface.yaml
-        goal_local.preprocessing — this is a STATIC point, re-expressed in
-        the robot frame every tick), or `None` if no goal is defined yet.
-    previous_action:
-        The (v, w) action actually commanded on the previous tick — 2
-        elements, physical units (m/s, rad/s). Pass `(0.0, 0.0)` on the very
-        first tick; per config/interface.yaml `init_note` this deliberately
-        normalizes to a non-zero vector.
-
-    Returns
-    -------
-    ObservationResult:
-        `obs` populated (36 floats) on success; `fault` set and `obs` `None`
-        on any precondition failure or unexpected exception. Never raises.
+    `pose_xy`/`yaw` are the robot's current pose in the odom frame; `goal_xy`
+    is the static goal in that same frame. `previous_action` is the (v, w)
+    the policy REQUESTED last tick (not what the robot achieved) — see
+    interface.yaml `clamped_action_note` for why.
     """
     try:
         return _build_observation_inner(
-            ranges, angle_min, angle_increment, pose_xy, yaw, goal_xy, previous_action
+            ranges, angle_min, angle_increment, pose_xy, yaw, goal_xy,
+            previous_action, n_beams=n_beams, arc_deg=arc_deg,
+            range_min=range_min, range_max=range_max,
         )
     except Exception:
         return ObservationResult(obs=None, fault="internal_error")
 
 
 def _build_observation_inner(
-    ranges: Optional[Sequence[float]],
-    angle_min: float,
-    angle_increment: float,
-    pose_xy: Optional[Tuple[float, float]],
-    yaw: Optional[float],
-    goal_xy: Optional[Tuple[float, float]],
-    previous_action: Optional[Sequence[float]],
+    ranges, angle_min, angle_increment, pose_xy, yaw, goal_xy, previous_action,
+    *, n_beams, arc_deg, range_min, range_max,
 ) -> ObservationResult:
-    # --- lidar block --------------------------------------------------
-    lidar_result = resample_forward_arc(
-        ranges,
-        angle_min,
-        angle_increment,
-        n_bins=LIDAR_BEAMS,
-        arc_deg=LIDAR_ARC_DEG,
-        range_min=LIDAR_RANGE_MIN_M,
-        range_max=LIDAR_RANGE_MAX_M,
-        sampling=LIDAR_SAMPLING,
+    # --- 1. Reduce the raw scan to the trained beam layout. OUR code, and the
+    # only place the TG30's 0.0-no-return sentinel is handled: the resampler
+    # maps 0.0 / sub-range_min / negative / inf / NaN to range_max BEFORE the
+    # policy sees anything. This is why the vendored module needs no patch.
+    scan_result = scan_resampler.resample_forward_arc(
+        ranges, angle_min, angle_increment,
+        n_bins=n_beams, arc_deg=arc_deg,
+        range_min=range_min, range_max=range_max,
+        sampling=scan_resampler.SAMPLING_NEAREST_RAY,
     )
-    if lidar_result.fault is not None or lidar_result.bins is None:
-        return ObservationResult(obs=None, fault=f"lidar:{lidar_result.fault}")
+    if scan_result.fault is not None:
+        return ObservationResult(obs=None, fault=f"lidar:{scan_result.fault}")
 
-    lidar_norm = _normalize_lidar(lidar_result.bins)
-
-    # --- goal_local block -----------------------------------------------
-    # A missing pose/goal must FAIL, never substitute a default goal vector
-    # — config/interface.yaml goal_local.failure_mode is explicit that a
-    # plausible-looking goal is worse than none.
-    if goal_xy is None:
-        return ObservationResult(obs=None, fault="goal_missing")
+    # --- 2. Pose and goal must both exist. Never substitute a default. ---
     if pose_xy is None or yaw is None:
         return ObservationResult(obs=None, fault="pose_missing")
-    if not _all_finite(pose_xy) or not math.isfinite(yaw) or not _all_finite(goal_xy):
+    if goal_xy is None:
+        return ObservationResult(obs=None, fault="goal_missing")
+    if not all(math.isfinite(v) for v in (pose_xy[0], pose_xy[1], yaw,
+                                          goal_xy[0], goal_xy[1])):
         return ObservationResult(obs=None, fault="non_finite_pose_or_goal")
 
-    local_xy = _local_goal(pose_xy, yaw, goal_xy)
-    goal_norm = _normalize_goal(local_xy)
-
-    # --- previous_action block -------------------------------------------
-    if previous_action is None or len(previous_action) != ACTION_DIM:
+    if previous_action is None or len(previous_action) != 2:
         return ObservationResult(obs=None, fault="invalid_previous_action")
-    if not _all_finite(previous_action):
+    if not all(math.isfinite(float(a)) for a in previous_action):
         return ObservationResult(obs=None, fault="non_finite_previous_action")
 
-    action_norm = _normalize_previous_action(previous_action)
+    # --- 3. Upstream's own pipeline, in upstream's own order. This mirrors
+    # NCP-on-Rosmaster/rosmaster/node.py exactly. prepare_scan is a no-op on
+    # our already-cleaned vector, and is called anyway so the call sequence
+    # stays identical to upstream's — if upstream ever changes what it does,
+    # we inherit the change rather than diverging from it.
+    scan_m = ncp_policy.prepare_scan(scan_result.bins)
+    local_goal_xy = ncp_policy.local_goal(pose_xy, yaw, goal_xy)
+    obs = ncp_policy.build_obs(scan_m, local_goal_xy, previous_action)
 
-    # --- assemble & fail closed on any surprise --------------------------
-    obs = lidar_norm + goal_norm + action_norm
-
-    if len(obs) != OBS_DIM:
+    # --- 4. Fail-closed validation of the assembled vector. ---
+    if len(obs) != ncp_policy.OBS_DIM:
         return ObservationResult(obs=None, fault="wrong_obs_length")
-    if not _all_finite(obs):
+    if not all(math.isfinite(float(v)) for v in obs):
         return ObservationResult(obs=None, fault="non_finite_obs")
 
     return ObservationResult(obs=obs, fault=None)

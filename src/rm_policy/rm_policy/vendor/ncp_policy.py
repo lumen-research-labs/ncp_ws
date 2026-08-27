@@ -1,42 +1,4 @@
-"""VENDORED COPY — do not edit upstream from here, and do not sync blindly.
-
-Source:   LumenLabs/NCP-on-Rosmaster, rosmaster/policy.py
-Commit:   0ad548c6236f2c52f8435cd58a9610604047f919 ("Update README to remove
-          provenance section"), branch main, clean tree
-Vendored: 2026-08-27
-
-WHY VENDORED
-    Operator decision 2026-08-27: all fixes live in ncp_ws; the upstream repo
-    is not to be modified. This file is therefore the authority for how the
-    trained policy is evaluated ON THIS ROBOT, and it has deliberately
-    diverged from upstream. Re-syncing means re-applying the divergences
-    below by hand, not overwriting this file.
-
-LOCAL DIVERGENCES FROM UPSTREAM (keep this list exhaustive)
-    1. prepare_scan() now treats a range of exactly 0.0, and any value below
-       `range_min`, as a no-return -> LASER_CLIP. Upstream maps only
-       non-finite values. This is REQUIRED on this hardware: the YDLIDAR TG30
-       encodes a no-return as 0.0, not inf (measured 2026-08-27: 1982 points,
-       781 zeros = 39.4%, ZERO inf), and the driver parameter that would
-       change that, `invalid_range_is_inf:=true`, is INERT on this driver.
-       Untreated, build_obs() clips 0.0 into the observation as -1.0, which is
-       the encoding for "obstacle at zero distance" — i.e. ~39% of rays would
-       tell the policy it is touching a wall. See config/interface.yaml.
-    2. Nothing else. The network, the normalization formulas, the action
-       bounds and the observation ordering are untouched, because they must
-       continue to match the trained checkpoint exactly.
-
-NOT MODIFIED, ON PURPOSE
-    build_obs() still clips to [0, LASER_CLIP], so a raw 0.0 reaching it
-    directly would still become -1.0. That is upstream's contract with the
-    trained weights and is not ours to change. The guarantee is upstream of
-    it: rm_policy.scan_resampler maps no-returns to range_max, and
-    prepare_scan (divergence 1) is the second line of defence. Do not "fix"
-    build_obs — changing a normalization formula silently invalidates the
-    checkpoint.
-
-UPSTREAM DOCSTRING FOLLOWS
-NCP policy plumbing for the Rosmaster X3 — ROS-free, unit-testable.
+"""NCP policy plumbing for the Rosmaster X3 — ROS-free, unit-testable.
 
 Mirrors the barn_gym BarnEnv observation/action contract exactly
 (optomotive arch-comparison worktree, --beams 32 --fov 180):
@@ -105,28 +67,10 @@ def check_scan(n_ranges, angle_min, angle_increment, tol_deg=SCAN_TOL_DEG):
     return problems
 
 
-# LOCAL DIVERGENCE 1 (see module header): the TG30's no-return sentinel.
-# Sourced from config/interface.yaml lidar range_min_m. A ray at or below this
-# is not a real measurement on this sensor.
-TG30_RANGE_MIN_M = 0.01
-
-
-def prepare_scan(ranges, range_min=TG30_RANGE_MIN_M):
-    """Ranges as float32 meters, with every no-return mapped to LASER_CLIP.
-
-    DIVERGES FROM UPSTREAM — see module header, divergence 1. Upstream maps
-    only non-finite values. This build additionally maps exactly 0.0 and any
-    value below ``range_min`` (including negatives), because the YDLIDAR TG30
-    encodes a no-return as 0.0 and never as inf. Leaving those untreated makes
-    build_obs() report ~39% of rays as "obstacle at zero distance".
-
-    Mapping to LASER_CLIP (not to 0) is the same treatment upstream already
-    gives inf, so the normalization downstream is unchanged: a no-return
-    becomes +1.0, i.e. "nothing out to the clip distance".
-    """
+def prepare_scan(ranges):
+    """Ranges as float32 meters; non-finite (inf/nan = no return) -> LASER_CLIP."""
     r = np.array(ranges, dtype=np.float32)
     r[~np.isfinite(r)] = LASER_CLIP
-    r[r < range_min] = LASER_CLIP
     return r
 
 
