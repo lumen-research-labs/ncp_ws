@@ -19,7 +19,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            # populated as nodes are written
+            'policy_node = rm_policy.policy_node:main',
         ],
     },
 )

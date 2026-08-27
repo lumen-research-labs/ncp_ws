@@ -1,0 +1,675 @@
+"""
+policy_node.py — ROS2 node wrapper that runs the trained NCP policy at the
+control rate and publishes a candidate command for the safety layer.
+
+What it does:
+    Every tick (at `control.rate_hz` from `config/interface.yaml`, currently
+    5 Hz):
+      1. Checks `/scan` and `/odom` staleness against the SAME timeout
+         constants `rm_safety` uses (`config/safety_limits.yaml`
+         `timeouts.scan_timeout_ms` / `odom_timeout_ms`), so this node goes
+         quiet on exactly the same schedule the safety layer would already
+         be treating the robot as blind.
+      2. Confirms the goal is defined. The goal is a STATIC point in the
+         odom frame, fixed ONCE from the first `/odom` message (start pose +
+         the `(goal_x, goal_y)` launch-parameter offset, rotated by the
+         start yaw). Until the first `/odom` message has ever arrived, the
+         goal does not exist and this node MUST NOT drive — no default goal
+         vector is ever substituted (interface.yaml `goal_local.failure_mode`
+         is explicit that a plausible-looking goal is worse than no goal).
+      3. Calls `rm_policy.observation_builder` to assemble the 36-element
+         observation (32 lidar + 2 dynamic robot-frame goal + 2 previous
+         action). This node does not build or normalize the vector itself —
+         see the ASSUMED API note below.
+      4. Calls `rm_policy.policy_runner.PolicyRunner.act()` to get `(v, w)`
+         in PRE-SCALED PHYSICAL UNITS (m/s, rad/s). The trained actor's
+         linear head + clip already produced final units — this node must
+         NOT multiply by any additional scaling (`config/interface.yaml`
+         `action.scaling.applies: false`; double-scaling here is a silent,
+         no-runtime-error numerical bug).
+      5. Publishes a `Twist` to `/policy/cmd_vel` — an INPUT to `rm_safety`,
+         never `/cmd_vel` directly. `linear.y` is set to `0.0` EXPLICITLY on
+         every message (never left at its zero default) because the action
+         space has no lateral component and that must be a visible claim in
+         the code and in the bag, not an accident of an unset field.
+      6. Feeds back the REQUESTED action (what this node asked for, not
+         what `rm_safety` may have clamped it to) as `previous_action` for
+         the next tick's observation. Training had no safety layer, so
+         emitted == applied there; feeding back the requested action keeps
+         the observation distribution identical to training. Known,
+         accepted consequence: during any period `rm_safety` clamps or
+         zeroes the command, the policy's own model of "what I last did"
+         disagrees with what the robot actually did.
+
+    On ANY fault (stale scan, stale odom, undefined goal, observation-builder
+    fault, inference fault, NaN in the final command, or an unhandled
+    exception) the tick publishes a Twist of all zeros and does NOT update
+    `previous_action` — a failed tick must not let a stale/garbage command
+    persist, and must not corrupt the fed-back action history either.
+
+`observation_builder` API (landed in `rm_policy/observation_builder.py`
+concurrently with this file; reconciled against the real signature):
+    `build_observation(ranges, angle_min, angle_increment, pose_xy, yaw,
+    goal_xy, previous_action) -> ObservationResult`, a pure/ROS-free function
+    returning an object with an `.obs` field (36 floats, `config/
+    interface.yaml` order) that is `None` whenever `.fault` is set (a string
+    reason), mirroring `scan_resampler.ScanResampleResult`. `pose_xy`/`yaw`/
+    `goal_xy` are each `None` until `/odom` has arrived / the goal is fixed —
+    this node already refuses to call it before both are defined (see the
+    goal-undefined check below), so `None` is never actually passed for
+    those three in practice, but the builder also fails closed on its own if
+    it ever is. All lidar/goal/previous-action normalization formulas (the
+    vendored `ncp_policy` math) live INSIDE `observation_builder` — this node
+    passes only plain sensor/pose/goal/action values and never reimplements
+    any normalization itself. There is no `goal_local` field on the result
+    (only `obs`/`fault`), so the debug topic does not report the robot-frame
+    goal vector separately from the observation it's embedded in.
+
+Subscribes:  /scan   [sensor_msgs/LaserScan]   @ ~10.07 Hz (interface.yaml)
+Subscribes:  /odom   [nav_msgs/Odometry]       @ ~10.74 Hz (interface.yaml)
+Publishes:   /policy/cmd_vel  [geometry_msgs/Twist]  @ control.rate_hz (5 Hz)
+Publishes:   /ncp_debug       [std_msgs/String]      @ control.rate_hz (5 Hz)
+Parameters:  scan_topic       (str, "/scan")
+Parameters:  odom_topic       (str, "/odom")
+Parameters:  cmd_vel_topic    (str, "/policy/cmd_vel") — MUST NOT be /cmd_vel;
+                              refused at startup if set to /cmd_vel.
+Parameters:  debug_topic      (str, "/ncp_debug")
+Parameters:  goal_x           (float, 2.5) — metres, robot-frame offset from
+                              the start pose, per interface.yaml goal_default_m
+Parameters:  goal_y           (float, 0.0) — metres, ditto
+Parameters:  weights          (str, "") — path to a trained actor state_dict;
+                              "" means random weights (no checkpoint applied)
+Parameters:  interface_config_path (str, <repo-relative default>) — path to
+                              config/interface.yaml
+Parameters:  safety_limits_path    (str, <repo-relative default>) — path to
+                              config/safety_limits.yaml, for the scan/odom
+                              timeout constants shared with rm_safety
+Failure mode:
+    - Node refuses to construct (raises, never starts spinning) if:
+        * `config/interface.yaml` cannot be read, or its `interface_version`
+          does not match `_EXPECTED_INTERFACE_VERSION` — a version mismatch
+          means the model and this code disagree about vector layout, which
+          has no runtime error otherwise.
+        * `config/safety_limits.yaml` cannot be read.
+        * `cmd_vel_topic` resolves to `/cmd_vel`.
+        * `weights` is non-empty and fails to load (see policy_runner.py).
+    - Before the first `/odom` message: goal undefined -> publish zero every
+      tick, throttled warning. No motion is possible on startup.
+    - Stale `/scan` or `/odom` (age > the shared timeout from
+      safety_limits.yaml): publish zero, throttled warning, and reset the
+      policy runner's recurrent state (so a resumed session does not carry
+      a hidden state built across a discontinuous input history).
+    - `observation_builder` or `policy_runner` reporting a fault: publish
+      zero, throttled warning, previous_action left unchanged.
+    - NaN/inf anywhere in the final `(v, w)`: publish zero, throttled
+      warning — belt-and-braces on top of `policy_runner`'s own validation.
+    - Any unhandled exception inside the control-loop tick: caught, zero
+      published, logged at ERROR. An exception must never skip the publish.
+    - On shutdown: best-effort final zero Twist, matching `rm_safety`'s
+      node-lifecycle convention.
+"""
+
+from __future__ import annotations
+
+import math
+import pathlib
+import time
+from typing import Optional, Tuple
+
+import rclpy
+import rclpy.node
+import yaml
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String
+
+from rm_policy.observation_builder import build_observation
+from rm_policy.policy_runner import PolicyRunner
+
+# ---------------------------------------------------------------------------
+# Interface-contract version this node was written against. Loaded-and-checked
+# against config/interface.yaml's own `interface_version` at startup — see
+# `_load_interface_config`. A mismatch means the observation/action layout
+# this code assumes and the layout the checkpoint/contract actually specifies
+# have silently diverged, which otherwise produces no runtime error.
+# ---------------------------------------------------------------------------
+_EXPECTED_INTERFACE_VERSION: str = "3.0.0"
+
+# ---------------------------------------------------------------------------
+# Default config paths — only valid in a standard colcon workspace layout
+# where the package source tree is adjacent to config/. Matches
+# rm_safety.safety_node's `_DEFAULT_LIMITS_PATH` resolution convention.
+# Prefer passing these explicitly via a launch file parameter.
+# ---------------------------------------------------------------------------
+_THIS_DIR = pathlib.Path(__file__).parent.resolve()
+_DEFAULT_INTERFACE_CONFIG_PATH = str(_THIS_DIR.parents[2] / "config" / "interface.yaml")
+_DEFAULT_SAFETY_LIMITS_PATH = str(_THIS_DIR.parents[2] / "config" / "safety_limits.yaml")
+
+# ---------------------------------------------------------------------------
+# Default topic names.
+# ---------------------------------------------------------------------------
+_DEFAULT_SCAN_TOPIC: str = "/scan"
+_DEFAULT_ODOM_TOPIC: str = "/odom"
+_DEFAULT_CMD_VEL_TOPIC: str = "/policy/cmd_vel"
+_DEFAULT_DEBUG_TOPIC: str = "/ncp_debug"
+
+# ---------------------------------------------------------------------------
+# `/cmd_vel` is the ONE topic this node must never publish to. `rm_safety` is
+# its sole publisher (see CLAUDE.md ground rules). This is a hard-coded
+# comparison target, not a magic number in the config sense — it names the
+# one topic string that must never appear as this node's output.
+# ---------------------------------------------------------------------------
+_FORBIDDEN_CMD_VEL_TOPIC: str = "/cmd_vel"
+
+# ---------------------------------------------------------------------------
+# Default goal offset, metres, robot frame relative to the start pose.
+# Sourced from config/interface.yaml `observation.layout[goal_local].
+# goal_default_m: [2.5, 0.0]` (operator decision 2026-08-27) and re-declared
+# here as ROS parameter defaults, which is the standard ROS2 mechanism for
+# operator-overridable values — not a duplicate literal invented independently
+# of the config.
+# ---------------------------------------------------------------------------
+_DEFAULT_GOAL_X_M: float = 2.5
+_DEFAULT_GOAL_Y_M: float = 0.0
+
+# Default weights path: "" means random weights (no trained checkpoint
+# applied). Matches policy_runner.PolicyRunner's own default.
+_DEFAULT_WEIGHTS_PATH: str = ""
+
+# Throttle period (seconds) for repeated warning logs so a sustained fault
+# does not flood the log at the full control rate.
+_WARN_THROTTLE_SEC: float = 5.0
+
+
+def _yaw_from_quaternion(x: float, y: float, z: float, w: float) -> float:
+    """Extract yaw (radians, REP-103 z-up) from a geometry_msgs quaternion.
+
+    Plain message-field arithmetic, not an observation/normalization formula
+    — this is quaternion-to-Euler conversion, not part of the frozen
+    obs/action contract, so it belongs here rather than in
+    observation_builder (which consumes an already-extracted yaw float).
+    """
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def _rotate_2d(x: float, y: float, theta: float) -> Tuple[float, float]:
+    """Rotate a 2D vector by `theta` radians (standard CCW rotation)."""
+    c, s = math.cos(theta), math.sin(theta)
+    return (c * x - s * y, s * x + c * y)
+
+
+class PolicyNode(rclpy.node.Node):
+    """ROS2 node: runs the trained NCP policy; publishes to /policy/cmd_vel."""
+
+    def __init__(self) -> None:
+        super().__init__("policy_node")
+
+        # ------------------------------------------------------------------
+        # Declare and read parameters
+        # ------------------------------------------------------------------
+        self.declare_parameter("scan_topic", _DEFAULT_SCAN_TOPIC)
+        self.declare_parameter("odom_topic", _DEFAULT_ODOM_TOPIC)
+        self.declare_parameter("cmd_vel_topic", _DEFAULT_CMD_VEL_TOPIC)
+        self.declare_parameter("debug_topic", _DEFAULT_DEBUG_TOPIC)
+        self.declare_parameter("goal_x", _DEFAULT_GOAL_X_M)
+        self.declare_parameter("goal_y", _DEFAULT_GOAL_Y_M)
+        self.declare_parameter("weights", _DEFAULT_WEIGHTS_PATH)
+        self.declare_parameter("interface_config_path", _DEFAULT_INTERFACE_CONFIG_PATH)
+        self.declare_parameter("safety_limits_path", _DEFAULT_SAFETY_LIMITS_PATH)
+
+        scan_topic = self._get_str_param("scan_topic")
+        odom_topic = self._get_str_param("odom_topic")
+        cmd_vel_topic = self._get_str_param("cmd_vel_topic")
+        debug_topic = self._get_str_param("debug_topic")
+        self._goal_offset_x: float = self._get_double_param("goal_x")
+        self._goal_offset_y: float = self._get_double_param("goal_y")
+        weights_path = self._get_str_param("weights")
+        interface_config_path = self._get_str_param("interface_config_path")
+        safety_limits_path = self._get_str_param("safety_limits_path")
+
+        # ------------------------------------------------------------------
+        # HARD RULE: never publish to /cmd_vel from this node. rm_safety is
+        # the sole publisher. Fail loudly at construction, not silently at
+        # publish time.
+        # ------------------------------------------------------------------
+        if cmd_vel_topic == _FORBIDDEN_CMD_VEL_TOPIC:
+            raise ValueError(
+                f"policy_node: cmd_vel_topic must not be {_FORBIDDEN_CMD_VEL_TOPIC!r}. "
+                f"This node publishes candidate commands to rm_safety's input "
+                f"topics only (default /policy/cmd_vel); rm_safety is the sole "
+                f"publisher of /cmd_vel."
+            )
+
+        # ------------------------------------------------------------------
+        # Load and validate config/interface.yaml — fatal on version mismatch
+        # or unreadable file. The node must not start with an unknown or
+        # wrong observation/action contract.
+        # ------------------------------------------------------------------
+        interface_cfg = self._load_yaml(interface_config_path, "interface.yaml")
+        interface_version = interface_cfg.get("interface_version")
+        if interface_version != _EXPECTED_INTERFACE_VERSION:
+            raise RuntimeError(
+                f"policy_node: interface_version mismatch — this node was "
+                f"written against {_EXPECTED_INTERFACE_VERSION!r}, but "
+                f"{interface_config_path!r} declares {interface_version!r}. "
+                f"Refusing to start: the model and the code disagree about "
+                f"the observation/action vector layout."
+            )
+        try:
+            self._control_rate_hz: float = float(interface_cfg["control"]["rate_hz"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"policy_node: interface.yaml missing/invalid "
+                f"control.rate_hz: {exc}"
+            ) from exc
+
+        # ------------------------------------------------------------------
+        # Load config/safety_limits.yaml — ONLY for the scan/odom staleness
+        # timeout constants, reused verbatim so this node goes quiet on
+        # exactly the schedule rm_safety already treats as unsafe. This is a
+        # config-file read, not a Python import of rm_safety — rm_tools/
+        # rm_policy must never import rm_safety at runtime, and they don't
+        # here; both packages just parse the same YAML file independently.
+        # ------------------------------------------------------------------
+        safety_cfg = self._load_yaml(safety_limits_path, "safety_limits.yaml")
+        try:
+            self._scan_timeout_ms: float = float(
+                safety_cfg["timeouts"]["scan_timeout_ms"]
+            )
+            self._odom_timeout_ms: float = float(
+                safety_cfg["timeouts"]["odom_timeout_ms"]
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"policy_node: safety_limits.yaml missing/invalid "
+                f"timeouts.scan_timeout_ms / odom_timeout_ms: {exc}"
+            ) from exc
+
+        # ------------------------------------------------------------------
+        # Policy runner — constructed (and weights loaded, if given) before
+        # any subscription/timer exists, so a bad weights file prevents the
+        # node from starting at all.
+        # ------------------------------------------------------------------
+        self._runner = PolicyRunner(weights_path=weights_path)
+
+        # ------------------------------------------------------------------
+        # Sensor state — everything starts "never received" (infinitely
+        # stale), matching rm_safety.safety_node's fail-closed convention.
+        # ------------------------------------------------------------------
+        self._scan_ranges: list = []
+        self._scan_angle_min: float = 0.0
+        self._scan_angle_increment: float = 0.0
+        self._scan_stamp: Optional[float] = None
+
+        self._robot_x: float = 0.0
+        self._robot_y: float = 0.0
+        self._robot_yaw: float = 0.0
+        self._odom_stamp: Optional[float] = None
+
+        # Goal is UNDEFINED until the first /odom message arrives. No default
+        # is ever substituted — see interface.yaml goal_local.failure_mode.
+        self._goal_world_x: Optional[float] = None
+        self._goal_world_y: Optional[float] = None
+
+        # Previous action fed back into the next observation: the REQUESTED
+        # action (what this node asked for), not what rm_safety may have
+        # clamped it to. See module docstring point 6 / interface.yaml
+        # previous_action.clamped_action_note. Zero on the first tick, per
+        # interface.yaml's init_note (a zero ACTION, not a "do nothing" flag).
+        self._prev_action_v: float = 0.0
+        self._prev_action_w: float = 0.0
+
+        self._last_scan_stale: bool = True
+        self._last_odom_stale: bool = True
+
+        # ------------------------------------------------------------------
+        # QoS — best-effort/volatile, matching rm_safety's sensor QoS.
+        # ------------------------------------------------------------------
+        sensor_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+
+        # ------------------------------------------------------------------
+        # Publishers — NEVER /cmd_vel. cmd_vel_topic defaults to
+        # /policy/cmd_vel, an INPUT to rm_safety.
+        # ------------------------------------------------------------------
+        self._cmd_pub = self.create_publisher(Twist, cmd_vel_topic, 10)
+        self._debug_pub = self.create_publisher(String, debug_topic, 10)
+
+        # ------------------------------------------------------------------
+        # Subscriptions
+        # ------------------------------------------------------------------
+        self.create_subscription(LaserScan, scan_topic, self._scan_cb, sensor_qos)
+        self.create_subscription(Odometry, odom_topic, self._odom_cb, sensor_qos)
+
+        # ------------------------------------------------------------------
+        # Control loop timer — rate sourced from interface.yaml control.rate_hz.
+        # ------------------------------------------------------------------
+        loop_period = 1.0 / self._control_rate_hz
+        self._control_timer = self.create_timer(loop_period, self._control_loop)
+
+        self.get_logger().info(
+            f"policy_node ready: cmd_vel_topic={cmd_vel_topic!r}, "
+            f"rate={self._control_rate_hz} Hz, weights={weights_path or '<random>'!r}, "
+            f"goal_offset=({self._goal_offset_x}, {self._goal_offset_y}) m — "
+            f"NOT YET APPLIED (undefined until the first /odom message)."
+        )
+
+    # ------------------------------------------------------------------
+    # Parameter helpers
+    # ------------------------------------------------------------------
+
+    def _get_str_param(self, name: str) -> str:
+        return self.get_parameter(name).get_parameter_value().string_value
+
+    def _get_double_param(self, name: str) -> float:
+        return self.get_parameter(name).get_parameter_value().double_value
+
+    # ------------------------------------------------------------------
+    # Config loading
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_yaml(path: str, label: str) -> dict:
+        """Load a YAML config file; raises on any failure (fatal)."""
+        try:
+            with open(path, "r") as fh:
+                return yaml.safe_load(fh)
+        except Exception as exc:
+            raise RuntimeError(
+                f"policy_node: cannot load {label} from {path!r}: {exc}"
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # Subscription callbacks — record data + arrival time only; the control
+    # loop does all the decision-making, matching rm_safety.safety_node's
+    # split between I/O callbacks and the timer-driven evaluation.
+    # ------------------------------------------------------------------
+
+    def _scan_cb(self, msg: LaserScan) -> None:
+        self._scan_ranges = list(msg.ranges)
+        self._scan_angle_min = msg.angle_min
+        self._scan_angle_increment = msg.angle_increment
+        self._scan_stamp = time.monotonic()
+
+    def _odom_cb(self, msg: Odometry) -> None:
+        pos = msg.pose.pose.position
+        ori = msg.pose.pose.orientation
+        yaw = _yaw_from_quaternion(ori.x, ori.y, ori.z, ori.w)
+
+        self._robot_x = pos.x
+        self._robot_y = pos.y
+        self._robot_yaw = yaw
+        self._odom_stamp = time.monotonic()
+
+        if self._goal_world_x is None:
+            # Fix the goal ONCE, from the first /odom message: start position
+            # plus the launch-parameter (goal_x, goal_y) offset, rotated by
+            # the start yaw into the world (odom) frame. This is a one-time
+            # frame conversion done here at "start pose capture" time — it is
+            # NOT the per-tick robot-frame `local_goal()` transform that
+            # observation_builder performs every tick against this fixed
+            # point (see interface.yaml goal_local.preprocessing). The two
+            # are different operations and this one is not part of the
+            # frozen per-tick observation formula, so computing it here does
+            # not duplicate anything observation_builder owns.
+            dx, dy = _rotate_2d(self._goal_offset_x, self._goal_offset_y, yaw)
+            self._goal_world_x = pos.x + dx
+            self._goal_world_y = pos.y + dy
+            self.get_logger().info(
+                f"policy_node: goal fixed at odom-frame "
+                f"({self._goal_world_x:.3f}, {self._goal_world_y:.3f}) m "
+                f"(start ({pos.x:.3f}, {pos.y:.3f}), yaw {yaw:.3f} rad, "
+                f"offset ({self._goal_offset_x}, {self._goal_offset_y}) m)."
+            )
+
+    # ------------------------------------------------------------------
+    # Publish helpers
+    # ------------------------------------------------------------------
+
+    def _publish_zero(self, reason: str) -> None:
+        """Publish a zero Twist to cmd_vel_topic and a debug message.
+
+        Deliberately does NOT update `self._prev_action_{v,w}` — a failed
+        tick must not corrupt the fed-back action history with a value the
+        policy never asked for.
+        """
+        cmd = Twist()
+        cmd.linear.x = 0.0
+        cmd.linear.y = 0.0  # explicit, never left at the field default
+        cmd.linear.z = 0.0
+        cmd.angular.x = 0.0
+        cmd.angular.y = 0.0
+        cmd.angular.z = 0.0
+        self._cmd_pub.publish(cmd)
+        self._publish_debug(fault=reason, action=None, goal_local=None)
+
+    def _publish_debug(
+        self,
+        *,
+        fault: Optional[str],
+        action: Optional[Tuple[float, float]],
+        goal_local: Optional[Tuple[float, float]],
+    ) -> None:
+        """Publish a one-line JSON status, mirroring the upstream /ncp_debug
+        convention, so "is it seeing anything?" is answerable from the
+        terminal without decoding Twist messages."""
+        import json  # local import: only this debug path needs it
+
+        min_range = None
+        if self._scan_ranges:
+            finite = [r for r in self._scan_ranges if math.isfinite(r) and r > 0.0]
+            if finite:
+                min_range = round(min(finite), 3)
+
+        status = {
+            "fault": fault,
+            "goal_defined": self._goal_world_x is not None,
+            "goal_local_m": (
+                [round(goal_local[0], 3), round(goal_local[1], 3)]
+                if goal_local is not None
+                else None
+            ),
+            "min_range_m": min_range,
+            "action": (
+                [round(action[0], 3), round(action[1], 3)]
+                if action is not None
+                else None
+            ),
+            "weights": self._runner.weights_path or None,
+        }
+        self._debug_pub.publish(String(data=json.dumps(status)))
+
+    # ------------------------------------------------------------------
+    # Control loop
+    # ------------------------------------------------------------------
+
+    def _control_loop(self) -> None:
+        """Timer callback: fail-closed wrapper around `_control_loop_inner`."""
+        try:
+            self._control_loop_inner()
+        except Exception as exc:
+            self.get_logger().error(
+                f"policy_node: unhandled exception in control loop: {exc} — "
+                f"publishing zero velocity."
+            )
+            self._publish_zero(reason=f"internal_error:{exc!r}")
+
+    def _control_loop_inner(self) -> None:
+        now = time.monotonic()
+
+        # ------------------------------------------------------------------
+        # Staleness watchdogs — same timeout constants rm_safety uses.
+        # ------------------------------------------------------------------
+        scan_age_ms = self._age_ms(self._scan_stamp, now)
+        odom_age_ms = self._age_ms(self._odom_stamp, now)
+        scan_stale = scan_age_ms > self._scan_timeout_ms
+        odom_stale = odom_age_ms > self._odom_timeout_ms
+
+        # Reset the recurrent state on the transition INTO a stale period
+        # (not every tick while it remains stale) so a long-stale robot
+        # doesn't spam resets, but a resumed session never carries a hidden
+        # state built across the gap.
+        if (scan_stale and not self._last_scan_stale) or (
+            odom_stale and not self._last_odom_stale
+        ):
+            self._runner.reset()
+        self._last_scan_stale = scan_stale
+        self._last_odom_stale = odom_stale
+
+        if scan_stale:
+            self.get_logger().warn(
+                f"policy_node: /scan stale ({scan_age_ms:.0f} ms > "
+                f"{self._scan_timeout_ms:.0f} ms) — publishing zero.",
+                throttle_duration_sec=_WARN_THROTTLE_SEC,
+            )
+            self._publish_zero(reason="scan_stale")
+            return
+
+        if odom_stale:
+            self.get_logger().warn(
+                f"policy_node: /odom stale ({odom_age_ms:.0f} ms > "
+                f"{self._odom_timeout_ms:.0f} ms) — publishing zero.",
+                throttle_duration_sec=_WARN_THROTTLE_SEC,
+            )
+            self._publish_zero(reason="odom_stale")
+            return
+
+        # ------------------------------------------------------------------
+        # Goal must be defined. No default is ever substituted (interface.yaml
+        # goal_local.failure_mode) — undefined goal is a hard stop, not a
+        # degraded mode.
+        # ------------------------------------------------------------------
+        if self._goal_world_x is None or self._goal_world_y is None:
+            self.get_logger().warn(
+                "policy_node: goal undefined — no /odom message has ever "
+                "arrived, so the start pose (and therefore the goal) is "
+                "unknown. Publishing zero.",
+                throttle_duration_sec=_WARN_THROTTLE_SEC,
+            )
+            self._publish_zero(reason="goal_undefined")
+            return
+
+        # ------------------------------------------------------------------
+        # Build the observation. See the observation_builder API note in the
+        # module docstring.
+        # ------------------------------------------------------------------
+        obs_result = build_observation(
+            ranges=self._scan_ranges,
+            angle_min=self._scan_angle_min,
+            angle_increment=self._scan_angle_increment,
+            pose_xy=(self._robot_x, self._robot_y),
+            yaw=self._robot_yaw,
+            goal_xy=(self._goal_world_x, self._goal_world_y),
+            previous_action=(self._prev_action_v, self._prev_action_w),
+        )
+
+        if obs_result.fault is not None or obs_result.obs is None:
+            self.get_logger().warn(
+                f"policy_node: observation_builder fault: "
+                f"{obs_result.fault!r} — publishing zero.",
+                throttle_duration_sec=_WARN_THROTTLE_SEC,
+            )
+            self._publish_zero(reason=f"obs_fault:{obs_result.fault}")
+            return
+
+        # ------------------------------------------------------------------
+        # Run inference. PolicyRunner.act() already validates shape/NaN/inf
+        # on both the input vector and the raw network output.
+        # ------------------------------------------------------------------
+        inference = self._runner.act(obs_result.obs)
+        if inference.fault is not None or inference.action is None:
+            self.get_logger().warn(
+                f"policy_node: policy_runner fault: {inference.fault!r} — "
+                f"publishing zero.",
+                throttle_duration_sec=_WARN_THROTTLE_SEC,
+            )
+            self._publish_zero(reason=f"inference_fault:{inference.fault}")
+            return
+
+        v, w = inference.action
+
+        # Belt-and-braces final guard: policy_runner already checks
+        # finiteness, but a command must never reach a publisher unchecked.
+        if not (math.isfinite(v) and math.isfinite(w)):
+            self.get_logger().error(
+                f"policy_node: non-finite action after inference (v={v}, "
+                f"w={w}) — publishing zero."
+            )
+            self._publish_zero(reason="action_nonfinite")
+            return
+
+        # ------------------------------------------------------------------
+        # Action is PRE-SCALED PHYSICAL UNITS (m/s, rad/s). Do NOT multiply
+        # by any max_vx/wz_max here — config/interface.yaml
+        # action.scaling.applies is false, and that scaling is rm_safety's
+        # clamp, not this node's. Publish exactly what the actor emitted.
+        # ------------------------------------------------------------------
+        cmd = Twist()
+        cmd.linear.x = float(v)
+        cmd.linear.y = 0.0  # EXPLICIT — see module docstring point 5 /
+        # interface.yaml action.vy_removed_note. The action space has no
+        # lateral component; leaving this field at its implicit zero default
+        # would not be a visible claim in the code or the recorded bag.
+        cmd.linear.z = 0.0
+        cmd.angular.x = 0.0
+        cmd.angular.y = 0.0
+        cmd.angular.z = float(w)
+        self._cmd_pub.publish(cmd)
+
+        # Feed back the REQUESTED action, not any achieved/clamped value —
+        # rm_safety may clamp or zero this downstream; that clamping is
+        # invisible to this node by design (interface.yaml
+        # previous_action.clamped_action_note / module docstring point 6).
+        self._prev_action_v = float(v)
+        self._prev_action_w = float(w)
+
+        # observation_builder's ObservationResult exposes only obs/fault (no
+        # separate robot-frame goal field), so the debug topic cannot report
+        # the goal vector independently of the observation it's embedded in.
+        self._publish_debug(fault=None, action=(v, w), goal_local=None)
+
+    @staticmethod
+    def _age_ms(stamp: Optional[float], now: float) -> float:
+        """Age in milliseconds since `stamp` (monotonic seconds); +inf if
+        the topic has never been received."""
+        if stamp is None:
+            return math.inf
+        return (now - stamp) * 1000.0
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main(args=None) -> None:
+    """Initialise rclpy, spin PolicyNode, publish a final zero on shutdown."""
+    rclpy.init(args=args)
+    node: Optional[PolicyNode] = None
+    try:
+        node = PolicyNode()
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    except Exception as exc:
+        if node is not None:
+            node.get_logger().fatal(f"policy_node: fatal error: {exc}")
+        else:
+            print(f"policy_node: fatal error during init: {exc}")
+        raise
+    finally:
+        if node is not None:
+            try:
+                node._publish_zero(reason="shutdown")
+            except Exception:
+                pass
+            node.destroy_node()
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
