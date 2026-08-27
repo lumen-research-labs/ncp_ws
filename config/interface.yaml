@@ -11,6 +11,25 @@
 # against this value and refuses to start on a mismatch.
 
 # CHANGE LOG
+# 3.0.0 (2026-08-27, operator decision) — adopt the TRAINED policy's contract.
+#   A trained checkpoint now exists (LumenLabs/NCP-on-Rosmaster, a CfC/AutoNCP
+#   Neural Circuit Policy). Its input layer is physically wired to a specific
+#   vector, so the checkpoint dictates this contract and not the reverse. The
+#   2.0.0 layout was never implemented, so nothing is being thrown away.
+#     * Observation 41 -> 36 dims: 32 lidar + 2 goal + 2 previous action.
+#     * Lidar block 36 bins -> 32 beams (180 deg / 32 = 5.625 deg per bin).
+#       NOTE the collision of numbers: "36" was the 2.0.0 LIDAR BIN COUNT and
+#       is now the TOTAL observation width. They are unrelated. 32 is the
+#       lidar block in 3.0.0.
+#     * base_velocity block (3 dims) REMOVED — the trained network has no
+#       velocity input. This reverses the 2.0.0 decision to retain vy as a
+#       disturbance signal; see removed_base_velocity_note below. Reversing it
+#       is not a judgement that the reasoning was wrong, it is that the
+#       checkpoint has no such input and cannot grow one without retraining.
+#     * goal_local block (2 dims) ADDED — the policy is a point-to-point
+#       navigator; this is its objective, not an optional extra.
+#     * Action is now PRE-SCALED PHYSICAL UNITS, not tanh [-1,1]. See the
+#       action block: double-scaling is the obvious way to get this wrong.
 # 2.0.0 (2026-08-12, operator decision) — two breaking layout changes:
 #   * Action reduced 3 -> 2 dims: [vx, wz]. Lateral strafe (vy) removed from
 #     the policy's action space to shrink the exploration problem. The BASE is
@@ -19,7 +38,7 @@
 #   * IMU block removed from the observation, 48 -> 41 dims. Rationale in the
 #     observation section; this also retires the imu_link frame blocker.
 # 1.0.0 — initial draft.
-interface_version: "2.0.0"
+interface_version: "3.0.0"
 
 network:
   # CONFIRMED 2026-08-08 from the Jetson host's own login banner:
@@ -99,191 +118,204 @@ control:
 observation:
   # Order is load-bearing. The vector is built in exactly this order by the
   # shared schema loader; nothing hand-writes this ordering a second time.
+  #
+  # 3.0.0: this layout is DICTATED BY THE TRAINED CHECKPOINT. The CfC input
+  # layer has exactly 36 inputs in exactly this order. Changing any of it
+  # without retraining produces a policy that is silently reading the wrong
+  # numbers — it will still run, and the output will still look like a
+  # plausible (v, w). There is no runtime error for getting this wrong.
+  # Source of truth for the formulas: src/rm_policy/rm_policy/vendor/ncp_policy.py
+  # (build_obs), vendored from NCP-on-Rosmaster @ 0ad548c.
   layout:
     - name: lidar_ranges
       source_topic: /scan
-      shape: [36]
-      units: dimensionless   # normalized; raw source is meters
+      source_topic_type: sensor_msgs/LaserScan
+      measured_rate_hz: 10.07        # bernard-1, 2026-08-27, std dev 1.1 ms
+      shape: [32]                    # 3.0.0: was 36 in 2.0.0
+      units: dimensionless           # normalized; raw source is meters
+      arc_deg: 180                   # forward arc only; robot is blind behind
+      bin_deg: 5.625                 # 180 / 32 — NOT 10 deg as in 2.0.0
+      pooling: min                   # nearest obstacle per sector, never mean
+      ordering: right_to_left        # ascending angle; bin 0 = starboard
       preprocessing: >-
-        Operator decision: use the forward 180 deg arc only, min-pooled into
-        36 bins of 10 deg each (nearest obstacle per sector — min, NOT mean,
-        so a narrow obstacle is never averaged away). Clip to
-        [range_min, range_max], then replace no-return rays with range_max,
-        then min-pool, then divide by range_max giving [0, 1]. No
-        self-occlusion masking step — see self_occlusion_zones_deg below.
-      # CRITICAL (measured 2026-08-12 s3): the YDLIDAR TG30 encodes a no-return
-      # as 0.0, NOT inf/NaN — the driver was launched with
-      # invalid_range_is_inf:=false. A 0.0 left untreated reads as an obstacle
-      # at zero distance, min-pools to 0, and would LATCH the e-stop in every
-      # bin containing a no-return (28% of rays in the static test). The
-      # observation builder MUST treat range==0.0 (and any value < range_min)
-      # as a no-return -> range_max, exactly like inf/NaN.
+        Forward 180 deg arc only, min-pooled into 32 equal bins of 5.625 deg
+        (min, NOT mean, so a narrow obstacle is never averaged away). Ordered
+        right -> left, i.e. ascending angle, bin 0 covering the most negative
+        angles. Implemented by rm_policy.scan_resampler, which returns METERS;
+        normalization happens downstream in ncp_policy.build_obs.
+      normalization: >-
+        clip to [0, laser_clip_m] then (x - laser_clip_m/2) / laser_clip_m * 2,
+        giving [-1, 1]. -1 means "touching", +1 means "clear to the clip
+        distance". This is BarnEnv's formula and must not be altered.
+      laser_clip_m: 5.0
+      laser_clip_note: >-
+        5.0 m is the TRAINING clip, and it is what defines the normalization.
+        It is deliberately NOT the sensor's honest ceiling (range_max_m below,
+        30 m): anything beyond 5 m was indistinguishable to the policy during
+        training and must stay indistinguishable now. The resampler may be
+        given a larger range_max (30 m) so that a no-return maps to something
+        unambiguously far; build_obs then clips it to 5.0 and it normalizes to
+        +1.0 ("clear"). Both numbers are correct and they are not the same
+        number — do not reconcile them.
+      # CRITICAL (measured 2026-08-12 s3, re-measured on bernard-1 2026-08-27):
+      # the YDLIDAR TG30 encodes a no-return as 0.0, NOT inf/NaN. A 0.0 left
+      # untreated reads as an obstacle at zero distance, min-pools to 0, and
+      # would LATCH the e-stop in every bin containing a no-return (28-39% of
+      # rays in static tests). It ALSO normalizes to -1.0 here, i.e. "the robot
+      # is touching a wall", across a third of the policy's field of view.
+      # Both the observation builder and ncp_policy.prepare_scan MUST treat
+      # range==0.0 (and any value < range_min) as a no-return.
       #
-      # RETRACTED 2026-08-27: an earlier revision of this block recommended
-      # ALSO launching the driver with invalid_range_is_inf:=true as
-      # "belt-and-braces". THAT PARAMETER DOES NOTHING on this driver.
-      # Measured on bernard-1 (ydlidar_ros2_driver 1.0.1, SDK 1.0.6) with the
-      # flag explicitly set to true on the command line:
-      #     points = 1982   zeros = 781 (39.4%)   inf = 0   nan = 0
-      # Not a single ray came back as inf. The driver ignores the parameter and
-      # emits 0.0 regardless, so there is NO second line of defence here.
-      # The 0.0 -> range_max mapping in the observation builder is the ONLY
-      # protection against a no-return latching the e-stop. Do not remove it,
-      # and do not "simplify" it away on the belief that the driver flag covers
-      # it — verify with a live scan before ever trusting inf on this hardware.
-      no_return_encoding: zero   # TG30 always emits 0.0; driver flag is inert
-      # MEASURED 2026-08-12 s3 against a live TG30 LaserScan (range_min/range_max
-      # fields = 0.010 / 64.0, but 64.0 is Yahboom's generic 4ROS default, not
-      # the TG30 spec). range_max below is the TG30 datasheet reach (30 m), the
-      # honest normalization ceiling; the driver's advertised 64.0 is ignored.
+      # RETRACTED 2026-08-27: an earlier revision recommended ALSO launching
+      # the driver with invalid_range_is_inf:=true as "belt-and-braces". THAT
+      # PARAMETER DOES NOTHING on this driver. Measured on bernard-1 with the
+      # flag explicitly true: 1982 points, 781 zeros (39.4%), 0 inf, 0 nan.
+      # There is NO second line of defence in the driver.
+      no_return_encoding: zero       # TG30 always emits 0.0; driver flag inert
       range_min_m: 0.01
-      range_max_m: 30.0
-      arc_deg: 180
-      bin_deg: 10
-      pooling: min
+      range_max_m: 30.0              # sensor ceiling for resampling, see note
+      self_occlusion_zones_deg: []   # none — operator confirmed 2026-08-14
+      empty_bin_policy: fault        # never range_max — that would be fail-open
 
-      # The sensor is a 360 deg YDLIDAR TG30 (TOF; identified 2026-08-12 s3 —
-      # the "rplidar_a1" the previous team documented was wrong, it was never an
-      # RPLidar, see CLAUDE.md §3). 2020 pts/scan, ~0.178 deg angular resolution.
-      # Restricting to the forward 180 deg is our deliberate choice, not a
-      # hardware limit — the rear half is discarded, not absent. Widening the
-      # arc later is an interface_version bump.
-      sensor: ydlidar_tg30
-      sensor_fov_deg: 360
-      points_per_scan: 2020
-      scan_convention: index 0 at angle_min; angle = angle_min + i*angle_increment
-
-      # REMOVED 2026-08-14 (operator decision). The previous team's zones
-      # (below, inherited from their Astra Pro build) do NOT apply to this
-      # unit: camera_link sits 7.2 cm BELOW laser_link (see coordinate_frames
-      # below), so the camera body does not sit in the scan plane. Confirmed
-      # by the operator against live scans on this robot — no persistent
-      # close return anywhere in the forward 180 deg arc. No masking step is
-      # applied; every ray in range is pooled.
-      #
-      # Previous team's values, kept for reference only — DO NOT reinstate
-      # without re-measuring on this unit:
-      #   - [-6.0, 6.0]      # Astra Pro camera body, directly ahead
-      #   - [18.0, 24.0]     # cable/bracket at ~20 deg
-      #   - [38.0, 41.0]     # structure at ~39 deg
-      self_occlusion_zones_deg: []
-      # A bin left with zero valid rays (e.g. a genuine sensor fault) is still
-      # not "clear": the observation builder returns None and the safety
-      # layer treats it as a stale scan -> e-stop. Filling it with range_max
-      # would be fail-OPEN and is forbidden. This policy stays even with an
-      # empty mask list — it now only guards against scan corruption/dropout.
-      empty_bin_policy: fault   # never range_max — that would be fail-open
-
-    - name: base_velocity
-      # RESOLVED 2026-08-08: /odom DOES exist. yahboomcar_bringup_X3_launch.py
-      # includes a robot_localization EKF (ekf_x1_x3_launch.py) which fuses
-      # wheel encoders with the IMU and publishes /odom plus the odom->base_link
-      # TF. The previous team simply never used it.
-      #
-      # /odom is chosen over /vel_raw because nav_msgs/Odometry carries a
-      # header/timestamp and a bare geometry_msgs/Twist does not. Fail-closed
-      # staleness detection needs a source timestamp — arrival time at the
-      # subscriber cannot tell a stalled driver from a stalled network.
-      source_topic: /odom
+    - name: goal_local
+      # NEW in 3.0.0. The policy is a point-to-point navigator trained in BARN;
+      # this block IS its objective. Point it somewhere and the robot drives
+      # there. It is not an optional extra and it must never be left at a
+      # stale or default value.
+      source_topic: /odom            # pose, NOT twist — see repurposing note
       source_topic_type: nav_msgs/Odometry
-      subfield: twist.twist
+      subfield: pose.pose
       measured_rate_hz: 10.74
-      qos: {reliability: RELIABLE, durability: VOLATILE}
-      child_frame_id: base_footprint
-      source_note: >-
-        EKF-fused, not raw encoder output. /odom_raw and /vel_raw carry the
-        unfused encoder velocity if that turns out to be preferable — but
-        /vel_raw has no timestamp. TODO(phase1): confirm measured rate.
-      shape: [3]             # vx, vy, wz — MEASURED, all three retained
-      units: [m/s, m/s, rad/s]
-      preprocessing: none    # raw physical units, see normalization note below
-      vy_retained_note: >-
-        Kept at 3 dims even though v2.0.0 removed vy from the ACTION space.
-        Observed lateral velocity is no longer something the policy commands,
-        which makes it purely a disturbance signal: mecanum roller drift, being
-        pushed, a caught wheel, or a slope. That is information the policy
-        cannot get anywhere else now that the IMU block is gone, and it costs
-        one dim. Do not "tidy" this to 2 dims to match the action space —
-        observation and action symmetry is not a goal here.
-      staleness_warning: >-
-        A bare Twist has no timestamp. If we end up on /vel_raw, staleness
-        must be tracked by arrival time at the subscriber, which cannot
-        distinguish a stalled driver from a stalled network. Prefer /odom.
-
-    # ------------------------------------------------------------------
-    # REMOVED in 2.0.0 (operator decision, 2026-08-12): imu_angular_velocity
-    # and imu_linear_acceleration, 6 dims from /imu/data_raw.
-    #
-    # Why this is a cheap cut, not a loss of proprioception: /odom above is
-    # published by the robot_localization EKF, which already fuses this same
-    # IMU with the wheel encoders, and publishes the result with
-    # child_frame_id base_footprint — i.e. correctly rotated into the body
-    # frame by robot_localization's own TF lookup. The IMU's contribution
-    # still reaches the observation, via /odom, with the frame handling done
-    # by upstream code that was already getting it right.
-    #
-    # What is genuinely given up: high-frequency linear acceleration and
-    # roll/pitch rate. For a flat-ground indoor mecanum base, the least
-    # valuable part of the vector.
-    #
-    # Side effect, and the reason to do it now: this retires the imu_link
-    # frame blocker. imu_link is rotated RPY [-180, 0, -90] from base_link
-    # (see coordinate_frames below), so those 6 dims were the only part of
-    # the observation in a non-base_link frame. They were blocking the Phase 3
-    # freeze. Note the rotation itself is NOT resolved and the entry below
-    # stays — it still matters to the EKF, and it would matter again the
-    # moment anyone re-adds a raw IMU channel.
-    #
-    # Re-adding the IMU is an interface_version bump AND requires resolving
-    # the rotation first.
-    # ------------------------------------------------------------------
+      shape: [2]                     # (x, y) of the goal, in the ROBOT frame
+      units: dimensionless           # normalized; raw source is meters
+      goal_source: launch_parameter  # operator decision 2026-08-27
+      goal_default_m: [2.5, 0.0]     # 2.5 m ahead, no lateral offset
+      goal_frame: odom_at_start
+      preprocessing: >-
+        The goal is a STATIC point in the odom frame, fixed once from the first
+        /odom message as (start_pose + goal offset rotated by start yaw). The
+        OBSERVATION is dynamic: every tick, local_goal() re-expresses that
+        fixed point in the robot's CURRENT frame (subtract current position,
+        rotate by -current yaw). So the policy never sees an absolute location,
+        only "where the goal is relative to me, right now". Equivalent to
+        (distance, bearing): dist = hypot(x, y), bearing = atan2(y, x).
+      normalization: "xy / 5.0 - 1.0"
+      normalization_warning: >-
+        This maps cleanly to [-1, 1] ONLY for coordinates in [0, 10] m. A goal
+        45 deg off the bow gives -1.71; a goal directly behind gives -2.00.
+        BARN spawned goals ahead and within ~10 m, so the policy never saw
+        those values in training. Turning away from the goal therefore pushes
+        this block OUT OF DISTRIBUTION. This is a property of the trained
+        checkpoint, not a bug to fix here — fixing it means retraining.
+        Keep goals modest and ahead.
+      drift_warning: >-
+        /odom is dead reckoning: robot_localization EKF over wheel encoders and
+        the IMU, with NO map, NO global localization, and NO loop closure. It
+        drifts, and mecanum rollers slip constantly (the very reason vy was
+        valued as a disturbance signal in 2.0.0). Since the goal is defined in
+        that same drifting frame, "distance to goal" degrades over a run and is
+        fiction at long range. The odom origin also resets when the EKF
+        restarts, so a goal is only meaningful WITHIN one run. 2.5 m is chosen
+        to sit inside the drift budget. This is not a navigation system.
+      failure_mode: >-
+        Fail-closed. If /odom has not arrived, the goal is not yet defined and
+        the policy MUST NOT drive. Do not substitute a default vector — a
+        plausible-looking goal is worse than no goal, because it silently
+        commands motion in an arbitrary direction.
 
     - name: previous_action
-      source_topic: null     # internal node state, not a subscription
-      shape: [2]             # the previous cmd_vx, cmd_wz, post-tanh
-      units: dimensionless   # [-1, 1], as emitted by the network
-      preprocessing: none
-      note: >-
-        The action the policy itself last emitted, in network output space
-        (pre-scaling). On the first cycle, and after any reset, this is zeros.
-        It is NOT read back from /cmd_vel — the safety layer may have clamped
-        that, and feeding the clamped value back would silently change the
-        observation distribution relative to training.
+      source_topic: null             # internal node state, not a subscription
+      shape: [2]                     # the previous (v, w) actually commanded
+      units: dimensionless
+      preprocessing: >-
+        The action emitted on the previous tick, normalized to [-1, 1] by
+        (a - action_bias) / action_scale, where bias = (high + low) / 2 and
+        scale = (high - low) / 2 over the action bounds below. Concretely:
+        v_norm = (v - 0.5) / 1.5 and w_norm = w / 3.14 (see pi_is_not_pi_note
+        in the action block — that divisor is literally 3.14, not pi).
+      init_note: >-
+        Zeros on the first tick (a zero ACTION, which normalizes to a non-zero
+        vector: v=0 -> -0.333, w=0 -> 0.0). Do not "fix" this to a zero vector.
+      clamped_action_note: >-
+        OPEN QUESTION, decide before the first driven run: rm_safety may clamp
+        or zero the commanded velocity, so what the robot DID is not what the
+        policy asked for. Feeding back the requested action makes the policy's
+        world-model wrong; feeding back the achieved action is off-distribution
+        (it never saw a safety layer in training). Upstream feeds back the
+        REQUESTED action. Keeping that is the lower-risk default, but it means
+        during any clamped period the policy believes it is moving faster than
+        it is. Revisit once /safety/status is logged alongside actions.
 
-  total_dim: 41              # 36 lidar + 3 base_velocity + 2 previous_action
+    # ------------------------------------------------------------------
+    # REMOVED in 3.0.0: base_velocity (3 dims, vx/vy/wz from /odom twist).
+    #
+    # 2.0.0 deliberately KEPT all three components, reasoning that with the IMU
+    # block gone, observed lateral velocity was the ONLY channel by which a
+    # disturbance — mecanum roller drift, a push, a caught wheel, a slope —
+    # could reach the policy. That reasoning was sound and is not repudiated.
+    #
+    # It is removed because the trained CfC has no velocity input. There is no
+    # way to supply it without retraining, so this is a consequence of adopting
+    # a checkpoint, not a design decision. What is genuinely given up: the
+    # policy is now blind to disturbance. It cannot tell "commanded 0.15 m/s
+    # and moving" from "commanded 0.15 m/s and wheels spinning against a wall".
+    # The only proprioceptive signal left is previous_action, which is what the
+    # policy ASKED for, not what happened.
+    #
+    # Mitigation lives outside the observation: rm_safety still subscribes to
+    # /odom and still enforces staleness and acceleration limits. The policy
+    # being blind to a stall does not make the ROBOT blind to it.
+    #
+    # Re-adding this is an interface_version bump AND requires retraining.
+    # ------------------------------------------------------------------
+
+  total_dim: 36              # 32 lidar + 2 goal_local + 2 previous_action
   dtype: float32
+  shape_collision_warning: >-
+    36 is the TOTAL observation width in 3.0.0. It was also the LIDAR BIN COUNT
+    in 2.0.0. These are unrelated numbers that happen to coincide. In 3.0.0 the
+    lidar block is 32. Any code or document saying "36 bins" is pre-3.0.0.
 
   normalization:
-    # No policy has been trained yet, so no learned normalizer exists.
-    # The lidar block carries a fixed /range_max scaling (declared above).
-    # The base_velocity component is deliberately left in raw physical units —
-    # placeholder statistics are NOT to be fabricated.
-    scheme: fixed_lidar_only
-    stats_source: null
     note: >-
-      When training begins and a running mean/std normalizer is used, its
-      statistics are exported alongside the ONNX model and loaded by the
-      inference node. See the marked hook in
-      src/rm_policy/rm_policy/observation_builder.py. Adding it is an
-      interface_version bump.
+      Unlike 2.0.0, EVERY block here is normalized — there is no raw-units
+      block left, because the base_velocity block that carried raw units was
+      removed. All three blocks are normalized by formulas frozen by the
+      trained checkpoint (see each block above). No normalizer statistics are
+      fabricated: every formula is a fixed affine map with constants that came
+      from the training environment, not from measured data.
 
 action:
-  # 2.0.0: DIFFERENTIAL-DRIVE-STYLE action space on a mecanum base.
-  # Lateral strafe was removed from the policy's action space by operator
-  # decision (2026-08-12) to shrink the exploration problem. This is a
-  # deliberate constraint on the CONTROLLER, not a statement about the robot:
-  # the X3 is still omnidirectional and the base driver still accepts
-  # linear.y. See vy_removed_note below for what must not be simplified away.
+  # 3.0.0: PRE-SCALED PHYSICAL UNITS. This is the single most dangerous change
+  # from 2.0.0 and the easiest to get wrong.
+  #
+  # 2.0.0 specified a tanh [-1, 1] network output which the node then
+  # multiplied by vx_max / wz_max. The trained NcpActor does NOT do that: its
+  # linear head emits (v, w) directly in m/s and rad/s and clips to the bounds
+  # below. If anyone routes this through the old scaling block, the command is
+  # DOUBLE-SCALED and the robot moves at a fraction of the intended speed —
+  # or, if the scaling is ever raised above 1.0, faster than intended.
+  # There is no runtime error for this. It is a silent numerical bug.
+  pre_scaled: true
+  pi_is_not_pi_note: >-
+    The yaw bound is LITERALLY 3.14, not math.pi (3.14159...). That is what
+    ncp_policy.ACTION_HIGH contains and therefore what the network was trained
+    against: _ACTION_SCALE = 3.14 exactly, and previous_action is normalized by
+    dividing by it. Do NOT "correct" this to math.pi. It looks like a typo, it
+    is not — replacing it changes the observation the policy sees by ~0.05%
+    with no error anywhere, which is precisely the kind of silent drift that
+    invalidates a checkpoint. Caught 2026-08-27 by cross-checking this file
+    against the vendored constants; the check is worth keeping automated.
+  activation: none           # linear head + clip, NOT tanh
   layout:
     - name: cmd_vx
-      range: [-1.0, 1.0]
-      units: dimensionless   # network output, tanh
+      range: [-1.0, 2.0]     # m/s, ACTION_LOW/HIGH in ncp_policy
+      units: m/s
     - name: cmd_wz
-      range: [-1.0, 1.0]
-      units: dimensionless
+      range: [-3.14, 3.14]     # LITERALLY 3.14 — see pi_is_not_pi_note
+      units: rad/s
   total_dim: 2
   dtype: float32
-  activation: tanh
 
   vy_removed_note: >-
     The policy node must set linear.y = 0.0 EXPLICITLY on every published
@@ -293,18 +325,26 @@ action:
     safety_limits.yaml. Do not delete lateral handling from the safety layer:
     /teleop/cmd_vel is also an input to it and an operator may legitimately
     strafe while repositioning, so the safety layer still has to clamp an axis
-    the policy never uses.
+    the policy never uses. A non-zero linear.y on /policy/cmd_vel is a BUG,
+    not a command — zero it and warn, never clamp it silently.
 
   scaling:
-    # Maps network output [-1, 1] to physical units: physical = output * max.
-    # PROVISIONAL and deliberately conservative, matching the safety layer's
-    # "start low" principle. To be raised only after Phase 2 safety validation
-    # is signed off in docs/safety_validation.md. Not final.
-    vx_max: 0.3   # m/s
-    wz_max: 0.5   # rad/s
-    provisional: true
-    # vy_max removed in 2.0.0 — the policy has no vy output to scale. The
-    # safety layer's max_vy is a clamp on the teleop path, not a scaling.
+    # DELIBERATELY EMPTY in 3.0.0. See pre_scaled above. The 2.0.0 values
+    # (vx_max 0.3, wz_max 0.5) are gone, not merely unused — leaving them here
+    # invites someone to apply them.
+    applies: false
+
+  authority_gap_warning: >-
+    The policy's trained range is far wider than the safety layer permits:
+    2.0 m/s vs max_vx 0.15 (13.3x) and 3.14 rad/s vs max_wz 0.4 (7.9x). This
+    is CORRECT and the clamps must not be raised to close the gap — the safety
+    layer is deliberately the binding constraint and raising it is gated on
+    Phase 2 hardware sign-off. The consequence to understand: the policy will
+    run almost entirely saturated, in a regime it never experienced in
+    training, with every approach truncated before its own COLLISION_DIST of
+    0.25 m by the 0.35 m stop zone. Its behaviour under these clamps is
+    therefore NOT evidence about whether the policy is good. Judge the
+    pipeline, not the policy, until the clamps are raised.
 
 coordinate_frames:
   # MEASURED 2026-08-08 from the live TF tree.
