@@ -100,13 +100,36 @@ class ScanBridgeNode(rclpy.node.Node):
         self._angle_min = -math.radians(self._arc_deg) / 2.0 + bin_width / 2.0
         self._angle_increment = bin_width
 
-        sensor_qos = QoSProfile(
+        # QoS, and why the two sides DIFFER (found on hardware 2026-08-27):
+        #
+        # SUBSCRIPTION: BEST_EFFORT, the usual sensor-data profile, matching
+        # rm_safety's. A BEST_EFFORT subscriber accepts both RELIABLE and
+        # BEST_EFFORT publishers, so this reads any lidar driver.
+        #
+        # PUBLICATION: RELIABLE, deliberately NOT the sensor default. Our
+        # primary consumer is NCP-on-Rosmaster/rosmaster/node.py, whose
+        # `create_subscription(LaserScan, scan_topic, cb, 10)` is a depth-only
+        # profile and therefore RELIABLE. A RELIABLE subscriber REFUSES a
+        # BEST_EFFORT publisher outright: rclpy logs "offering incompatible
+        # QoS ... No messages will be received", the subscriber gets nothing,
+        # and upstream's deadman then reports "no fresh scan — stopped"
+        # forever. That looks exactly like a dead lidar while /ncp/scan is
+        # visibly publishing at 10 Hz, which is a nasty thing to debug on
+        # hardware. Publishing RELIABLE serves BOTH kinds of subscriber
+        # (RELIABLE upstream, BEST_EFFORT rm_policy.policy_node), so it is the
+        # compatible choice. Do not "tidy" this to match the subscription.
+        sub_qos = QoSProfile(
             depth=10,
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
-        self._pub = self.create_publisher(LaserScan, output_topic, sensor_qos)
-        self.create_subscription(LaserScan, scan_topic, self._on_scan, sensor_qos)
+        pub_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self._pub = self.create_publisher(LaserScan, output_topic, pub_qos)
+        self.create_subscription(LaserScan, scan_topic, self._on_scan, sub_qos)
 
         self.get_logger().info(
             f"ncp_scan_bridge: {scan_topic} -> {output_topic}, "
