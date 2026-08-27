@@ -135,7 +135,40 @@ observation:
       units: dimensionless           # normalized; raw source is meters
       arc_deg: 180                   # forward arc only; robot is blind behind
       bin_deg: 5.625                 # 180 / 32 — NOT 10 deg as in 2.0.0
-      pooling: min                   # nearest obstacle per sector, never mean
+      sampling: nearest_valid_ray    # 3.0.0 — see sampling_rationale below
+      sampling_rationale: >-
+        TRAINING FIDELITY (governing principle, operator 2026-08-27). The
+        policy trained on `--beams 32 --fov 180`: exactly ONE ray per beam
+        direction. The TG30 delivers ~1000 rays across the same arc, so ~31
+        real rays fall in each output bin and must be reduced. We take the
+        single REAL RETURN nearest the bin's centre angle, reconstructing what
+        a clean 32-beam lidar would have reported — NOT a min-pool over the
+        5.625 deg cone. Min-pooling reports obstacles closer and wider than any
+        32-beam lidar would; measured against nearest_valid_ray on real TG30
+        scans it shifts the normalized observation by a mean of 0.03-0.19 on a
+        [-1, 1] range, with individual bins differing by up to 1.05. That is a
+        systematic distribution shift away from training, not a rounding
+        detail. 2.0.0 specified `pooling: min` for a 36-bin layout that was
+        never implemented; it is superseded, not violated.
+      dropout_handling_note: >-
+        "REAL RETURN" is load-bearing. Accepting whatever ray sits nearest the
+        centre would inherit the TG30's ~39% dropout rate: measured on
+        tg30_open_scan.yaml, 5 of 32 bins (16%) have a DROPOUT as their centre
+        ray and would be reported as range_max ("clear") while neighbouring
+        rays in the same bin see a real obstacle at 0.5-3 m. Simulation had NO
+        dropout, so that failure mode did not exist in training. Skipping
+        dropouts in favour of the nearest real return is therefore the MORE
+        faithful choice, not a safety compromise. A bin with no real return
+        anywhere falls back to range_max — genuinely nothing detected.
+      safety_separation_note: >-
+        This fidelity is only affordable because this block feeds the POLICY
+        ONLY. rm_safety computes its e-stop independently from the
+        FULL-RESOLUTION scan (safety_logic.min_range_in_arcs), so a thin
+        obstacle falling between sampled rays is invisible to the policy — as
+        it was in simulation — but still stops the robot. NEVER wire this
+        block's output into a safety path. min_pool remains available in
+        rm_policy.scan_resampler for any consumer that wants conservatism
+        instead of fidelity.
       ordering: right_to_left        # ascending angle; bin 0 = starboard
       preprocessing: >-
         Forward 180 deg arc only, min-pooled into 32 equal bins of 5.625 deg

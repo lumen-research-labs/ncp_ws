@@ -89,6 +89,49 @@ class ScanResampleResult:
 # ---------------------------------------------------------------------------
 
 
+# Sampling modes. See `resample_forward_arc`.
+#
+# TRAINING FIDELITY (governing principle, operator 2026-08-27): the policy was
+# trained on `--beams 32 --fov 180`, i.e. exactly ONE ray per beam direction.
+# The TG30 delivers ~1000 rays across the same arc, so ~31 real rays fall in
+# every output bin and they must be reduced somehow. The two ways differ in a
+# way that matters:
+#
+#   SAMPLING_NEAREST_RAY (default) — take the single REAL RETURN closest to the
+#       bin's CENTRE angle, discarding the rest. This reconstructs what a clean
+#       32-beam lidar pointed in that direction would have reported, so the
+#       observation distribution matches training. A thin obstacle between
+#       sampled rays is invisible to the POLICY — exactly as it was invisible
+#       in simulation.
+#
+#       "REAL RETURN" is load-bearing. A naive nearest-ray that accepts the
+#       centre ray whatever it is would inherit the TG30's ~39% dropout rate:
+#       measured on tg30_open_scan.yaml, 5 of 32 bins (16%) have a DROPOUT as
+#       their centre ray, and would therefore be reported as range_max
+#       ("clear") while neighbouring rays in the same bin see a real obstacle
+#       at 0.5-3 m. Simulation had NO dropout — every sim ray returns — so that
+#       failure mode did not exist in training and must not be introduced here.
+#       Skipping dropouts in favour of the nearest real return is therefore the
+#       MORE training-faithful choice, not a safety compromise bolted on.
+#       If a bin contains no real return at all, it falls back to range_max:
+#       genuinely nothing was detected anywhere in that sector.
+#
+#   SAMPLING_MIN_POOL — take the nearest return anywhere in the bin's 5.625 deg
+#       cone. Strictly more conservative, and the right choice for a SAFETY
+#       input, but it reports obstacles as closer and wider than any 32-beam
+#       lidar would, which is a systematic shift away from what the network saw
+#       in training.
+#
+# We can afford the faithful option because this module feeds the POLICY only.
+# rm_safety independently computes its e-stop from the FULL-RESOLUTION scan
+# (see safety_logic.min_range_in_arcs), so an obstacle the policy misses
+# between rays is still caught by the safety layer. Never wire this module's
+# output into a safety path; that is what the full scan is for.
+SAMPLING_NEAREST_RAY = "nearest_ray"
+SAMPLING_MIN_POOL = "min_pool"
+_VALID_SAMPLING = (SAMPLING_NEAREST_RAY, SAMPLING_MIN_POOL)
+
+
 def _is_no_return(r: float, range_min: float) -> bool:
     """True when a raw range reading must be treated as "no return".
 
@@ -132,6 +175,7 @@ def resample_forward_arc(
     arc_deg: float,
     range_min: float,
     range_max: float,
+    sampling: str = SAMPLING_NEAREST_RAY,
 ) -> ScanResampleResult:
     """Bin one raw LaserScan's ranges into `n_bins` forward-arc sectors.
 
@@ -219,6 +263,7 @@ def resample_forward_arc(
             arc_deg=arc_deg,
             range_min=range_min,
             range_max=range_max,
+            sampling=sampling,
         )
     except Exception:
         return ScanResampleResult(bins=None, fault="internal_error")
@@ -233,6 +278,7 @@ def _resample_forward_arc_inner(
     arc_deg: float,
     range_min: float,
     range_max: float,
+    sampling: str = SAMPLING_NEAREST_RAY,
 ) -> ScanResampleResult:
     """Inner implementation of `resample_forward_arc`; exceptions propagate."""
 
@@ -259,6 +305,9 @@ def _resample_forward_arc_inner(
     ):
         return ScanResampleResult(bins=None, fault="invalid_range_bounds")
 
+    if sampling not in _VALID_SAMPLING:
+        return ScanResampleResult(bins=None, fault="invalid_sampling_mode")
+
     n_points = len(ranges)
     scan_span_rad = (n_points - 1) * angle_increment
     arc_rad = math.radians(arc_deg)
@@ -268,8 +317,13 @@ def _resample_forward_arc_inner(
     half_arc = arc_rad / 2.0
     bin_width = arc_rad / n_bins
 
-    # bin_sums / bin_counts hold the running min and member-ray count per bin.
+    # bin_min  : running minimum range (SAMPLING_MIN_POOL)
+    # bin_pick  : range of the ray nearest the bin centre (SAMPLING_NEAREST_RAY)
+    # bin_best  : |angle - bin_centre| of that ray, for comparison
+    # bin_count : member-ray count, used to enforce empty_bin_policy: fault
     bin_min: List[float] = [math.inf] * n_bins
+    bin_pick: List[float] = [math.inf] * n_bins
+    bin_best: List[float] = [math.inf] * n_bins
     bin_count: List[int] = [0] * n_bins
 
     for i in range(n_points):
@@ -301,8 +355,28 @@ def _resample_forward_arc_inner(
         if r_effective < bin_min[idx]:
             bin_min[idx] = r_effective
 
+        # Nearest-to-centre bookkeeping: which single ray a CLEAN 32-beam lidar
+        # pointed at this bin's centre would have returned. Dropouts are
+        # skipped rather than accepted — see SAMPLING_NEAREST_RAY above. Note
+        # this tests the RAW value, so a no-return never wins the centre slot.
+        if not _is_no_return(r, range_min):
+            bin_centre = -half_arc + (idx + 0.5) * bin_width
+            offset = abs(angle - bin_centre)
+            if offset < bin_best[idx]:
+                bin_best[idx] = offset
+                bin_pick[idx] = r_effective
+
     for idx in range(n_bins):
         if bin_count[idx] == 0:
             return ScanResampleResult(bins=None, fault=f"empty_bin:{idx}")
 
-    return ScanResampleResult(bins=bin_min, fault=None)
+    if sampling == SAMPLING_MIN_POOL:
+        selected = bin_min
+    else:
+        # A bin with rays but no real return anywhere: nothing was detected in
+        # that sector, which is range_max. bin_pick is still inf there because
+        # no candidate ever won the centre slot.
+        selected = [
+            range_max if math.isinf(v) else v for v in bin_pick
+        ]
+    return ScanResampleResult(bins=selected, fault=None)

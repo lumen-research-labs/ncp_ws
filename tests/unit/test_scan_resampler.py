@@ -25,7 +25,12 @@ sys.path.insert(
     0, os.path.join(_REPO_ROOT, "src", "rm_policy", "rm_policy")
 )
 
-from scan_resampler import resample_forward_arc, ScanResampleResult  # noqa: E402
+from scan_resampler import (  # noqa: E402
+    resample_forward_arc,
+    ScanResampleResult,
+    SAMPLING_MIN_POOL,
+    SAMPLING_NEAREST_RAY,
+)
 
 FIXTURES_DIR = os.path.join(_REPO_ROOT, "tests", "fixtures")
 SAMPLE_FIXTURE = os.path.join(FIXTURES_DIR, "tg30_scan_sample.yaml")
@@ -180,6 +185,7 @@ def test_single_close_obstacle_lands_in_correct_bin_neighbours_unaffected() -> N
         arc_deg=ARC_DEG,
         range_min=RANGE_MIN_M,
         range_max=RANGE_MAX_M,
+        sampling=SAMPLING_MIN_POOL,
     )
     assert result.fault is None, result.fault
     bins = result.bins
@@ -234,6 +240,7 @@ def test_ray_exactly_at_range_min_is_kept_as_real_data() -> None:
         arc_deg=ARC_DEG,
         range_min=RANGE_MIN_M,
         range_max=RANGE_MAX_M,
+        sampling=SAMPLING_MIN_POOL,
     )
     assert result.fault is None, result.fault
     # Kept as a real (very close) obstacle — NOT mapped to range_max.
@@ -289,6 +296,7 @@ def test_ordering_right_to_left() -> None:
         arc_deg=ARC_DEG,
         range_min=RANGE_MIN_M,
         range_max=RANGE_MAX_M,
+        sampling=SAMPLING_MIN_POOL,
     )
     assert result_right.fault is None
     right_min_idx = min(
@@ -310,6 +318,7 @@ def test_ordering_right_to_left() -> None:
         arc_deg=ARC_DEG,
         range_min=RANGE_MIN_M,
         range_max=RANGE_MAX_M,
+        sampling=SAMPLING_MIN_POOL,
     )
     assert result_left.fault is None
     left_min_idx = min(range(n_bins), key=lambda i: result_left.bins[i])
@@ -335,6 +344,7 @@ def test_min_pooling_not_mean() -> None:
         arc_deg=180.0,
         range_min=RANGE_MIN_M,
         range_max=RANGE_MAX_M,
+        sampling=SAMPLING_MIN_POOL,
     )
     assert result.fault is None
     assert min(result.bins) == pytest.approx(0.05)
@@ -480,3 +490,172 @@ def test_internal_error_is_caught_and_fails_closed() -> None:
     )
     assert result.fault == "internal_error"
     assert result.bins is None
+
+
+# --- sampling mode: training fidelity vs conservatism -----------------------
+# Governing principle (operator, 2026-08-27): match what the policy saw in
+# training as closely as possible. Training used --beams 32 --fov 180, i.e.
+# ONE ray per beam direction, so SAMPLING_NEAREST_RAY is the faithful mode and
+# is the module default. SAMPLING_MIN_POOL stays available for any consumer
+# that wants conservatism instead of fidelity.
+
+
+def test_default_sampling_is_nearest_ray_for_training_fidelity() -> None:
+    """The DEFAULT must be the training-faithful mode, not the conservative one.
+
+    Pinned deliberately: if someone flips the default to min_pool, every
+    observation silently shifts toward 'obstacles closer and wider than
+    training', with no error anywhere.
+    """
+    n_bins, n_points = 4, 400
+    angle_min = -math.pi / 2
+    angle_increment = math.pi / (n_points - 1)
+    ranges = [10.0] * n_points
+    ranges[n_points // 2] = 0.05  # a close ray that is NOT at a bin centre
+
+    default = resample_forward_arc(
+        ranges, angle_min, angle_increment, n_bins=n_bins, arc_deg=180.0,
+        range_min=RANGE_MIN_M, range_max=RANGE_MAX_M,
+    )
+    explicit = resample_forward_arc(
+        ranges, angle_min, angle_increment, n_bins=n_bins, arc_deg=180.0,
+        range_min=RANGE_MIN_M, range_max=RANGE_MAX_M,
+        sampling=SAMPLING_NEAREST_RAY,
+    )
+    assert default.bins == explicit.bins
+
+
+def test_nearest_ray_ignores_a_closer_ray_that_is_not_at_the_bin_centre() -> None:
+    """The defining difference between the modes.
+
+    A 32-beam lidar pointed at the bin centre would NOT see an obstacle that
+    sits off-centre within the same 5.625 deg sector. min_pool would.
+    """
+    n_bins, n_points = 4, 400
+    angle_min = -math.pi / 2
+    angle_increment = math.pi / (n_points - 1)
+    ranges = [10.0] * n_points
+    ranges[n_points // 2] = 0.05
+
+    near = resample_forward_arc(
+        ranges, angle_min, angle_increment, n_bins=n_bins, arc_deg=180.0,
+        range_min=RANGE_MIN_M, range_max=RANGE_MAX_M,
+        sampling=SAMPLING_NEAREST_RAY,
+    )
+    pool = resample_forward_arc(
+        ranges, angle_min, angle_increment, n_bins=n_bins, arc_deg=180.0,
+        range_min=RANGE_MIN_M, range_max=RANGE_MAX_M,
+        sampling=SAMPLING_MIN_POOL,
+    )
+    assert near.fault is None and pool.fault is None
+    assert min(pool.bins) == pytest.approx(0.05), "min_pool must see it"
+    assert min(near.bins) == pytest.approx(10.0), (
+        "nearest_ray must NOT see an off-centre ray — that is the whole point"
+    )
+
+
+def test_modes_agree_when_every_ray_in_a_bin_is_identical() -> None:
+    """With a uniform scan the two modes cannot disagree — a sanity floor."""
+    n_bins, n_points = 8, 400
+    angle_min = -math.pi / 2
+    angle_increment = math.pi / (n_points - 1)
+    ranges = [3.25] * n_points
+    kw = dict(n_bins=n_bins, arc_deg=180.0,
+              range_min=RANGE_MIN_M, range_max=RANGE_MAX_M)
+    a = resample_forward_arc(ranges, angle_min, angle_increment,
+                             sampling=SAMPLING_NEAREST_RAY, **kw)
+    b = resample_forward_arc(ranges, angle_min, angle_increment,
+                             sampling=SAMPLING_MIN_POOL, **kw)
+    assert a.bins == b.bins
+
+
+def test_invalid_sampling_mode_faults_closed() -> None:
+    scan = _synthetic_scan(fill_range=10.0)
+    result = resample_forward_arc(
+        scan["ranges"], scan["angle_min"], scan["angle_increment"],
+        n_bins=32, arc_deg=ARC_DEG,
+        range_min=RANGE_MIN_M, range_max=RANGE_MAX_M,
+        sampling="average",  # not a mode we support
+    )
+    assert result.bins is None
+    assert result.fault == "invalid_sampling_mode"
+
+
+def test_modes_differ_materially_on_real_tg30_data() -> None:
+    """On a real cluttered scan the choice of mode is not academic.
+
+    If this ever stops holding, either the fixture changed or the modes have
+    silently converged (e.g. a forwarding bug making `sampling` a no-op --
+    which is exactly the defect found on 2026-08-27).
+    """
+    scans = _load_scans(SAMPLE_FIXTURE)
+    scan = scans[0]
+    kw = dict(n_bins=32, arc_deg=ARC_DEG,
+              range_min=RANGE_MIN_M, range_max=RANGE_MAX_M)
+    near = resample_forward_arc(scan["ranges"], scan["angle_min"],
+                                scan["angle_increment"],
+                                sampling=SAMPLING_NEAREST_RAY, **kw)
+    pool = resample_forward_arc(scan["ranges"], scan["angle_min"],
+                                scan["angle_increment"],
+                                sampling=SAMPLING_MIN_POOL, **kw)
+    assert near.fault is None and pool.fault is None
+    differing = sum(1 for x, y in zip(near.bins, pool.bins) if x != y)
+    assert differing > 0, "modes must not be a no-op on real data"
+    # min_pool can only ever be <= nearest_ray, never further away.
+    for x, y in zip(near.bins, pool.bins):
+        assert y <= x + 1e-9
+
+
+def test_nearest_ray_skips_a_dropout_centre_ray() -> None:
+    """A dropout at the bin centre must NOT make the bin read as clear.
+
+    The TG30 drops ~39% of rays; simulation dropped none. Accepting a dropout
+    as the centre sample would report range_max ("clear") for a sector where
+    real returns exist - a failure mode training never contained. Measured on
+    tg30_open_scan.yaml, 16% of bins have a dropout centre ray.
+    """
+    n_bins, n_points = 4, 400
+    angle_min = -math.pi / 2
+    angle_increment = math.pi / (n_points - 1)
+    ranges = [2.0] * n_points
+
+    # Kill the ray nearest each bin centre, leaving its neighbours real.
+    half, bw = math.pi / 2, math.pi / n_bins
+    best = [(9e9, -1)] * n_bins
+    for i in range(n_points):
+        a = angle_min + i * angle_increment
+        if a < -half or a > half:
+            continue
+        idx = min(int((a + half) / bw), n_bins - 1)
+        off = abs(a - (-half + (idx + 0.5) * bw))
+        if off < best[idx][0]:
+            best[idx] = (off, i)
+    for _, i in best:
+        ranges[i] = 0.0  # dropout exactly at the centre
+
+    result = resample_forward_arc(
+        ranges, angle_min, angle_increment, n_bins=n_bins, arc_deg=180.0,
+        range_min=RANGE_MIN_M, range_max=RANGE_MAX_M,
+        sampling=SAMPLING_NEAREST_RAY,
+    )
+    assert result.fault is None
+    assert all(b == pytest.approx(2.0) for b in result.bins), (
+        f"dropout centre rays leaked through as 'clear': {result.bins}"
+    )
+
+
+def test_bin_with_only_dropouts_falls_back_to_range_max() -> None:
+    """Nothing detected anywhere in the sector really is range_max."""
+    n_bins, n_points = 4, 400
+    angle_min = -math.pi / 2
+    angle_increment = math.pi / (n_points - 1)
+    ranges = [0.0] * n_points  # every ray a dropout
+
+    result = resample_forward_arc(
+        ranges, angle_min, angle_increment, n_bins=n_bins, arc_deg=180.0,
+        range_min=RANGE_MIN_M, range_max=RANGE_MAX_M,
+        sampling=SAMPLING_NEAREST_RAY,
+    )
+    assert result.fault is None
+    assert all(b == pytest.approx(RANGE_MAX_M) for b in result.bins)
+    assert all(math.isfinite(b) for b in result.bins), "must never be inf"
