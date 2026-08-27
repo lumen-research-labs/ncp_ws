@@ -117,11 +117,21 @@ observation:
       # at zero distance, min-pools to 0, and would LATCH the e-stop in every
       # bin containing a no-return (28% of rays in the static test). The
       # observation builder MUST treat range==0.0 (and any value < range_min)
-      # as a no-return -> range_max, exactly like inf/NaN. Preferred belt-and-
-      # braces: also flip the driver to invalid_range_is_inf:=true so the wire
-      # format matches the standard LaserScan convention. Either way both cases
-      # must be handled — do not assume inf.
-      no_return_encoding: zero   # TG30 with invalid_range_is_inf:=false
+      # as a no-return -> range_max, exactly like inf/NaN.
+      #
+      # RETRACTED 2026-08-27: an earlier revision of this block recommended
+      # ALSO launching the driver with invalid_range_is_inf:=true as
+      # "belt-and-braces". THAT PARAMETER DOES NOTHING on this driver.
+      # Measured on bernard-1 (ydlidar_ros2_driver 1.0.1, SDK 1.0.6) with the
+      # flag explicitly set to true on the command line:
+      #     points = 1982   zeros = 781 (39.4%)   inf = 0   nan = 0
+      # Not a single ray came back as inf. The driver ignores the parameter and
+      # emits 0.0 regardless, so there is NO second line of defence here.
+      # The 0.0 -> range_max mapping in the observation builder is the ONLY
+      # protection against a no-return latching the e-stop. Do not remove it,
+      # and do not "simplify" it away on the belief that the driver flag covers
+      # it — verify with a live scan before ever trusting inf on this hardware.
+      no_return_encoding: zero   # TG30 always emits 0.0; driver flag is inert
       # MEASURED 2026-08-12 s3 against a live TG30 LaserScan (range_min/range_max
       # fields = 0.010 / 64.0, but 64.0 is Yahboom's generic 4ROS default, not
       # the TG30 spec). range_max below is the TG30 datasheet reach (30 m), the
