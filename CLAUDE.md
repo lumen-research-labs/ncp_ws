@@ -501,15 +501,24 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   physical units, and `/odom` is unusable.** Two bags analysed
   (`/tmp/drift_test`, `/tmp/spin_test` on bernard-1).
 
-  **(a) The robot moves far faster than commanded.** Operator confirmed ~6 m of
-  real travel in ~11 s (~0.55 m/s average) against a commanded ceiling of
-  `max_vx: 0.15` m/s. `rm_safety`'s clamps are expressed in m/s but the base
-  does not deliver m/s. **With no physical E-stop, this is the one guarantee
-  that must hold, and it does not. No further floor tests until the true
-  m/s-per-commanded-unit is measured.**
+  **(a) RETRACTED — "the robot moves faster than commanded" was NOT established.**
+  It was inferred from `/odom` reporting ~6 m of travel in the floor bag against
+  a commanded ceiling of ~1.7 m. That ruler is the very sensor (b) shows to be
+  broken: the second bag was recorded **WHEELS UP**, and `/odom_raw` still
+  accumulated **21.0 m** (and `/odom` 24.3 m) over 25 s in the air. The 6 m
+  figure is therefore worthless as evidence about achieved speed. The operator's
+  "6 m is right" was agreement with that number, not an independent
+  tape-measured distance.
+  What REMAINS true: the achieved-vs-commanded velocity ratio is **UNMEASURED**,
+  so the clamps are **unverified, not proven broken**. The operator did observe
+  real drift on the floor; that eyeball observation stands on its own.
+  **Measure it before trusting `max_vx` in physical units** (see the wheels-up
+  revolution count below). With no physical E-stop, an unverified clamp still
+  deserves caution.
 
-  **(b) `/vel_raw` and `/odom_raw` are not measurements.** Across a 25 s run
-  they sat at **≈ −1.10 m/s and +0.28 rad/s CONSTANT**, uncorrelated with the
+  **(b) `/vel_raw` and `/odom_raw` are not measurements. THIS IS THE FIRM
+  FINDING.** Across a 25 s **wheels-up** run (chassis held off the ground, so
+  the true body velocity was ZERO throughout) they sat at **≈ −1.10 m/s and +0.28 rad/s CONSTANT**, uncorrelated with the
   command in magnitude, sign, or axis: commanded `+0.150` forward -> −1.10;
   commanded `0.000` with a pure `wz = −0.400` spin -> still −1.10. They snap to
   exactly 0.000 only after the command has been zero ~0.5 s. Values jitter in
@@ -537,11 +546,17 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     by dropping the IMU from the observation is **incomplete**: the EKF still
     fuses `/imu/data` for yaw, so that rotation still reaches `/odom`.
 
-  **Next diagnostic (zero risk, no floor travel):** wheels UP, command a known
-  `vx`, count wheel revolutions over ~10 s and multiply by wheel circumference
-  (X3 mecanum ~97 mm dia -> ~0.305 m). That yields ground-truth m/s per
-  commanded unit independently of the lying odometry, and gives the scale
-  factor `max_vx` must be divided by.
+  **Next diagnostic (zero risk, no floor travel):** wheels UP, command a steady
+  `vx = 0.15`, and COUNT WHEEL REVOLUTIONS on slow-mo video over ~10 s. Wheel
+  surface speed is exactly what the command maps to, so this is ground truth
+  independent of the lying odometry: X3 mecanum ~97 mm dia -> ~0.305 m
+  circumference, so 0.15 m/s = ~0.49 rev/s (~5 revs in 10 s). ~3.6 rev/s (~36
+  revs) would mean ~1.1 m/s and a ~7x clamp error.
+  Also observe, in the same run, whether the wheels visibly change pattern
+  between the forward phase and the spin phase (forward = all four same
+  direction; spin = left pair opposing right pair). Identical patterns would
+  mean the command is not reaching the wheels — a different fault from a
+  decode bug.
 
   Confirmed working in the same bags: the 2026-08-28 yaw fix — `wz` reached the
   full ±0.400 clamp while `vx` was scaled to 0.000 in the slow zone, exactly the
@@ -561,11 +576,14 @@ Remaining caveat: the vendor bringup restarts its own `joy_ctrl` on every
 launch, so its PID must be killed and `teleop_joy.launch.py` started in its
 place, every session, until that is scripted.
 
-**MOTION IS BLOCKED (2026-08-28 floor test).** The velocity clamps do not hold
-in physical units — the robot travelled ~6 m against a commanded ceiling of
-~1.7 m — and `/odom`, `/odom_raw` and `/vel_raw` are all untrustworthy. See the
-stop-the-line entry in §3. Measure the true m/s-per-commanded-unit (wheels up,
-count revolutions) before any further floor test.
+**MOTION IS GATED (2026-08-28 floor test).** `/odom`, `/odom_raw` and
+`/vel_raw` are confirmed untrustworthy — wheels up, they reported 21-24 m of
+travel that did not happen, and the reported velocity is identical for
+forward and pure-spin commands. Whether the velocity CLAMPS hold in physical
+units is **unmeasured, not disproven** (the earlier "robot moved 6 m" claim is
+retracted — it came from the same broken sensor). Measure the true
+m/s-per-commanded-unit with a wheels-up revolution count before the next floor
+test. See §3.
 
 **Still no trained checkpoint.** `mode:=ncp` and `policy_node` both run RANDOM
 weights (`ncp_policy.NcpActor(seed=0)`); observed output was a near-constant
