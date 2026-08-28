@@ -1,0 +1,64 @@
+# Open-loop base driver calibration — consumed by rm_base.base_node.
+#
+# This is a CALIBRATION, not a controller. rm_base drives the wheels open
+# loop (raw PWM, no encoder feedback) because bernard-1's firmware speed PID
+# is unusable (see base_node.py docstring / CLAUDE.md 2026-08-28). Every
+# number below is a starting guess derived from wheels-UP open-loop probes
+# on 2026-08-28 and MUST be re-tuned wheels-DOWN against a tape measure
+# before the robot is trusted to drive a commanded distance.
+#
+# PWM values are Rosmaster `set_motor` units, [-100, 100], dimensionless.
+
+# Half-wheelbase + half-track, metres. Yaw lever arm for a mecanum wheel.
+# Firmware bsp_motion.h MECANUM_MINI_APB = 164.555 mm.
+lever_arm_m: 0.165
+
+# Encoder scale for the /vel_raw reconstruction. Firmware bsp_encoder.h:
+# 30 gear * 11 PPR * 2 edges * 2 channels = 1320. Circumference is the
+# "mecanum mini" value; measure the real wheel and correct.
+counts_per_rev: 1320.0
+wheel_circumference_m: 0.204
+
+# Per-tick PWM change cap (drivetrain / STM32 protection). 20 Hz * 8 = full
+# 60-count range in ~0.4 s.
+max_pwm_step_per_tick: 8
+
+# Defensive backstop only — rm_safety is the real clamp and is always
+# tighter. These just catch a grossly wrong /cmd_vel; keep them well above
+# interface.yaml action scaling so a legitimate command is never clipped here.
+max_body:
+  vx: 0.5     # m/s
+  vy: 0.5     # m/s
+  wz: 1.5     # rad/s
+
+# Per-wheel open-loop model: |pwm| = dead_pwm + gain_pwm_per_mps * |v|,
+# zero below v_min_mps, clamped to +/- max_pwm.
+#
+#   front_left  (M1)  healthy
+#   back_left   (M2)  healthy
+#   front_right (M3)  FAILING MOTOR — needs ~5x the PWM to move, runs slow,
+#                     encoder only reads at speed. High dead_pwm + gain and a
+#                     raised ceiling try to make it keep up; it will still be
+#                     the weak wheel. Replace the motor to remove this.
+#   back_right  (M4)  healthy, slightly stickier than the fronts
+wheels:
+  front_left:
+    dead_pwm: 2.0
+    gain_pwm_per_mps: 128.0
+    v_min_mps: 0.02
+    max_pwm: 60
+  back_left:
+    dead_pwm: 2.0
+    gain_pwm_per_mps: 128.0
+    v_min_mps: 0.02
+    max_pwm: 60
+  front_right:
+    dead_pwm: 40.0
+    gain_pwm_per_mps: 190.0
+    v_min_mps: 0.02
+    max_pwm: 95
+  back_right:
+    dead_pwm: 8.0
+    gain_pwm_per_mps: 128.0
+    v_min_mps: 0.02
+    max_pwm: 60

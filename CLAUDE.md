@@ -562,94 +562,145 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   full ±0.400 clamp while `vx` was scaled to 0.000 in the slow zone, exactly the
   intended asymmetry.
 
+- 2026-08-28 (session 2): **ROOT-CAUSED the velocity/clamp failure — it is the
+  STM32 firmware's closed-loop speed control, not anything in ROS.** Bench
+  session on bernard-1, wheels up, operator + kill switch, three diagnostic
+  scripts now committed at `scripts/diagnostics/` (`wheel_diag.py` closed-loop,
+  `motor_openloop.py` raw PWM, `per_motor.py` one motor at a time).
+  * **`/cmd_vel` magnitude is ignored.** Commanding 0.02 / 0.05 / 0.15 m/s each
+    produced the SAME ~30 wheel-rev / 10 s (~0.8-1 m/s) on a tape-marked wheel.
+    Not proportional, not a gain error — the number is thrown away.
+  * **Why:** the board runs a per-wheel incremental speed PID (firmware v3.6,
+    gains stock `[0.8, 0.06, 0.5]` — NOT corrupted, a factory reset won't help).
+    `err = target - measured`. On this robot every working wheel reports its
+    encoder with the **wrong sign** relative to what the PID expects: drive the
+    wheel forward and `get_motor_encoder` counts DOWN. So `err` never shrinks,
+    `pwm_output` integrates straight to the ±3600 rail, and the wheel runs at
+    ~100% PWM for any nonzero command. This single fact explains the ignored
+    magnitude, the constant `-1.1 m/s` `/vel_raw`, and the phantom yaw.
+  * **Motor→wheel map, MEASURED (per-motor open-loop `set_motor`):**
+    `M1=front-left, M2=back-left, M3=front-right, M4=back-right`. This is NOT
+    the Yahboom sample order (`M1,M2,M3,M4 = FL,FR,BL,BR`). `get_motor_encoder`
+    returns counts in M1..M4 order. For every wheel `set_motor(+)` drives it
+    FORWARD.
+  * **Front-right motor (M3) is FAILING.** Dead at PWM ≤ 25; moves but slow at
+    PWM 50; its encoder only reads once it is turning fast. The fault FOLLOWS
+    THE MOTOR through an M1↔M3 plug swap → it is the motor, not the board
+    channel or wiring. Operator cannot replace it now.
+  * Open-loop `set_motor` (raw PWM, no PID, no feedback) is CLEAN on the three
+    good wheels — proportional-ish, correct direction, no runaway. Rough scale
+    (wheels up): `set_motor(6)` ≈ 0.05 m/s, `set_motor(12)` ≈ 0.10 m/s.
+  * Not firmware-fixable in place: bernard-1 has no internet for the correct
+    image, and the encoder polarity is not a swappable wire (keyed / integral
+    to the motor). Reflash deferred; needs the image on a USB stick + BOOT0
+    jumper or ST-Link, and it is a bricking risk.
+
+- 2026-08-28 (session 2, cont.): **Built `rm_base` — open-loop mecanum base
+  driver — to work around the firmware. Offline, not colcon-built, not
+  hardware-tested.** New package `src/rm_base/` (`rm_base_node`). Owns the
+  base-board serial via `Rosmaster_Lib` and REPLACES the vendor
+  `Mcnamu_driver_X3` (single-writer port — the vendor driver must be killed
+  first; bringup does not respawn it). Does the mecanum inverse kinematics in
+  ROS with the measured map + sign, drives raw `set_motor` PWM (bypasses the
+  firmware speed PID AND the dead M3 encoder), and republishes
+  `/imu/data_raw` `/imu/mag` `/voltage` `/edition` byte-identically to the
+  vendor driver (so `imu_filter_madgwick` + the EKF are unaffected) plus a
+  sign-corrected `/vel_raw` reconstructed from the encoders (negated per the
+  firmware bug). Fail-closed: `dry_run` defaults **true** (motion needs
+  `dry_run:=false` AND an armed rm_safety — two explicit acts, no physical
+  E-stop); a `/cmd_vel` watchdog zeros PWM after `command_timeout_ms`
+  (**the vendor driver had NO watchdog — this closes the "robot doesn't stop
+  on its own" hazard in the robot-ssh skill**); zero-on-exception; flood-stop
+  on SIGINT/shutdown before releasing the port. Pure modules
+  `rm_base/mecanum.py` + `rm_base/pwm_map.py` with 15 unit tests (pass, part
+  of the workstation tier — 155 pass / 4 skip total). `config/base_calibration.yaml`
+  holds the per-wheel PWM dead-band model — **STARTING GUESSES from the
+  wheels-up probes, must be re-tuned wheels-DOWN against a tape measure**;
+  front-right carries a big dead_pwm + gain + raised ceiling to nurse the weak
+  motor. `src/rm_bringup/launch/base.launch.py`. Still `/cmd_vel` is published
+  ONLY by rm_safety; rm_base is a pure consumer of it.
+  Robot: bernard-1 rebooted mid-session (dropped off the network ~20 min),
+  came back on the static IP unattended; clock reset to May again, RTC still
+  1970; `rosmaster_main.py` autostart re-killed by PID. Left with `driver_node`
+  manually restarted and `safety_node` KILLED holding `/cmd_vel` at zero — the
+  full stack needs a clean re-bringup next session.
+
 ## 4. Current Goal
 
 **The full NCP pipeline runs on bernard-1 hardware** (2026-08-27 s2): lidar ->
 32-beam bridge -> observation -> CfC -> `/policy/cmd_vel` -> rm_safety clamp,
-with all three consumers validated and rm_safety's first hardware run passing.
-Phases 1-3 are effectively done. **Nothing has moved yet** — every rm_safety
-test used `-r /cmd_vel:=/cmd_vel_test`.
+with all three consumers validated. Phases 1-3 are effectively done. **Nothing
+has moved yet** — every rm_safety test used `-r /cmd_vel:=/cmd_vel_test`.
 
-**The `joy_ctrl` blocker is resolved** (2026-08-28, remapped to
-`/teleop/cmd_vel`). `/cmd_vel` now has 0 publishers until rm_safety starts.
-Remaining caveat: the vendor bringup restarts its own `joy_ctrl` on every
-launch, so its PID must be killed and `teleop_joy.launch.py` started in its
-place, every session, until that is scripted.
+**The velocity failure is root-caused (2026-08-28 s2): the STM32 firmware's
+closed-loop speed control is broken on this robot** — encoder feedback is
+sign-inverted vs the PID's expectation, so any nonzero command rails the PWM
+to ~100% and the wheel runs flat out regardless of the commanded value. The
+front-right motor (M3) is also failing. Not fixable in ROS, not fixable in
+firmware without a reflash (no image, no internet on bernard-1). Full detail
+and the measured motor→wheel map in §3.
 
-**MOTION IS GATED (2026-08-28 floor test).** `/odom`, `/odom_raw` and
-`/vel_raw` are confirmed untrustworthy — wheels up, they reported 21-24 m of
-travel that did not happen, and the reported velocity is identical for
-forward and pure-spin commands. Whether the velocity CLAMPS hold in physical
-units is **unmeasured, not disproven** (the earlier "robot moved 6 m" claim is
-retracted — it came from the same broken sensor). Measure the true
-m/s-per-commanded-unit with a wheels-up revolution count before the next floor
-test. See §3.
+**The chosen workaround is `rm_base`** (built 2026-08-28 s2, offline, untested):
+an open-loop mecanum driver that replaces the vendor `Mcnamu_driver_X3`, does
+the kinematics in ROS, and drives raw `set_motor` PWM — bypassing the firmware
+PID and the dead encoder. `dry_run` defaults true; it has a real `/cmd_vel`
+watchdog. Needs colcon build + wheels-up smoke test + wheels-down PWM
+calibration before it can drive.
+
+**MOTION IS GATED.** `/odom`, `/odom_raw`, `/vel_raw` from the vendor driver
+are garbage (§3). rm_base publishes a sign-corrected `/vel_raw`, but that is
+unverified and only ~3.5 wheels of data. Do not drive on the floor until
+rm_base is calibrated and its `/vel_raw` checked against a tape measure.
 
 **Still no trained checkpoint.** `mode:=ncp` and `policy_node` both run RANDOM
-weights (`ncp_policy.NcpActor(seed=0)`); observed output was a near-constant
-(+0.03, -0.09). What has been proven is the PLUMBING, not a policy. Note
-`ACTION_HIGH` v = 2.0 m/s vs safety `max_vx` 0.15 — the ~13x clamp is correct
-and deliberate; do not raise it to "let the policy through".
+weights; observed output was a near-constant (+0.03, -0.09). What has been
+proven is the PLUMBING, not a policy. `ACTION_HIGH` v = 2.0 m/s vs safety
+`max_vx` 0.15 — the ~13x clamp is deliberate; do not raise it.
 
 ### Next session, in order
 
-**THE ONE BLOCKING MEASUREMENT.** Everything else waits on this. Wheels UP,
-`rm_safety` STOPPED (it is a second publisher on `/cmd_vel` and its slow-zone
-scaling corrupts the number), a dedicated stop terminal open FIRST with
-`ros2 topic pub -r 20 /cmd_vel geometry_msgs/msg/Twist "{}"` typed and ready:
+1. **Clean re-bringup of bernard-1** (it rebooted): push the clock, kill
+   `rosmaster_main.py` by PID, start yahboom bringup, `teleop_joy.launch.py`,
+   lidar (by-id CP2102 path). Charge first — was ~10.5 V.
+2. **colcon build `rm_base`** on the robot, then **wheels-up smoke test**:
+   kill the vendor `Mcnamu_driver_X3`, `ros2 launch rm_bringup base.launch.py`
+   (dry_run defaults true), confirm `/imu/data_raw` `/voltage` `/vel_raw`
+   `/edition` still publish and match the vendor driver. Then `dry_run:=false`
+   with rm_safety armed, wheels UP, kill switch in hand: command small
+   `/policy/cmd_vel` (or teleop) values and watch `/base/debug` PWM + the
+   wheels. Verify direction (forward / strafe / yaw) matches the command.
+3. **Wheels-DOWN PWM calibration**: drive a known `/cmd_vel`, tape-measure the
+   distance, tune `config/base_calibration.yaml` per-wheel `dead_pwm` /
+   `gain_pwm_per_mps` until commanded ≈ achieved. The front-right entry will
+   need the most work (weak motor).
+4. Check rm_base's reconstructed `/vel_raw` against ground truth, and decide
+   whether it is good enough to feed the EKF / be the policy's odom source
+   (item 5).
+5. `policy_node` derives pose + goal from `/odom` — still garbage until the
+   EKF has a trustworthy velocity input. Either wire rm_base `/vel_raw` -> the
+   yahboom odom integrator -> EKF, or give the policy a goal source that does
+   not need odometry.
+6. Do NOT build a heading-hold drift controller until 4/5 give a trustworthy
+   heading signal.
+7. Fold the vendor `joy_ctrl` kill + `teleop_joy.launch.py` + the vendor
+   `Mcnamu_driver_X3` kill + `base.launch.py` + `install -d -o jetson -g jetson
+   /var/lib/rm_safety` into ONE bringup script — the per-session ritual is now
+   long enough to be error-prone.
+8. Make `command_source` read-only on `safety_node`.
+9. Hardware safety checklist (`safety_validation.md` §3); sign off its hardware
+   rows and the 2026-08-28 yaw fix (Phase 2 gate).
+10. When possible: replace the front-right motor; check whether bernard-2 has
+    the same firmware sign fault (if yes it is systemic — pursue the reflash).
 
-  Run A: `timeout 10 ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.15}}"`
-         -> count wheel revolutions on slow-mo video. Stop. 
-         ~5 revs  = 0.15 m/s achieved; clamp honest, only reporting broken.
-         ~36 revs = ~1.1 m/s achieved; clamp ~7x off — a real hazard.
-  Run B: same at `x: 0.05`. Should be ~A/3. If equal to A, the driver ignores
-         commanded magnitude entirely.
-  Run C: `{angular: {z: 0.4}}`. Watch wheel DIRECTION, not speed. Should be
-         left pair opposing right pair, visibly different from A. If identical
-         to A, the command is not reaching the wheels — a different fault from
-         a decode bug.
+### Robot state at end of 2026-08-28 session 2
 
-  Run A alone answers the main question; B and C are nice-to-have.
-  **The robot did NOT stop on its own after a `topic pub` test on 2026-08-28**
-  — the driver has no watchdog, and `--once` zeros do not work. See the STOP
-  BUTTON section of the `robot-ssh` skill before commanding any velocity.
-
-Then, depending on the answer:
-  * If the clamp is off by ~7x -> divide `max_vx`/`max_vy`/`max_wz` (and the
-    accel limits) by the measured factor before ANY further floor test.
-  * If the clamp is honest -> the fault is confined to the odometry decode;
-    floor tests can resume, but `/odom` stays unusable (below).
-
-Independent of the above, still open:
-1. `/odom`, `/odom_raw`, `/vel_raw` are confirmed broken (§3, 2026-08-28).
-   `policy_node` derives pose and goal from `/odom`, so 2 of the NCP's 36
-   observation dims are garbage. Either fix the driver's velocity decode or
-   give the policy a goal source that does not depend on odometry.
-2. Do NOT build the heading-hold controller for the observed floor drift until
-   1 is resolved — it would close a loop on a sensor that reports a constant
-   -1.10 m/s regardless of motion.
-3. Script the vendor `joy_ctrl` kill + `teleop_joy.launch.py` into one bringup
-   step so the `/cmd_vel` remap is not a manual per-session ritual.
-4. Script `install -d -o jetson -g jetson /var/lib/rm_safety` into the deploy
-   path — permission-denied there silently degrades kill-state persistence to
-   memory-only. Fixed on bernard-1, will recur on bernard-2 and any reflash.
-5. Make `command_source` read-only on `safety_node` so `ros2 param set` is
-   rejected rather than accepted-and-ignored.
-6. Hardware safety checklist (`safety_validation.md` §3), then sign off its
-   hardware rows.
-7. The 2026-08-28 yaw fix (`wz` no longer scaled by proximity) is verified
-   working on hardware but still needs formal operator sign-off — Phase 2 gate.
-
-### Robot state at end of 2026-08-28 session
-
-bernard-1 LEFT RUNNING and safe: `/cmd_vel` held at zero by a KILLED
-`safety_node` (1 publisher), Yahboom bringup up, `joy_ctrl` remapped to
-`/teleop/cmd_vel`, lidar up at ~10.1 Hz. Battery **10.5 V and falling —
-charge before the next session.** Clock was pushed from the workstation and
-does NOT survive reboot (RTC resets to 1970); `rosmaster_main.py` was killed
-by PID and WILL come back on the next boot holding `/dev/myserial`.
-`/dev/rplidar` pointed at the BASE BOARD this boot — always use the by-id
-CP2102 path. Repo on the robot is at the current branch head, built.
+bernard-1 rebooted mid-session and came back on its static IP. Left with the
+vendor `driver_node` manually restarted and `safety_node` KILLED holding
+`/cmd_vel` at zero — **not a clean stack**, needs the full re-bringup above.
+Clock reset to May (RTC 1970); `rosmaster_main.py` re-killed by PID, WILL
+return on the next boot. Lidar was NOT confirmed back up after the reboot.
+Battery ~11.6 V mid-session. `rm_base` is committed but only exists on the
+workstation until the robot pulls + builds it.
 
 Offline work available any time: the 3.0.0 contract doc refresh, a clear-path
 open-space bag (operator), `ros2 topic delay` latency capture.
@@ -668,7 +719,14 @@ Settled, do not re-open:
 - **`invalid_range_is_inf` is inert on this driver.** The `0.0 -> range_max`
   mapping in `scan_resampler` is the only defence.
 - **The vendored `ncp_policy.py` stays byte-exact.** Every hardware fix goes in
-  our own modules — that is what `scan_bridge_node` is.
+  our own modules — that is what `scan_bridge_node` and `rm_base` are.
+- **The base is driven OPEN-LOOP via `rm_base`** (2026-08-28). The firmware
+  speed PID is not trusted on this robot. Do not go back to `set_car_motion` /
+  the vendor `Mcnamu_driver_X3` for motion without first proving the firmware
+  is fixed.
+- **Motor→wheel map is `M1=FL, M2=BL, M3=FR, M4=BR`** (measured 2026-08-28),
+  NOT the Yahboom sample order. `set_motor(+)` = forward; forward wheel =
+  DECREASING `get_motor_encoder` count.
 - **The scan bridge publishes RELIABLE and subscribes BEST_EFFORT.** Asymmetric
   on purpose (2026-08-27 s2); matching them breaks upstream silently.
 
