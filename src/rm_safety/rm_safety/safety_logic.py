@@ -947,9 +947,33 @@ def _evaluate_inner(inputs: EvalInputs, limits: Limits) -> Decision:
     # ------------------------------------------------------------------
     if zone in ("slow", "stop"):
         scale = slow_scale(min_r, limits)
+        # TRANSLATION is scaled: moving the body through space is what closes
+        # the distance to an obstacle, so proximity must throttle it.
         vx *= scale
         vy *= scale
-        wz *= scale
+        # YAW IS DELIBERATELY *NOT* SCALED (operator finding, floor test
+        # 2026-08-28). Rotating in place does not close the distance to
+        # anything: the robot's own measured extent in the scan plane is
+        # ~0.26 m (the two chassis standoffs at ~0.25-0.26 m and ~0.11-0.13 m,
+        # see safety_limits.yaml self_occlusion_zones_deg), so the circle swept
+        # by a pure yaw sits entirely inside the 0.35 m stop zone. There is no
+        # clearance to buy by slowing it down.
+        #
+        # There IS a large cost. Yaw is the only escape manoeuvre this robot
+        # has, and scaling it suppressed that manoeuvre exactly when it was
+        # needed most: with the scale applied, a commanded spin at min_range
+        # 0.50 m took 11.8 s to turn 90 deg, and at 0.40 m took 35 s. On the
+        # floor this read as "the robot reacts late to a spin command" — it was
+        # not late, it was throttled to a near-standstill by its own proximity.
+        # This is the same inversion as the 2026-08-14 "closer obstacle brakes
+        # later" fix, in the yaw axis: there, being closer wrongly delayed
+        # braking; here, being closer wrongly delayed turning away.
+        #
+        # Yaw remains bounded by everything else: the max_wz clamp (0.4 rad/s)
+        # and max_alpha_z ramp are applied ABOVE this block and are untouched,
+        # and the stop-zone LATCH (precedence 4) zeroes all three axes before
+        # this branch is ever reached. This block only governs the slow zone
+        # and the pre-latch window, where the robot is still permitted to move.
         return Decision(
             state=State.SLOW,
             reason="slow_zone" if zone == "slow" else "stop_zone_prelatch",

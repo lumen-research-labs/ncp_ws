@@ -1077,3 +1077,101 @@ class TestOdomStale:
         dec = evaluate(inp, real_limits)
         assert dec.state == State.OK
         assert dec.reason == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Slow-zone axis asymmetry: translation is scaled, YAW IS NOT.
+#
+# Regression pin for the floor-test finding of 2026-08-28. Before the fix,
+# evaluate() applied slow_scale() to all three axes, so a commanded spin was
+# throttled in proportion to how close the obstacle was: at min_range 0.50 m a
+# 90 deg turn took 11.8 s, and at 0.40 m it took 35 s. On the floor that read
+# as "the robot reacts late to a spin command" -- it was not late, it was
+# throttled to a near-standstill by its own proximity, exactly when turning
+# away was the only thing left to do.
+#
+# Rotating in place cannot close the distance to anything: the robot's own
+# measured extent in the scan plane is ~0.26 m (chassis standoffs, see
+# safety_limits.yaml self_occlusion_zones_deg), so a pure yaw sweeps a circle
+# entirely inside the 0.35 m stop zone. Yaw stays bounded by the max_wz clamp,
+# the max_alpha_z ramp, and the stop-zone latch -- none of which this changes.
+#
+# NOTE this whole behaviour was previously UNTESTED: removing `wz *= scale`
+# left all 145 tests green, which is why it survived to a floor test.
+# ---------------------------------------------------------------------------
+
+
+def _slow_zone_scan(limits: Limits, min_range_m: float) -> List[float]:
+    """A 360-ray scan whose nearest forward return is exactly min_range_m."""
+    scan = [5.0] * 360
+    scan[0] = min_range_m  # index 0 == -pi... set a true forward ray instead
+    scan[180] = min_range_m  # angle_min=-pi + 180*1deg = 0 rad, straight ahead
+    scan[0] = 5.0
+    return scan
+
+
+class TestSlowZoneDoesNotScaleYaw:
+    def test_yaw_survives_slow_zone_at_full_commanded_rate(
+        self, real_limits: Limits
+    ) -> None:
+        """A spin command in the slow zone comes out at the max_wz clamp, NOT
+        scaled down by proximity."""
+        # 0.50 m: inside slow_zone_m (0.80), outside stop_zone_m (0.35).
+        # Old behaviour scaled by (0.50-0.35)/(0.80-0.35) = 0.333.
+        inputs = _make_inputs(
+            real_limits,
+            cmd_wz=1.2,  # what the debug reactive rule commands
+            last_wz=real_limits.velocity.max_wz,  # already spinning: no ramp
+            scan_ranges=_slow_zone_scan(real_limits, 0.50),
+        )
+        d = evaluate(inputs, real_limits)
+        assert d.state == State.SLOW
+        assert d.reason == "slow_zone"
+        assert d.out_wz == pytest.approx(real_limits.velocity.max_wz)
+
+    def test_translation_is_still_scaled_in_the_slow_zone(
+        self, real_limits: Limits
+    ) -> None:
+        """The fix must NOT have disabled slow-zone braking. Forward motion is
+        what closes distance, and it stays throttled."""
+        inputs = _make_inputs(
+            real_limits,
+            cmd_vx=1.0,
+            last_vx=real_limits.velocity.max_vx,  # already moving: no ramp
+            scan_ranges=_slow_zone_scan(real_limits, 0.50),
+        )
+        d = evaluate(inputs, real_limits)
+        assert d.state == State.SLOW
+        expected_scale = (0.50 - 0.35) / (0.80 - 0.35)
+        assert d.out_vx == pytest.approx(
+            real_limits.velocity.max_vx * expected_scale, rel=1e-6
+        )
+        assert d.out_vx < real_limits.velocity.max_vx
+
+    def test_yaw_is_still_zeroed_by_the_stop_zone_latch(
+        self, real_limits: Limits
+    ) -> None:
+        """The escape-manoeuvre exemption must not leak past the latch: once
+        STOPPED, every axis is zero including yaw."""
+        inputs = _make_inputs(
+            real_limits,
+            cmd_wz=1.2,
+            last_wz=real_limits.velocity.max_wz,
+            scan_ranges=_slow_zone_scan(real_limits, 0.20),  # inside stop zone
+            estop_latched=True,
+        )
+        d = evaluate(inputs, real_limits)
+        assert d.state == State.STOPPED
+        assert d.out_wz == 0.0
+        assert d.out_vx == 0.0
+
+    def test_yaw_still_bounded_by_max_wz_clamp(self, real_limits: Limits) -> None:
+        """Not scaling is not the same as not clamping."""
+        inputs = _make_inputs(
+            real_limits,
+            cmd_wz=99.0,
+            last_wz=real_limits.velocity.max_wz,
+            scan_ranges=_slow_zone_scan(real_limits, 0.50),
+        )
+        d = evaluate(inputs, real_limits)
+        assert abs(d.out_wz) <= real_limits.velocity.max_wz + 1e-9
