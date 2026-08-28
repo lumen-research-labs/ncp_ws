@@ -497,6 +497,56 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   Left clean: all NCP-stack nodes stopped, `/cmd_vel` 0 publishers; Yahboom
   bringup, remapped `joy_ctrl` and the lidar left RUNNING for the operator.
 
+- 2026-08-28 (floor test): **STOP-THE-LINE — the velocity clamps do not hold in
+  physical units, and `/odom` is unusable.** Two bags analysed
+  (`/tmp/drift_test`, `/tmp/spin_test` on bernard-1).
+
+  **(a) The robot moves far faster than commanded.** Operator confirmed ~6 m of
+  real travel in ~11 s (~0.55 m/s average) against a commanded ceiling of
+  `max_vx: 0.15` m/s. `rm_safety`'s clamps are expressed in m/s but the base
+  does not deliver m/s. **With no physical E-stop, this is the one guarantee
+  that must hold, and it does not. No further floor tests until the true
+  m/s-per-commanded-unit is measured.**
+
+  **(b) `/vel_raw` and `/odom_raw` are not measurements.** Across a 25 s run
+  they sat at **≈ −1.10 m/s and +0.28 rad/s CONSTANT**, uncorrelated with the
+  command in magnitude, sign, or axis: commanded `+0.150` forward -> −1.10;
+  commanded `0.000` with a pure `wz = −0.400` spin -> still −1.10. They snap to
+  exactly 0.000 only after the command has been zero ~0.5 s. Values jitter in
+  ~0.004 (vx) and ~0.024 (wz) steps, which looks like a fixed-point decode
+  artefact rather than a signal.
+  NOT the known base-board serial trap: `/voltage` read a healthy 10.7 V
+  throughout, `rosmaster_main.py` was killed before bringup, and every scale
+  parameter is at its default (`base_node.linear_scale_x/y`,
+  `angular_scale` all 1.0; `driver_node.car_type` correctly `X3`). The fault is
+  inside the Yahboom driver/firmware velocity decode, upstream of `base_node`.
+
+  **(c) The EKF inherits it rather than rejecting it.** `ekf_x1_x3.yaml` fuses
+  `odom0: /odom_raw` for x/y/yaw/vx/vy/wz and `imu0: /imu/data` for **yaw and
+  yaw-rate only** — no linear acceleration. So `/odom` is a low-pass of
+  `/odom_raw`: its vx visibly converges toward −1.1 over several seconds and
+  decays slowly after motion stops. **`/odom` is not trustworthy on this robot.**
+
+  **Consequences that must not be forgotten:**
+  * `policy_node` derives pose and the goal from `/odom`, so **2 of the NCP's
+    36 observation dims are currently garbage**, as are the logged
+    `goal_dist`/`reward`/`episode_return` in debug mode.
+  * A heading-hold controller for the drift symptom **must not be built on
+    `/odom`** — it would chase a lying sensor. Resolve (a)/(b) first.
+  * The earlier note that the `imu_link` 180/0/−90 rotation was "sidestepped"
+    by dropping the IMU from the observation is **incomplete**: the EKF still
+    fuses `/imu/data` for yaw, so that rotation still reaches `/odom`.
+
+  **Next diagnostic (zero risk, no floor travel):** wheels UP, command a known
+  `vx`, count wheel revolutions over ~10 s and multiply by wheel circumference
+  (X3 mecanum ~97 mm dia -> ~0.305 m). That yields ground-truth m/s per
+  commanded unit independently of the lying odometry, and gives the scale
+  factor `max_vx` must be divided by.
+
+  Confirmed working in the same bags: the 2026-08-28 yaw fix — `wz` reached the
+  full ±0.400 clamp while `vx` was scaled to 0.000 in the slow zone, exactly the
+  intended asymmetry.
+
 ## 4. Current Goal
 
 **The full NCP pipeline runs on bernard-1 hardware** (2026-08-27 s2): lidar ->
@@ -511,7 +561,11 @@ Remaining caveat: the vendor bringup restarts its own `joy_ctrl` on every
 launch, so its PID must be killed and `teleop_joy.launch.py` started in its
 place, every session, until that is scripted.
 
-**Nothing blocks motion any more except the operator sign-off itself.**
+**MOTION IS BLOCKED (2026-08-28 floor test).** The velocity clamps do not hold
+in physical units — the robot travelled ~6 m against a commanded ceiling of
+~1.7 m — and `/odom`, `/odom_raw` and `/vel_raw` are all untrustworthy. See the
+stop-the-line entry in §3. Measure the true m/s-per-commanded-unit (wheels up,
+count revolutions) before any further floor test.
 
 **Still no trained checkpoint.** `mode:=ncp` and `policy_node` both run RANDOM
 weights (`ncp_policy.NcpActor(seed=0)`); observed output was a near-constant
