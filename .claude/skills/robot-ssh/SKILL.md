@@ -221,6 +221,44 @@ ros2 launch astra_camera astro_pro_plus.launch.xml
 Launches are long-running: start them with `run_in_background` or `nohup`,
 then poll with `ros2 node list` rather than blocking on the foreground process.
 
+## THE STOP BUTTON — the base driver has NO watchdog
+
+`Mcnamu_driver_X3` holds its last `/cmd_vel` **indefinitely**. Stop publishing
+and the wheels keep turning. There is no command timeout in the driver and
+there is no physical E-stop on either robot.
+
+**`ros2 topic pub --once ... "{}"` DOES NOT STOP THE ROBOT.** It sends a single
+message that is easily missed — dropped in transit, or sent before the driver's
+subscription matched. This happened live on 2026-08-28: a `timeout 10 ros2
+topic pub` test ended, the `--once` zero did nothing, and the wheels kept
+running.
+
+Only **continuous** zeros stop it. Two ways, in order of preference:
+
+```bash
+# 1. BEST — rm_safety is purpose-built for this. It comes up KILLED and floods
+#    zeros at 20 Hz. Starting it IS the stop button.
+ros2 run rm_safety safety_node --ros-args \
+  -p safety_limits_path:=/home/jetson/ncp_ws/config/safety_limits.yaml
+
+# 2. Manual, when rm_safety is not available. Leave it RUNNING until the
+#    wheels are still, then Ctrl-C.
+ros2 topic pub -r 20 /cmd_vel geometry_msgs/msg/Twist "{}"
+```
+
+Killing the process that was commanding motion is NOT sufficient on its own —
+it removes the command source but leaves the driver holding the last value.
+Kill the publisher AND flood zeros.
+
+Before ANY test that commands velocity: have a dedicated stop terminal open
+with the stop command typed and ready to press Enter. Nothing else goes in
+that terminal.
+
+Note the ordering trap: `rm_safety` must be stopped to run a direct
+`/cmd_vel` test (else two publishers), which means the stop button is exactly
+what you just turned off. That is why the manual form above must be ready
+first.
+
 ## Hard limits — do not cross these unattended
 
 - **Never start `cpt_b2_engine`.** It publishes `/cmd_vel` directly with no

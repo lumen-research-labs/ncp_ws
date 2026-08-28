@@ -593,18 +593,63 @@ and deliberate; do not raise it to "let the policy through".
 
 ### Next session, in order
 
-1. Script the vendor `joy_ctrl` kill + `teleop_joy.launch.py` into one
-   bringup step so the remap is not a manual per-session ritual.
-2. Script the `/var/lib/rm_safety` creation into the deploy path — it was
-   permission-denied on bernard-1 and will recur on bernard-2 and any reflash.
-3. Make `command_source` read-only on `safety_node` so `ros2 param set` is
-   rejected rather than silently ignored.
-4. Hardware safety checklist (`safety_validation.md` §3) — wheels off the
-   ground first, operator + kill switch in hand, **never an agent**.
-5. Sign off `safety_validation.md`'s hardware rows once 4 passes.
-6. Only then: motion under `ncp.launch.py consumer:=upstream mode:=debug`,
-   which is the most legible first motion (stop-and-spin on a real obstacle).
-7. Get a trained checkpoint into `weights:=` and re-run `mode:=ncp`.
+**THE ONE BLOCKING MEASUREMENT.** Everything else waits on this. Wheels UP,
+`rm_safety` STOPPED (it is a second publisher on `/cmd_vel` and its slow-zone
+scaling corrupts the number), a dedicated stop terminal open FIRST with
+`ros2 topic pub -r 20 /cmd_vel geometry_msgs/msg/Twist "{}"` typed and ready:
+
+  Run A: `timeout 10 ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.15}}"`
+         -> count wheel revolutions on slow-mo video. Stop. 
+         ~5 revs  = 0.15 m/s achieved; clamp honest, only reporting broken.
+         ~36 revs = ~1.1 m/s achieved; clamp ~7x off — a real hazard.
+  Run B: same at `x: 0.05`. Should be ~A/3. If equal to A, the driver ignores
+         commanded magnitude entirely.
+  Run C: `{angular: {z: 0.4}}`. Watch wheel DIRECTION, not speed. Should be
+         left pair opposing right pair, visibly different from A. If identical
+         to A, the command is not reaching the wheels — a different fault from
+         a decode bug.
+
+  Run A alone answers the main question; B and C are nice-to-have.
+  **The robot did NOT stop on its own after a `topic pub` test on 2026-08-28**
+  — the driver has no watchdog, and `--once` zeros do not work. See the STOP
+  BUTTON section of the `robot-ssh` skill before commanding any velocity.
+
+Then, depending on the answer:
+  * If the clamp is off by ~7x -> divide `max_vx`/`max_vy`/`max_wz` (and the
+    accel limits) by the measured factor before ANY further floor test.
+  * If the clamp is honest -> the fault is confined to the odometry decode;
+    floor tests can resume, but `/odom` stays unusable (below).
+
+Independent of the above, still open:
+1. `/odom`, `/odom_raw`, `/vel_raw` are confirmed broken (§3, 2026-08-28).
+   `policy_node` derives pose and goal from `/odom`, so 2 of the NCP's 36
+   observation dims are garbage. Either fix the driver's velocity decode or
+   give the policy a goal source that does not depend on odometry.
+2. Do NOT build the heading-hold controller for the observed floor drift until
+   1 is resolved — it would close a loop on a sensor that reports a constant
+   -1.10 m/s regardless of motion.
+3. Script the vendor `joy_ctrl` kill + `teleop_joy.launch.py` into one bringup
+   step so the `/cmd_vel` remap is not a manual per-session ritual.
+4. Script `install -d -o jetson -g jetson /var/lib/rm_safety` into the deploy
+   path — permission-denied there silently degrades kill-state persistence to
+   memory-only. Fixed on bernard-1, will recur on bernard-2 and any reflash.
+5. Make `command_source` read-only on `safety_node` so `ros2 param set` is
+   rejected rather than accepted-and-ignored.
+6. Hardware safety checklist (`safety_validation.md` §3), then sign off its
+   hardware rows.
+7. The 2026-08-28 yaw fix (`wz` no longer scaled by proximity) is verified
+   working on hardware but still needs formal operator sign-off — Phase 2 gate.
+
+### Robot state at end of 2026-08-28 session
+
+bernard-1 LEFT RUNNING and safe: `/cmd_vel` held at zero by a KILLED
+`safety_node` (1 publisher), Yahboom bringup up, `joy_ctrl` remapped to
+`/teleop/cmd_vel`, lidar up at ~10.1 Hz. Battery **10.5 V and falling —
+charge before the next session.** Clock was pushed from the workstation and
+does NOT survive reboot (RTC resets to 1970); `rosmaster_main.py` was killed
+by PID and WILL come back on the next boot holding `/dev/myserial`.
+`/dev/rplidar` pointed at the BASE BOARD this boot — always use the by-id
+CP2102 path. Repo on the robot is at the current branch head, built.
 
 Offline work available any time: the 3.0.0 contract doc refresh, a clear-path
 open-space bag (operator), `ros2 topic delay` latency capture.
