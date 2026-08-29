@@ -928,6 +928,125 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   holding ttyUSB1, and `/tmp` cleared (the ad-hoc probes had to be re-copied).
   Battery ended at **10.3 V** — bottom third, operator charging.
 
+- 2026-08-29 (session 3): **COMMANDED vs ACHIEVED VELOCITY VERIFIED AGAINST A
+  TAPE MEASURE, both axes.** Operator-run floor session on bernard-1, three
+  rounds of legs. This is the answer to "do the clamps hold in physical units",
+  open since the 2026-08-28 stop-the-line. Final state, `lever_arm_m` 0.227:
+
+  | | legs | achieved/commanded |
+  |---|---|---|
+  | linear forward (0.06 / 0.12 / 0.25 m/s) | 3 | 1.000 / 0.992 / 1.016 |
+  | linear reverse (0.12 m/s) | 1 | 0.959 |
+  | angular at wz 0.60 | 1 | 0.972 |
+
+  **`max_vx` NOW HOLDS IN PHYSICAL UNITS.** Linear is accurate across a 4x
+  speed range forward; reverse is 4% short on a single sample, consistent with
+  only front-right having reverse overrides configured. Angular at the
+  operating point is 4.8 deg short of 171.8 commanded, i.e. ~1.7 sigma against
+  a protractor read off a floor line (worth ~+-3 deg) — at the noise floor,
+  not worth chasing further.
+
+  **NEW TOOL — `scripts/diagnostics/velocity_accuracy.py`.** Drives a matrix of
+  straight and spin legs, prompts for the tape/protractor reading after each,
+  appends to a CSV, and reports achieved/commanded per leg. Two design points
+  that are load-bearing and must not be "simplified":
+  * **The reference is the TIME INTEGRAL OF `/cmd_vel`, not `vx * secs`.**
+    rm_safety acceleration-limits every command, so a 5 s leg at 0.25 m/s never
+    travels 1.25 m even with a perfect base — the ramp alone is ~0.04 m, 4% of
+    the run, which would be booked against the calibration. Integrating what
+    was actually demanded separates the base from the safety layer.
+  * **Several speeds, both directions.** A one-speed check passes for
+    infinitely many wrong `(dead_pwm, gain)` splits — the 2026-08-29 s2 BUG 4.
+
+  **`lever_arm_m` 0.213 -> 0.236 -> 0.227**, by measured bracket: 0.213 gave
+  ratio 0.904 at wz 0.60, 0.236 overshot to 1.060, so 1.000 interpolates at
+  0.227 (confirmed live at 0.972). It is an interpolation between two measured
+  runs, not a new fit. The pre-existing 0.213 was fitted before the s2
+  calibration refit, which is why it needed revisiting (next-session item 3).
+
+  **NEW — THERE IS A ROTATIONAL DEAD-BAND, and one constant cannot cover the
+  wz range.** Raising the lever by 10.8% moved wz 0.60 by 17.2% but wz +-0.30
+  by only 4.5% / 1.6%. Fitting all six spin legs gives
+  `achieved_yaw_rate ~ 311 * (wheel_speed - 0.025 m/s)` — roughly **the first
+  0.107 rad/s of any commanded spin is lost to scrub before the chassis turns
+  at all**. `lever_arm_m` is a pure multiplier and a multiplier cannot cancel
+  an offset, so it can be exact at ONE spin speed and nowhere else. Fitted at
+  wz 0.60 because `max_wz` is 0.8 and the debug rule saturates it. **EXPECT
+  wz ~0.30 TO STAY ~20% SHORT — that is inherent, not a regression.** The real
+  fix is an affine yaw term (gain + per-direction dead-band, the same shape as
+  `dead_pwm`/`gain` one level up); NOT built, because no trained policy
+  commands low wz yet.
+
+  **The wheels were exonerated by cross-checking the two axes, and this is the
+  method worth keeping.** A spin at wz 0.30 asks each wheel for
+  `wz * lever_arm_m` = 0.064 m/s — which is the 0.06 m/s straight leg that
+  measured 1.000. So the wheels demonstrably CAN hit those speeds and no
+  wheel-level explanation of the yaw shortfall survives. Without that
+  cross-check the obvious (wrong) move is to refit `dead_pwm`/`gain`.
+
+  **NEW — CW/CCW asymmetry ~9.7%**, CCW 0.797 vs CW 0.727 at |wz| 0.30, two
+  samples each, consistent in sign across two different `lever_arm_m` values.
+  Suspected cause is front-right's direction-dependent stiction (breakaway 60
+  fwd / 55 rev), which a spin drives one way for CCW and the other for CW.
+
+  **`/odom` over-reads linear distance by ~5%** (1.047 / 1.058 / 1.051 across
+  the three forward legs) — unlike the yaw error, a clean scale error. NOT
+  corrected: `counts_per_rev` is dual-purpose (it is also the closed loop's
+  feedback) and the feedforward was fitted against measured speed, so changing
+  it moves both and would put the just-verified straight-line accuracy at risk.
+  Logged as a known bias; the wheels-up revolution count still separates slip
+  from scale.
+
+  **Four bugs found IN THE TEST TOOL, all fixed the same session.** Worth
+  recording because three of them produced confident wrong output:
+  1. **The summary told the operator to refit `dead_pwm`/`gain`** when linear
+     was accurate and angular varied — see the cross-check above. It now
+     considers both axes together.
+  2. **The runway check silently degraded to a Y/N prompt on 4 of 12 legs**
+     (`runway_m` = nan). It spun a fixed 0.5 s before reading `/scan`, which is
+     not enough for DDS discovery on a fresh node, so every single-leg
+     invocation skipped the check. It now waits up to 8 s for a real scan. A
+     safety check that quietly becomes a prompt you say yes to is worse than
+     no check.
+  3. **It asked the operator to SIGN the tape reading**, and got a wrong sign
+     twice — a reverse leg entered as +0.69 against a -0.72 command reads as
+     ratio -0.959, i.e. "the robot drove the wrong way", not a typo. It now
+     takes an unsigned magnitude and applies the commanded sign itself.
+  4. **The analysis pooled forward and reverse legs**, turning a direction
+     difference into a fake "varies with speed" verdict. It now groups by
+     direction as well as axis, and says when a group has only one leg instead
+     of reporting spread 0.000 as though a range had been tested.
+  Each CSV row now also records the `lever_arm_m` it ran with, because the
+  workflow is measure -> change a constant -> measure again into the same
+  sheet, and the summary was averaging pre- and post-change legs together.
+
+  **Reverse legs have NO e-stop coverage.** rm_safety's arcs are forward and
+  lateral only — there is no rear arc — so nothing downstream stops the robot
+  on a negative-vx leg. The tool now checks the runway in the direction of
+  travel and warns explicitly.
+
+  Method note: `bench_up.sh` is the correct bringup for this test, NOT
+  `ncp.launch.py` — the latter always starts a policy consumer, and in debug
+  mode that consumer publishes `/policy/cmd_vel` continuously, the same topic
+  the test commands on. Two publishers would fight mid-leg.
+
+  **The breakaway kick is still NOT CONFIRMED on hardware.** All spin legs ran
+  at wheel speeds (0.064-0.142 m/s) that straddle its ~0.14 m/s trigger and
+  front-right did turn, so it very likely fired — but no `rm_base` log was
+  captured during the runs, so this is inference, not evidence. Next-session
+  item 2 stays open; capture the node log while commanding a slow turn.
+
+  Robot: found powered off at session start, came up mid-session on its static
+  IP. Clock back to May 24 (~3 months behind, not pushed this session — the
+  test uses a monotonic clock deliberately, but push it before recording bags).
+  `rosmaster_main.py` autostart live again and holding ttyUSB1 as always.
+  Battery 11.9 V at start, freshly charged. NOTE: early in the session an
+  agent-side shell-quoting error executed several repo scripts on the robot
+  unintentionally (`bench_up.sh`, `bench_down.sh`, `prep_robot.sh`); verified
+  after the fact that nothing moved — safety was KILLED and `rm_base` was in
+  `dry_run` throughout — and the stack was stopped cleanly before the operator
+  ran the real tests.
+
 ## 4. Current Goal
 
 **THE NCP DEBUG TEST HAS RUN END TO END ON HARDWARE (2026-08-29 s2).** One
@@ -936,14 +1055,23 @@ rm_safety, and the base tracks commanded speed on all four wheels to within 3%.
 The pipeline is proven. What is proven is the PLUMBING — there is still no
 trained checkpoint.
 
+**COMMANDED vs ACHIEVED VELOCITY IS NOW VERIFIED (2026-08-29 s3)**, tape-measured
+on both axes: linear 1.000 / 0.992 / 1.016 forward across 0.06-0.25 m/s, 0.959
+reverse, angular 0.972 at wz 0.60 with `lever_arm_m` 0.227. The clamps hold in
+physical units — the question open since the 2026-08-28 stop-the-line is closed.
+
 Still outstanding from that test:
-* **The breakaway kick is deployed but never exercised** — it only fires below
-  ~0.14 m/s and cruise never goes there. Needs a slow commanded turn
-  (`wz` under ~0.65 rad/s) to confirm on hardware.
-* **No clean spin has been measured** since the calibration refit. The debug
-  rule's direction flipping (see §3) makes this awkward — use an asymmetric
-  spot.
-* Battery was 10.3 V at the end; charge before the next run.
+* **The breakaway kick is STILL not confirmed on hardware.** The s3 spin legs
+  straddled its ~0.14 m/s trigger and front-right turned, so it very likely
+  fired — but no `rm_base` log was captured, so that is inference. Command a
+  slow turn (`wz` under ~0.65 rad/s) with the node log captured.
+* **`wz` ~0.30 under-rotates by ~20% and this is INHERENT** — a rotational
+  dead-band against a single multiplier (§3). Do not turn `lever_arm_m` up to
+  fix it; that over-rotates wz 0.60, as measured. The fix is an affine yaw
+  term, not yet worth building.
+* **Reverse is one sample.** 0.959 could be a scale error or a dead-band; a
+  second reverse speed separates them.
+* Battery was 11.9 V at the start of s3; check before the next run.
 
 **The full NCP pipeline runs on bernard-1 hardware** (2026-08-27 s2): lidar ->
 32-beam bridge -> observation -> CfC -> `/policy/cmd_vel` -> rm_safety clamp,
@@ -974,11 +1102,15 @@ the reflash is no longer on the critical path.
 **What is still NOT trustworthy, and must not be forgotten during the debug
 test:** the `/odom` chain is now live and safety-clean, but its scale was
 FITTED to the tape rather than derived, and any wheel slip is baked into
-`counts_per_rev` as if it were encoder scale. It is good enough to satisfy
+`counts_per_rev` as if it were encoder scale. **Measured 2026-08-29 s3: it
+over-reads linear distance by ~5%** (1.047 / 1.058 / 1.051 against the tape at
+three speeds) — a clean scale error, deliberately NOT corrected because
+`counts_per_rev` is also the closed loop's feedback and moving it would put the
+just-verified straight-line accuracy at risk. It is good enough to satisfy
 rm_safety's staleness watchdog (which is all safety uses it for) and good
-enough for rough distance. It is NOT yet a basis for a heading-hold controller
-or for trusting `policy_node`'s derived pose/goal. A wheels-up revolution
-count would separate slip from scale and settle it.
+enough for rough distance. It is NOT a basis for a heading-hold controller or
+for trusting `policy_node`'s derived pose/goal. A wheels-up revolution count
+would separate slip from scale and settle it.
 
 **Still no trained checkpoint.** `mode:=ncp` and `policy_node` both run RANDOM
 weights; observed output was a near-constant (+0.03, -0.09). What has been
@@ -1002,14 +1134,23 @@ Items 1, 2b, 3, 4 and 7 of the previous list are DONE. What remains:
    1 publisher before arming. Stop button:
    `ros2 service call /safety/kill std_srvs/srv/Trigger`, in its own terminal.
    Watch with `scripts/diagnostics/watch_stack.py`.
-2. **Exercise the breakaway kick.** Deployed but never fired on hardware — it
-   only engages below ~0.14 m/s. Command a slow turn (`wz` under ~0.65 rad/s)
-   and confirm front-right starts, and that `still not turning after 3
-   breakaway kicks` does NOT appear.
-3. **Measure a clean spin** since the calibration refit. Use an asymmetric spot
-   so the debug rule commits to a direction (see the no-hysteresis note in §3).
-   Tape-check the achieved angle against commanded; `lever_arm_m` 0.213 was
-   fitted before the refit and may need revisiting.
+   For BASE-ONLY work (including `velocity_accuracy.py`) use `bench_up.sh`
+   instead — `ncp.launch.py` always starts a policy consumer, and in debug mode
+   that consumer publishes `/policy/cmd_vel` continuously, which fights any
+   script commanding on that topic.
+2. **Exercise the breakaway kick — STILL OPEN.** The 2026-08-29 s3 spin legs
+   almost certainly fired it (wheel speeds 0.064-0.142 m/s, straddling the
+   ~0.14 m/s trigger, and front-right turned) but no `rm_base` log was
+   captured, so it remains inference. Command a slow turn (`wz` under
+   ~0.65 rad/s) WITH THE NODE LOG CAPTURED, and confirm front-right starts and
+   that `still not turning after 3 breakaway kicks` does NOT appear.
+3. ~~Measure a clean spin since the calibration refit.~~ **DONE 2026-08-29 s3**
+   via `velocity_accuracy.py`, which commands the spin directly and so sidesteps
+   the debug rule's direction flipping entirely. `lever_arm_m` refitted
+   0.213 -> 0.227. Remaining spin work is the dead-band, not the constant.
+3b. **A second REVERSE straight leg.** Reverse is one sample (0.959); a second
+   speed separates a scale error from a dead-band there, the same way two
+   speeds did for forward.
 4. **A wheels-UP revolution count.** The cheapest experiment left: it separates
    wheel SLIP from encoder SCALE in `counts_per_rev`, which is currently fitted
    to the tape with slip baked in. Until then `/odom` is "matches the tape",
@@ -1029,18 +1170,20 @@ Items 1, 2b, 3, 4 and 7 of the previous list are DONE. What remains:
 10. Check whether bernard-2 has the same firmware sign fault (if yes it is
    systemic).
 
-### Robot state at end of 2026-08-29 session 2
+### Robot state at end of 2026-08-29 session 3
 
-bernard-1 rebooted mid-session and came back on its static IP. Clock was reset
-to May and was pushed from the workstation; `/dev/rplidar` pointed at the BASE
-BOARD again (the documented symlink race — use the by-id CP2102 path);
-`rosmaster_main.py` was back holding ttyUSB1; `/tmp` was cleared, so any
-ad-hoc probe scripts need re-copying.
+bernard-1 was off at session start and came up partway through, on its static
+IP. Clock back to **May 24** (~3 months behind) and NOT pushed this session —
+`velocity_accuracy.py` uses a monotonic clock deliberately, but push the clock
+before recording any bag. `rosmaster_main.py` autostart live and holding
+ttyUSB1 as always. Battery **11.9 V**, freshly charged, at the start.
 
-Left with the full NCP stack RUNNING and rm_safety ARMED at the operator's
-hand (they were mid-test). Battery **10.3 V** — bottom third of the usable
-range, operator charging. All code is committed and deployed; workstation and
-robot verified byte-identical for every file touched.
+Left with the base stack from `bench_up.sh --mode closed_loop --live --source
+policy` RUNNING (lidar, rm_base, odom chain, rm_safety) after the operator's
+last leg — run `scripts/bench_down.sh` if it is still up. All code is committed
+and deployed; workstation and robot verified byte-identical for every file
+touched. Results sheet is `~/ncp_ws/velocity_accuracy.csv` on the robot
+(pre-correction copy at `.csv.bak`).
 
 Offline work available any time: the 3.0.0 contract doc refresh, a clear-path
 open-space bag (operator), `ros2 topic delay` latency capture.
@@ -1072,9 +1215,25 @@ Settled, do not re-open:
   and `yahboom_joy_X3` (publishes `/cmd_vel` directly).
 - **The calibration numbers are TAPE-FITTED, not derived** (2026-08-29).
   `wheel_circumference_m` 0.248 is measured (79 mm wheel); `counts_per_rev`
-  2360 and `lever_arm_m` 0.213 are fitted to make commanded match achieved.
+  2360 and `lever_arm_m` **0.227** are fitted to make commanded match achieved.
   The lever arm is a scrub compensation — do NOT "correct" it back to the
   physical 164.555 mm. Re-tune against a tape, never against odometry.
+- **`lever_arm_m` 0.227 is fitted at wz 0.60 AND CANNOT BE RIGHT EVERYWHERE**
+  (2026-08-29 s3). There is a rotational dead-band — about the first
+  0.107 rad/s of a commanded spin is lost to scrub — and a multiplier cannot
+  cancel an offset. `wz` ~0.30 under-rotating ~20% is EXPECTED. Raising the
+  lever to fix it over-rotates wz 0.60, as measured (0.236 gave 1.060 there
+  while the 0.30 legs had only reached 0.815/0.733). The fix is an affine yaw
+  term, not a bigger constant.
+- **Never pool FORWARD and REVERSE, or CW and CCW, in one accuracy fit**
+  (2026-08-29 s3). The calibration is per-direction and the robot has a
+  measured 4% forward/reverse and 9.7% CW/CCW asymmetry, so pooling reads a
+  direction difference as "varies with speed" and sends you to refit the wrong
+  thing.
+- **Achieved-vs-commanded is measured against the TIME INTEGRAL OF `/cmd_vel`,
+  never `vx * secs`** (2026-08-29 s3). rm_safety acceleration-limits every
+  command, so the ramp alone is ~4% of a 5 s leg at 0.25 m/s and would be
+  booked against the base. `velocity_accuracy.py` is the tool.
 - **`dead_pwm` must be fitted from TWO speeds, and erring HIGH is the safe
   direction** (2026-08-29). A one-speed fit cannot separate it from
   `gain_pwm_per_mps`, and setting it too low means a wheel never starts —
