@@ -132,9 +132,13 @@ def _make_inputs(
 
 class TestLimitsFromDict:
     def test_loads_velocity_limits(self, real_limits: Limits) -> None:
-        assert real_limits.velocity.max_vx == pytest.approx(0.15)
+        # max_vx 0.15 -> 0.25 and max_wz 0.4 -> 0.8 on 2026-08-29, to make
+        # the NCP debug test run at a watchable pace. Ahead of the Phase 2
+        # hardware sign-off; slow_zone_m was widened to 0.65 to pay for the
+        # longer stopping distance.
+        assert real_limits.velocity.max_vx == pytest.approx(0.25)
         assert real_limits.velocity.max_vy == pytest.approx(0.25)
-        assert real_limits.velocity.max_wz == pytest.approx(0.4)
+        assert real_limits.velocity.max_wz == pytest.approx(0.8)
 
     def test_loads_acceleration_limits(self, real_limits: Limits) -> None:
         assert real_limits.acceleration.max_ax == pytest.approx(0.75)
@@ -142,9 +146,10 @@ class TestLimitsFromDict:
         assert real_limits.acceleration.max_alpha_z == pytest.approx(1.0)
 
     def test_loads_estop(self, real_limits: Limits) -> None:
-        # 0.80 -> 0.50 on 2026-08-29, paired with the debug policy's
-        # obstacle_dist dropping 1.5 -> 0.9.
-        assert real_limits.estop.slow_zone_m == pytest.approx(0.50)
+        # 0.80 -> 0.50 -> 0.65 on 2026-08-29: down to sit under the debug
+        # policy's new 0.9 m obstacle_dist, then back out to buy stopping
+        # room when max_vx was raised to 0.25.
+        assert real_limits.estop.slow_zone_m == pytest.approx(0.65)
         assert real_limits.estop.stop_zone_m == pytest.approx(0.35)
         assert real_limits.estop.consecutive_scans_to_trigger == 3
 
@@ -174,7 +179,7 @@ class TestLimitsFromDict:
 
 class TestClampVelocity:
     def test_in_range_passes_unchanged(self, real_limits: Limits) -> None:
-        # max_vx=0.15, max_vy=0.25, max_wz=0.4
+        # max_vx=0.25, max_vy=0.25, max_wz=0.8
         vx, vy, wz, clamped = clamp_velocity(0.1, 0.1, 0.2, real_limits)
         assert vx == pytest.approx(0.1)
         assert vy == pytest.approx(0.1)
@@ -189,7 +194,7 @@ class TestClampVelocity:
         assert clamped is False
 
     def test_over_range_clamped_positive(self, real_limits: Limits) -> None:
-        # 0.5 > max_vx=0.15
+        # 0.5 > max_vx=0.25
         vx, vy, wz, clamped = clamp_velocity(0.5, 0.0, 0.0, real_limits)
         assert vx == pytest.approx(real_limits.velocity.max_vx)
         assert clamped is True

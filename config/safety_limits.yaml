@@ -13,10 +13,28 @@ velocity_limits:
   # Absolute caps applied to every command regardless of source. These are at
   # or below the action scaling in interface.yaml so the safety layer is
   # always the tighter of the two.
-  max_vx: 0.15          # m/s   — forward/back. Lowered from 0.25, 2026-08-14
-                        # operator decision during live teleop testing.
+  # RAISED 2026-08-29 (operator request, to make the NCP debug test readable
+  # at a useful pace). 0.15 -> 0.25 returns this to its pre-2026-08-14 value.
+  #
+  # THIS IS AHEAD OF THE PHASE 2 HARDWARE SIGN-OFF. BUILD-PLAN gates raising
+  # these clamps on safety_validation.md §3, whose hardware rows are still
+  # unsigned. Revert to 0.15 / 0.4 for any unattended or long-running use.
+  #
+  # Stopping distance at 0.25 m/s, which is what makes it defensible:
+  #   braking            v^2/(2*max_ax) = 0.0625/1.5      = 0.042 m
+  #   detection lag      3 scans @ 10 Hz = 0.3 s @ 0.25   = 0.075 m
+  #   total                                              ~= 0.117 m
+  # against a slow->stop band of 0.65-0.35 = 0.30 m, so ~2.5x margin. That
+  # band was widened back from 0.50 in the same change specifically to pay
+  # for this speed; do not raise max_vx again without redoing this sum.
+  max_vx: 0.25          # m/s   — forward/back
   max_vy: 0.25          # m/s   — lateral (mecanum; do not omit — see below)
-  max_wz: 0.4           # rad/s — yaw
+  # 0.4 -> 0.8. Yaw is the cheaper axis to raise: it closes no distance to an
+  # obstacle, and slow-zone scaling deliberately does not throttle it (see the
+  # 2026-08-14 yaw fix), so a faster spin does not erode the stopping margin
+  # computed above. It is also the axis the debug rule spends most of its time
+  # commanding, so this is what actually makes the test watchable.
+  max_wz: 0.8           # rad/s — yaw
 
   # max_vy is deliberately RETAINED after interface 2.0.0 dropped vy from the
   # policy's action space. The safety layer clamps every source, and
@@ -51,24 +69,28 @@ estop:
   # Two-tier lidar zones, measured on the rolling minimum range within the
   # monitored arcs. Rear arc is chassis-occluded and carries no signal, so it
   # is not monitored — the robot must be treated as blind behind.
-  # 0.80 -> 0.50, operator decision 2026-08-29, paired with dropping the debug
-  # policy's obstacle_dist from 1.5 m to 0.9 m. The three thresholds must stay
-  # ordered so the POLICY reacts before the SAFETY layer has to:
-  #     0.90 m  policy spins away        (upstream obstacle_dist)
-  #     0.50 m  safety starts scaling    (this)
+  # 0.80 -> 0.50 -> 0.65, both moves on 2026-08-29.
+  #
+  # First to 0.50, paired with dropping the debug policy's obstacle_dist from
+  # 1.5 m to 0.9 m: at 0.80 the safety layer was scaling velocity down while
+  # the policy still thought it was cruising, so the robot crawled.
+  #
+  # Then back out to 0.65 when max_vx was raised 0.15 -> 0.25, to pay for the
+  # longer stopping distance (see the sum above max_vx). 0.50 would have left
+  # a 0.15 m band against ~0.12 m of braking + detection lag — almost no
+  # margin. These two numbers are coupled: RAISING max_vx REQUIRES widening
+  # this, and narrowing this REQUIRES lowering max_vx.
+  #
+  # The three thresholds must stay ordered so the POLICY reacts before the
+  # SAFETY layer has to:
+  #     0.90 m  policy spins away         (upstream obstacle_dist)
+  #     0.65 m  safety starts scaling     (this)
   #     0.35 m  safety zeroes and latches (stop_zone_m)
-  # At 0.80 the safety layer was scaling velocity down while the policy was
-  # still trying to cruise, so the robot crawled instead of driving.
   #
-  # The scaling band is now 0.15 m wide (0.50 -> 0.35), down from 0.45 m, and
-  # slow_scale() ramps linearly across it. That is ~1 s of travel at the
-  # 0.15 m/s clamp, so braking is correspondingly more abrupt. Do not narrow
-  # it further without re-checking that a real approach still stops short.
-  #
-  # Unaffected by this change: the chassis standoffs at ~0.48-0.54 m sit
+  # Unaffected by either move: the chassis standoffs at ~0.48-0.54 m sit
   # inside self_occlusion_zones_deg below and are dropped before the arc
-  # check, so they cannot straddle the new 0.50 boundary.
-  slow_zone_m: 0.50     # scale commanded velocity down proportionally
+  # check, so they cannot straddle any of these boundaries.
+  slow_zone_m: 0.65     # scale commanded velocity down proportionally
   stop_zone_m: 0.35     # zero velocity and LATCH
   forward_arc_deg: 90   # centered on +x
   lateral_arc_deg: 60   # each side. Retained after interface 2.0.0: the policy
