@@ -1,6 +1,6 @@
 """Tests for the VENDORED NCP policy module (rm_policy.vendor.ncp_policy).
 
-Copied from LumenLabs/NCP-on-Rosmaster @ 0ad548c (tests/test_rosmaster_policy.py)
+Copied from LumenLabs/NCP-on-Rosmaster @ 69785c8 (tests/test_rosmaster_policy.py)
 and repointed at our vendored copy, per the operator decision of 2026-08-27 that
 all fixes live in ncp_ws and the upstream repo is not modified.
 
@@ -201,4 +201,119 @@ def test_resampled_scan_is_safe_through_the_same_upstream_path() -> None:
     )
     assert np.allclose(obs[: policy.BEAMS], 1.0), (
         "with the resampler in front, an all-dropout scan reads as CLEAR"
+    )
+
+
+# --- TRAINED CHECKPOINT (upstream 69785c8 / weights a9af7af) -----------------
+# The actor architecture changed when the trained weights landed: a multi-layer
+# head plus VecNormalize buffers (see vendor/VENDOR.md). These pin the contract
+# the exported .pt is written against, so a future re-vendor that silently
+# reverts the shape fails here rather than at node startup on the robot.
+#
+# Ported from upstream tests/test_rosmaster_policy.py @ 69785c8.
+
+
+def test_actor_state_dict_matches_export_contract() -> None:
+    """The exact key set weights/export_from_sb3.py writes."""
+    keys = set(policy.NcpActor().state_dict())
+    assert {
+        "head.0.weight", "head.2.weight", "head.4.weight", "obs_mean", "obs_var"
+    } <= keys
+    assert all(k.startswith(("cfc.", "head.", "obs_")) for k in keys)
+    assert policy.NcpActor().state_dict()["head.4.weight"].shape == (2, 64)
+
+
+def test_actor_applies_obs_normalization() -> None:
+    """obs_mean/obs_var are LIVE in act(), not decorative buffers."""
+    actor = policy.NcpActor()
+    obs = np.full(policy.OBS_DIM, 0.5, dtype=np.float32)
+    a_identity, _ = actor.act(obs)
+    actor.obs_mean.fill_(0.5)  # now obs normalizes to exactly zero
+    a_zero_in, _ = actor.act(obs)
+    a_ref, _ = policy.NcpActor().act(np.zeros(policy.OBS_DIM, dtype=np.float32))
+    assert not np.allclose(a_identity, a_zero_in)
+    assert np.allclose(a_zero_in, a_ref)
+
+
+def test_default_buffers_pass_observations_through_unchanged() -> None:
+    """No weights file => mean 0 / var 1 => the obs reaches the CfC untouched.
+
+    Pins the property that makes random-weight plumbing runs meaningful: with
+    no checkpoint loaded, normalization is the identity (up to the 1e-8 epsilon)
+    rather than some arbitrary transform.
+    """
+    actor = policy.NcpActor()
+    assert np.allclose(actor.obs_mean.numpy(), 0.0)
+    assert np.allclose(actor.obs_var.numpy(), 1.0)
+
+
+# --- The real checkpoint, if a copy is reachable ----------------------------
+# Skips where the upstream checkout is absent (e.g. a bare CI box). On the
+# robot and the dev workstation the sibling checkout is the convention used by
+# test_vendor_is_pristine.py and ncp.launch.py's upstream_path default.
+
+_WEIGHTS = os.path.abspath(
+    os.path.join(_REPO_ROOT, "..", "NCP-on-Rosmaster", "weights", "actor.pt")
+)
+
+
+@pytest.mark.skipif(
+    not os.path.isfile(_WEIGHTS), reason="no upstream weights checkout present"
+)
+def test_trained_checkpoint_loads_strictly_into_the_vendored_actor() -> None:
+    """The whole point of the re-vendor: actor.pt must load with NO slack.
+
+    strict=True is deliberate. A checkpoint that only loads with
+    strict=False is a checkpoint whose architecture does not match, and the
+    missing tensors would be silently left at their random init.
+    """
+    import torch
+
+    actor = policy.NcpActor()
+    state = torch.load(_WEIGHTS, map_location="cpu")
+    actor.load_state_dict(state)  # strict=True by default — must not raise
+
+    # VecNormalize stats actually arrived; the defaults would be exactly 0/1.
+    assert not np.allclose(actor.obs_mean.numpy(), 0.0), (
+        "obs_mean is still the default — the checkpoint's VecNormalize "
+        "statistics did not load"
+    )
+    assert np.all(actor.obs_var.numpy() > 0.0)
+
+
+@pytest.mark.skipif(
+    not os.path.isfile(_WEIGHTS), reason="no upstream weights checkout present"
+)
+def test_trained_actor_emits_finite_in_bounds_actions_on_a_clear_scan() -> None:
+    """Smoke test the loaded policy over a short recurrent rollout.
+
+    Not a judgement about whether the policy is GOOD — with rm_safety clamping
+    max_vx to a fraction of the trained 2.0 m/s range, on-robot behaviour is
+    not evidence about the policy anyway (interface.yaml
+    authority_gap_warning). This only asserts the numbers are usable: finite,
+    in bounds, and not frozen at a single constant across a changing input.
+    """
+    import torch
+
+    actor = policy.NcpActor()
+    actor.load_state_dict(torch.load(_WEIGHTS, map_location="cpu"))
+
+    state = None
+    actions = []
+    clear = np.full(policy.BEAMS, policy.LASER_CLIP, dtype=np.float32)
+    for step in range(10):
+        # Goal walks toward the robot, so the observation genuinely changes.
+        goal = np.array([2.5 - 0.1 * step, 0.0], dtype=np.float32)
+        last = actions[-1] if actions else np.zeros(2, dtype=np.float32)
+        obs = policy.build_obs(clear, goal, last)
+        action, state = actor.act(obs, state)
+        assert np.all(np.isfinite(action)), f"non-finite action at step {step}"
+        assert np.all(action >= policy.ACTION_LOW)
+        assert np.all(action <= policy.ACTION_HIGH)
+        actions.append(action)
+
+    spread = np.ptp(np.array(actions), axis=0)
+    assert spread.max() > 1e-6, (
+        "action is identical across 10 ticks of a CHANGING observation — the "
+        "network is not responding to its input"
     )

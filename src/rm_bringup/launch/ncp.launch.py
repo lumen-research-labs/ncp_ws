@@ -14,24 +14,33 @@ What it does:
                                               |
                                               +-- rm_safety --> /cmd_vel
 
+    rm_dashboard subscribes to every arrow above and serves it as one live
+    page on http://<robot>:8080/. It is a leaf: nothing depends on it and it
+    publishes nothing.
+
     Only the UPSTREAM consumer reads /ncp/scan. rm_policy's policy_node
     resamples internally and reads the raw /scan directly -- feeding it the
     bridge output would double-resample and fault every tick.
 
 Launch arguments:
-    consumer      "upstream" (default) or "policy_node".
+    consumer      "policy_node" (DEFAULT) or "upstream".
+
+                  "policy_node" runs rm_policy/policy_node, the
+                  contract-checked (interface_version 3.0.0), fail-closed
+                  production path with staleness watchdogs and a goal fixed
+                  from the first /odom. This is the default because a trained
+                  checkpoint now exists (2026-08-29) and this is the path that
+                  verifies the contract the checkpoint was exported against.
 
                   "upstream" runs NCP-on-Rosmaster/rosmaster/node.py
                   UNMODIFIED via its own interpreter. This is the only way to
                   get its `mode:=debug` reactive rule ("see something -> stop
                   and spin"), which is the fastest way to prove on real
                   hardware that lidar -> observation -> command is live at
-                  all. rm_policy's own policy_node has no such mode.
-
-                  "policy_node" runs rm_policy/policy_node, the
-                  contract-checked (interface_version 3.0.0), fail-closed
-                  production path with staleness watchdogs and a goal fixed
-                  from the first /odom.
+                  all. rm_policy's own policy_node has no such mode. It is
+                  also the A/B reference: both run the SAME vendored network
+                  code, so a disagreement between them is a wrapper bug, not
+                  a policy difference.
 
     mode          "debug" (default) or "ncp". Only meaningful for
                   consumer:=upstream. debug = reactive rule drives and the
@@ -51,10 +60,16 @@ Launch arguments:
                   always inside it and the robot spins continuously instead of
                   ever cruising.
 
-    weights       Path to a trained actor state_dict. "" (default) means
-                  RANDOM WEIGHTS. There is no trained checkpoint in this repo
-                  or the upstream one as of 2026-08-27, so `mode:=ncp` with
-                  the default exercises the PLUMBING, not a trained policy.
+    weights       Path to a trained actor state_dict. DEFAULTS to
+                  <upstream>/weights/actor.pt — the m4 BARN run that landed
+                  2026-08-29. Pass weights:='' for random weights, which
+                  exercises the PLUMBING and nothing else.
+
+                  The checkpoint lives in the UPSTREAM repo. It must be
+                  present on the robot: bernard-1 has no internet, so it gets
+                  there by scripts/deploy_to_robot.sh, not by git pull. Its
+                  sha256 is logged at policy_node startup and published on
+                  /ncp_debug, so a recorded run is traceable to exact bytes.
 
     with_safety   "true" (default) also launches safety.launch.py. Set
                   "false" only when rm_safety is already running.
@@ -78,6 +93,13 @@ Launch arguments:
                   "teleop", so two explicit acts are still required.
     calibration_path  path to config/base_calibration.yaml.
 
+    with_dashboard    "true" (default) also starts rm_dashboard, the live web
+                  view of every stage at http://<robot>:8080/. It subscribes
+                  only — it publishes no topic and cannot become a second
+                  /cmd_vel publisher. dashboard_port and dashboard_controls
+                  are passed through; dashboard_controls:=false serves a
+                  read-only page.
+
 Bringing the WHOLE stack up:
     This file now starts everything ROS-side, so it is the one command. It
     does NOT do the host-level cleanup that must happen first — killing the
@@ -93,9 +115,13 @@ Bringing the WHOLE stack up:
 Why the safety layer is not optional in practice:
     ncp_policy.ACTION_HIGH is v = 2.0 m/s / w = 3.14 rad/s, and neither
     consumer scales it down -- the trained head emits final physical units.
-    safety_limits.yaml clamps max_vx to 0.15 m/s. That ~13x gap is the
-    intended design (the safety layer is the binding constraint); do NOT
-    raise the clamp to "let the policy through". Running either consumer with
+    safety_limits.yaml clamps max_vx to 0.25 m/s and max_wz to 0.8 rad/s.
+    That ~8x / ~4x gap is the intended design (the safety layer is the binding
+    constraint); do NOT raise the clamp to "let the policy through". The
+    consequence to hold onto when reading the policy's behaviour: it will run
+    almost entirely saturated, in a regime it never saw in training, so what
+    the robot does under these clamps is evidence about the PIPELINE, not
+    about whether the policy is any good. Running either consumer with
     cmd_topic pointed at /cmd_vel would send 2 m/s straight to the base
     driver. The upstream node's default cmd_topic IS /cmd_vel, which is
     exactly why this launch file overrides it explicitly.
@@ -116,8 +142,11 @@ Usage (on the robot, after colcon build + source install/setup.bash):
     # full stack, policy allowed to drive — operator + kill switch present
     ros2 launch rm_bringup ncp.launch.py command_source:=policy
 
-    ros2 launch rm_bringup ncp.launch.py mode:=ncp
-    ros2 launch rm_bringup ncp.launch.py consumer:=policy_node
+    # the reactive debug rule, for proving the sensor path end to end
+    ros2 launch rm_bringup ncp.launch.py consumer:=upstream mode:=debug
+
+    # plumbing only, no checkpoint
+    ros2 launch rm_bringup ncp.launch.py weights:=''
 """
 
 import pathlib
@@ -141,6 +170,18 @@ _DEFAULT_LIMITS_PATH = str(_REPO_ROOT / "config" / "safety_limits.yaml")
 
 # Sibling checkout convention, matching tests/unit/test_vendor_is_pristine.py.
 _DEFAULT_UPSTREAM_PATH = str(_REPO_ROOT.parent / "NCP-on-Rosmaster")
+
+# The trained checkpoint ships in the upstream repo, not this one — it is the
+# training stack's artefact and duplicating a 2 MB binary into two repos is how
+# they drift apart. Defaulting to it (rather than to "", random weights) is
+# deliberate: with the default the node FAILS TO START if the file is missing,
+# which is far better than silently exercising an untrained network in a run
+# the operator believes is testing a policy. Pass weights:='' for a plumbing
+# run. Note this default is a fixed path, NOT derived from `upstream_path`:
+# a launch-argument default cannot reference another launch argument.
+_DEFAULT_WEIGHTS_PATH = str(
+    _REPO_ROOT.parent / "NCP-on-Rosmaster" / "weights" / "actor.pt"
+)
 
 _DEFAULT_CALIBRATION_PATH = str(_REPO_ROOT / "config" / "base_calibration.yaml")
 
@@ -230,6 +271,9 @@ def generate_launch_description() -> LaunchDescription:
     control_mode = LaunchConfiguration("control_mode")
     dry_run = LaunchConfiguration("dry_run")
     calibration_path = LaunchConfiguration("calibration_path")
+    with_dashboard = LaunchConfiguration("with_dashboard")
+    dashboard_port = LaunchConfiguration("dashboard_port")
+    dashboard_controls = LaunchConfiguration("dashboard_controls")
 
     # `upstream` is selected inside _upstream_process (an OpaqueFunction), so
     # only the policy_node branch needs a launch-time condition here.
@@ -239,9 +283,10 @@ def generate_launch_description() -> LaunchDescription:
 
     return LaunchDescription([
         DeclareLaunchArgument(
-            "consumer", default_value="upstream",
-            description="'upstream' (NCP-on-Rosmaster node.py, has debug mode) "
-                        "or 'policy_node' (rm_policy, contract-checked).",
+            "consumer", default_value="policy_node",
+            description="'policy_node' (rm_policy, contract-checked, DEFAULT) "
+                        "or 'upstream' (NCP-on-Rosmaster node.py, has the "
+                        "reactive debug mode).",
         ),
         DeclareLaunchArgument(
             "mode", default_value="debug",
@@ -253,8 +298,10 @@ def generate_launch_description() -> LaunchDescription:
             description="Path to the NCP-on-Rosmaster checkout.",
         ),
         DeclareLaunchArgument(
-            "weights", default_value="",
-            description="Trained actor state_dict. '' = RANDOM WEIGHTS.",
+            "weights", default_value=_DEFAULT_WEIGHTS_PATH,
+            description="Trained actor state_dict. Defaults to the m4 "
+                        "checkpoint in the upstream checkout. Pass "
+                        "weights:='' for RANDOM WEIGHTS (plumbing runs).",
         ),
         DeclareLaunchArgument(
             "obstacle_dist", default_value="0.9",
@@ -312,6 +359,21 @@ def generate_launch_description() -> LaunchDescription:
             "calibration_path", default_value=_DEFAULT_CALIBRATION_PATH,
             description="Path to config/base_calibration.yaml.",
         ),
+        DeclareLaunchArgument(
+            "with_dashboard", default_value="true",
+            description="Start rm_dashboard — the live web view of the whole "
+                        "stack at http://<robot>:8080/. Subscribe-only on "
+                        "topics; it can never publish /cmd_vel.",
+        ),
+        DeclareLaunchArgument(
+            "dashboard_port", default_value="8080",
+            description="Port the dashboard serves on.",
+        ),
+        DeclareLaunchArgument(
+            "dashboard_controls", default_value="true",
+            description="false serves a read-only dashboard (no kill, arm, "
+                        "source or goal from the browser).",
+        ),
 
         # ---- hardware layer, bottom up -------------------------------------
         # Lidar first: the scan bridge and both consumers are useless without
@@ -359,6 +421,15 @@ def generate_launch_description() -> LaunchDescription:
         ),
 
         OpaqueFunction(function=_upstream_process),
+
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(str(_LAUNCH_DIR / "dashboard.launch.py")),
+            condition=IfCondition(with_dashboard),
+            launch_arguments={
+                "port": dashboard_port,
+                "enable_controls": dashboard_controls,
+            }.items(),
+        ),
 
         Node(
             condition=is_policy_node,

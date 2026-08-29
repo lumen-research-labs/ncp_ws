@@ -54,6 +54,7 @@ Failure mode:
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence, Tuple
 
@@ -61,6 +62,25 @@ import numpy as np
 import torch
 
 from rm_policy.vendor import ncp_policy
+
+# Bytes per read when hashing the checkpoint. The file is ~2 MB, so this is
+# about keeping a constant memory profile, not about speed.
+_HASH_CHUNK_BYTES = 1 << 20
+
+
+def _sha256_file(path: str) -> str:
+    """Content hash of a weights file, for run provenance.
+
+    The point is that "which checkpoint was this?" is answerable AFTER the
+    fact, from a bag or a dashboard snapshot, without trusting that the file
+    at a given path is still the file that ran. A path alone does not identify
+    a checkpoint — `weights/actor.pt` is a name that gets overwritten.
+    """
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(_HASH_CHUNK_BYTES), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 # ---------------------------------------------------------------------------
 # Result container — same shape convention as scan_resampler.ScanResampleResult:
@@ -114,10 +134,22 @@ class PolicyRunner:
         """
         self._actor = ncp_policy.NcpActor(seed=seed)
         self._weights_path = weights_path
+        self._weights_sha256: str = ""
         if weights_path:
             try:
+                # map_location="cpu" unconditionally: the actor is tiny and the
+                # 5 Hz tick is sub-millisecond on the Jetson's CPU, so there is
+                # nothing to gain from CUDA and plenty to lose — a checkpoint
+                # saved from a GPU box otherwise tries to allocate a device
+                # that may not exist. Upstream made the same fix (69785c8).
                 state_dict = torch.load(weights_path, map_location="cpu")
+                # strict=True (the default) is load-bearing. A checkpoint whose
+                # architecture does not match must fail HERE, at node __init__,
+                # not load partially and leave the missing tensors at their
+                # random init — which is exactly what the pre-2026-08-29
+                # vendored actor would have done under strict=False.
                 self._actor.load_state_dict(state_dict)
+                self._weights_sha256 = _sha256_file(weights_path)
             except Exception as exc:
                 raise RuntimeError(
                     f"policy_runner: failed to load weights from "
@@ -130,6 +162,16 @@ class PolicyRunner:
     def weights_path(self) -> str:
         """Path the actor's weights were loaded from; "" means random init."""
         return self._weights_path
+
+    @property
+    def weights_sha256(self) -> str:
+        """SHA-256 of the loaded checkpoint; "" when running random weights.
+
+        Published on the debug stream so every run is traceable to the exact
+        bytes that produced it. `weights/actor.pt` is a path that gets
+        overwritten; this is the identity that does not.
+        """
+        return self._weights_sha256
 
     def reset(self) -> None:
         """Clear recurrent state. Call after any observation discontinuity

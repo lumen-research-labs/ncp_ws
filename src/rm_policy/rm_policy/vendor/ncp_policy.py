@@ -6,10 +6,12 @@ Mirrors the barn_gym BarnEnv observation/action contract exactly
     obs(36) = [laser(32, normalized), local goal(x, y), last action(v, w)]
     action  = [v, w]  (linear m/s, angular rad/s, physical units)
 
-The actor is the same hookup as the trained policy's recurrent core — a
-CfC on an AutoNCP wiring (256 neurons, 128 motor) with mixed memory —
-plus a linear head to (v, w). Weights are random until a trained
-checkpoint is distilled into it; the interface won't change.
+The actor is the trained policy's exact hookup — a CfC on an AutoNCP
+wiring (256 neurons, 128 motor) with mixed memory, then the SB3 MLP head
+[64, 64] to (v, w) — with the checkpoint's VecNormalize obs statistics
+carried as buffers. `weights/actor.pt` holds the m4 training run
+(exported bit-exact from the SB3 checkpoint); without a weights file the
+actor runs with random weights and pass-through normalization.
 """
 
 import numpy as np
@@ -114,8 +116,18 @@ def reward(prev_goal_dist, goal_dist, min_range):
 
 
 class NcpActor(nn.Module):
-    """CfC + AutoNCP actor with the trained policy's recurrent hookup
-    (mixed_memory=True keeps the state (h, c)-shaped like the SB3 stack)."""
+    """CfC + AutoNCP actor with the trained policy's exact hookup
+    (mixed_memory=True keeps the state (h, c)-shaped like the SB3 stack).
+
+    Head is the trained RecurrentPPO stack after the recurrent core:
+    motor neurons -> MLP [64, 64] (tanh, SB3 default net_arch) -> (v, w).
+    The obs_mean/obs_var buffers hold the checkpoint's VecNormalize
+    statistics, applied in act() exactly as at training time; the default
+    buffers (mean 0, var 1) leave observations untouched for random-weight
+    runs. Both ride along in the state_dict, so one .pt carries everything.
+    """
+
+    OBS_CLIP = 10.0  # VecNormalize clip_obs at training time
 
     def __init__(self, obs_dim=OBS_DIM, units=UNITS, motor=MOTOR_NEURONS, seed=0):
         super().__init__()
@@ -123,7 +135,12 @@ class NcpActor(nn.Module):
         self.cfc = CfC(
             obs_dim, AutoNCP(units, motor), batch_first=True, mixed_memory=True
         )
-        self.head = nn.Linear(motor, 2)
+        self.head = nn.Sequential(
+            nn.Linear(motor, 64), nn.Tanh(), nn.Linear(64, 64), nn.Tanh(),
+            nn.Linear(64, 2)
+        )
+        self.register_buffer("obs_mean", torch.zeros(obs_dim, dtype=torch.float64))
+        self.register_buffer("obs_var", torch.ones(obs_dim, dtype=torch.float64))
 
     @torch.no_grad()
     def act(self, obs, state=None):
@@ -131,7 +148,11 @@ class NcpActor(nn.Module):
 
         Pass the returned state back in on the next tick; None resets it.
         """
-        x = torch.as_tensor(obs, dtype=torch.float32).view(1, 1, -1)
+        o = (torch.as_tensor(obs, dtype=torch.float64) - self.obs_mean) / torch.sqrt(
+            self.obs_var + 1e-8
+        )
+        o = torch.clamp(o, -self.OBS_CLIP, self.OBS_CLIP)
+        x = o.to(torch.float32).view(1, 1, -1)
         out, state = self.cfc(x, state)
         action = self.head(out[0, 0]).numpy()
         return np.clip(action, ACTION_LOW, ACTION_HIGH), state

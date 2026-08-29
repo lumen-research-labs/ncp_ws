@@ -8,8 +8,37 @@ as similar to, if not an exact copy of, what's on the NCP-on-Rosmaster repo."*
 |---|---|
 | Source repo | `LumenLabs/NCP-on-Rosmaster` |
 | Source path | `rosmaster/policy.py` |
-| Commit | `0ad548c6236f2c52f8435cd58a9610604047f919` (branch `main`, clean tree) |
-| Vendored | 2026-08-27 |
+| Commit | `69785c85a281f2e624db9548a7335d3fa76fe56e` (branch `main`, clean tree) |
+| Vendored | 2026-08-29 (re-vendored; first vendored 2026-08-27 @ `0ad548c`) |
+
+## Re-vendoring 2026-08-29 — the actor architecture CHANGED
+
+The first vendoring took `0ad548c`, which predated the trained checkpoint. When
+`weights/actor.pt` landed upstream (`a9af7af`), `NcpActor` changed shape:
+
+| | `0ad548c` (old) | `69785c8` (now) |
+|---|---|---|
+| `head` | `nn.Linear(motor, 2)` | `Linear(128,64)-Tanh-Linear(64,64)-Tanh-Linear(64,2)` — the SB3 `mlp_extractor.policy_net` + `action_net`, tanh being SB3's default `net_arch` activation |
+| obs normalization | none | `obs_mean` / `obs_var` buffers (the checkpoint's VecNormalize statistics), applied in `act()` and clipped to ±10 (`OBS_CLIP`, VecNormalize's `clip_obs` at training time) |
+
+`actor.pt` is a `state_dict` for the NEW shape. The old copy could not have
+loaded it: `PolicyRunner` calls `load_state_dict` at its default `strict=True`,
+so the mismatch raises a `RuntimeError` during node `__init__` — before any
+subscription or timer exists — rather than degrading silently. That is the
+designed behaviour and it is why this mismatch was a startup failure and never
+a wrong-numbers-on-the-wire failure.
+
+Two consequences worth holding onto:
+
+* **`obs_mean`/`obs_var` ride inside the `.pt`.** The normalization the policy
+  was trained under is carried by the checkpoint, not by our config. A run with
+  no weights file gets the default buffers (mean 0, var 1), which pass
+  observations through untouched — so random-weight plumbing runs and trained
+  runs differ in the normalization applied, by design.
+* **The clip is ±10 in NORMALIZED units**, applied after the VecNormalize
+  transform. It is unrelated to `laser_clip_m: 5.0` in `config/interface.yaml`,
+  which is applied earlier, in metres, by `build_obs`. Two different clips at
+  two different stages — do not reconcile them.
 
 ## Verifying it is still an exact copy
 

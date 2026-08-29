@@ -125,7 +125,7 @@ observation:
   # numbers — it will still run, and the output will still look like a
   # plausible (v, w). There is no runtime error for getting this wrong.
   # Source of truth for the formulas: src/rm_policy/rm_policy/vendor/ncp_policy.py
-  # (build_obs), vendored from NCP-on-Rosmaster @ 0ad548c.
+  # (build_obs), vendored from NCP-on-Rosmaster @ 69785c8.
   layout:
     - name: lidar_ranges
       source_topic: /scan
@@ -376,13 +376,17 @@ action:
 
   authority_gap_warning: >-
     The policy's trained range is far wider than the safety layer permits:
-    2.0 m/s vs max_vx 0.15 (13.3x) and 3.14 rad/s vs max_wz 0.4 (7.9x). This
+    2.0 m/s vs max_vx 0.25 (8x) and 3.14 rad/s vs max_wz 0.8 (3.9x). This
     is CORRECT and the clamps must not be raised to close the gap — the safety
     layer is deliberately the binding constraint and raising it is gated on
-    Phase 2 hardware sign-off. The consequence to understand: the policy will
-    run almost entirely saturated, in a regime it never experienced in
-    training, with every approach truncated before its own COLLISION_DIST of
-    0.25 m by the 0.35 m stop zone. Its behaviour under these clamps is
+    Phase 2 hardware sign-off. (The clamps were 0.15 / 0.4 when this note was
+    written; they were raised 2026-08-29 s2 during live tuning, which narrowed
+    the gap without changing the principle. Both figures are still ABOVE the
+    signed-off values — revert to 0.15 / 0.4 for anything unattended.) The
+    consequence to understand: the policy will run almost entirely saturated,
+    in a regime it never experienced in training, with every approach
+    truncated before its own COLLISION_DIST of 0.25 m by the 0.35 m stop
+    zone. Its behaviour under these clamps is
     therefore NOT evidence about whether the policy is good. Judge the
     pipeline, not the policy, until the clamps are raised.
 

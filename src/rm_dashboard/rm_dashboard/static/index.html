@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NCP Stack — bernard</title>
+<style>
+/* Self-contained on purpose: bernard-1 has no WAN uplink, so no CDN font,
+   no CDN chart library. Everything below is hand-rolled against the system
+   font stack and one canvas. */
+:root{
+  --bg:#0d1117; --panel:#151b23; --panel2:#1c232d; --line:#2a3340;
+  --fg:#e6edf3; --dim:#8b98a5; --faint:#5a6673;
+  --ok:#3fb950; --warn:#d29922; --bad:#f85149; --kill:#da3633;
+  --accent:#58a6ff; --accent2:#bc8cff; --goal:#f0883e;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:13px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+h2{font-size:11px;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--dim);margin:0 0 10px;font-weight:600}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+/* ---------- header ---------- */
+header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+  padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line);
+  position:sticky;top:0;z-index:20}
+.brand{font-weight:700;letter-spacing:.02em}
+.brand small{color:var(--faint);font-weight:400;margin-left:8px}
+.spacer{flex:1}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;
+  border:1px solid var(--line);border-radius:999px;font-size:12px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--faint);flex:none}
+.dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)}
+.dot.bad{background:var(--bad);animation:pulse 1s infinite}
+@keyframes pulse{50%{opacity:.35}}
+#killbtn{background:var(--kill);color:#fff;border:0;border-radius:8px;
+  padding:11px 26px;font-size:15px;font-weight:800;letter-spacing:.06em;
+  cursor:pointer;box-shadow:0 0 0 0 rgba(218,54,51,.5)}
+#killbtn:hover{background:#f0413d}
+#killbtn:disabled{background:#3a2626;color:var(--faint);cursor:not-allowed}
+
+/* ---------- layout ---------- */
+main{display:grid;gap:12px;padding:12px;
+  grid-template-columns:minmax(340px,1fr) minmax(300px,.85fr);
+  align-items:start}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;padding:12px}
+.wide{grid-column:1/-1}
+
+/* ---------- chain ---------- */
+.chain{display:flex;align-items:stretch;gap:0;overflow-x:auto;padding-bottom:2px}
+.stage{flex:1;min-width:112px;background:var(--panel2);border:1px solid var(--line);
+  border-radius:8px;padding:8px 10px}
+.stage .nm{font-size:10px;letter-spacing:.05em;color:var(--dim);
+  text-transform:uppercase;display:flex;align-items:center;gap:5px}
+.stage .v{font-family:var(--mono);font-size:15px;margin-top:3px}
+.stage .hz{font-family:var(--mono);font-size:10px;color:var(--faint);margin-top:1px}
+.stage.stale{opacity:.5}
+.arrow{align-self:center;color:var(--faint);padding:0 7px;flex:none;font-size:14px}
+
+/* ---------- scan ---------- */
+.scanwrap{position:relative}
+canvas{width:100%;height:auto;display:block;border-radius:8px;background:#0a0e14}
+.legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;
+  font-size:11px;color:var(--dim)}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;
+  margin-right:5px;vertical-align:-1px}
+
+/* ---------- safety ---------- */
+.state{font-size:26px;font-weight:800;letter-spacing:.05em;line-height:1.1}
+.state.OK{color:var(--ok)} .state.SLOW{color:var(--warn)}
+.state.STOPPED{color:var(--bad)} .state.KILLED{color:var(--kill)}
+.state.UNKNOWN,.state.NONE{color:var(--faint)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;
+  font-size:12px;margin-top:10px}
+.kv dt{color:var(--dim)} .kv dd{margin:0;font-family:var(--mono);text-align:right}
+
+/* ---------- bars ---------- */
+.obs{display:flex;align-items:flex-end;gap:1px;height:78px;
+  background:#0a0e14;border-radius:6px;padding:5px}
+.obs b{flex:1;min-width:2px;border-radius:1px 1px 0 0;font-weight:400}
+.obslabels{display:flex;font-size:10px;color:var(--faint);margin-top:5px}
+
+/* ---------- table ---------- */
+table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px}
+th{text-align:right;color:var(--dim);font-weight:600;font-size:10px;
+  text-transform:uppercase;letter-spacing:.05em;padding:0 6px 6px;
+  border-bottom:1px solid var(--line)}
+th:first-child,td:first-child{text-align:left}
+td{text-align:right;padding:5px 6px;border-bottom:1px solid #1e252f}
+tr:last-child td{border-bottom:0}
+.flag{display:inline-block;padding:0 5px;border-radius:3px;font-size:10px;
+  margin-left:3px;font-family:system-ui,sans-serif}
+.flag.sat{background:#3d2f0f;color:var(--warn)}
+.flag.stall{background:#3d1f0f;color:#e8813a}
+.flag.sign{background:#42191a;color:var(--bad)}
+.flag.nofb{background:#242c36;color:var(--faint)}
+
+/* ---------- controls ---------- */
+.ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+button.act{background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+  border-radius:7px;padding:7px 14px;font-size:12px;cursor:pointer}
+button.act:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+button.act:disabled{opacity:.4;cursor:not-allowed}
+button.act.on{background:#132b47;border-color:var(--accent);color:var(--accent)}
+button.act.danger:hover:not(:disabled){border-color:var(--bad);color:var(--bad)}
+input[type=number]{background:#0a0e14;border:1px solid var(--line);color:var(--fg);
+  border-radius:6px;padding:6px 8px;width:74px;font-family:var(--mono);font-size:12px}
+label.inline{color:var(--dim);font-size:12px}
+#toast{position:fixed;right:14px;bottom:14px;z-index:50;display:flex;
+  flex-direction:column;gap:6px;align-items:flex-end}
+.msg{background:var(--panel2);border:1px solid var(--line);border-left-width:3px;
+  border-radius:6px;padding:8px 12px;font-size:12px;max-width:380px;
+  box-shadow:0 4px 16px rgba(0,0,0,.5)}
+.msg.ok{border-left-color:var(--ok)} .msg.err{border-left-color:var(--bad)}
+.note{color:var(--faint);font-size:11px;margin-top:8px;line-height:1.5}
+.rates{display:grid;grid-template-columns:1fr auto auto auto;gap:2px 10px;
+  font-family:var(--mono);font-size:11.5px;align-items:center}
+.rates .h{color:var(--dim);font-size:10px;text-transform:uppercase;
+  letter-spacing:.05em;font-family:system-ui,sans-serif;padding-bottom:3px;
+  border-bottom:1px solid var(--line)}
+.rates .n{text-align:right}
+.rates .stale{color:var(--bad)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">NCP STACK <small id="ckpt">checkpoint —</small></div>
+  <span class="pill"><span class="dot" id="conndot"></span><span id="conn">connecting</span></span>
+  <span class="pill" id="battpill"><span class="dot" id="battdot"></span><span id="batt">— V</span></span>
+  <span class="pill mono" id="uptime">0s</span>
+  <div class="spacer"></div>
+  <button id="killbtn">KILL</button>
+</header>
+
+<main>
+
+  <!-- ============ pipeline chain ============ -->
+  <section class="panel wide">
+    <h2>Pipeline — every hop, left to right</h2>
+    <div class="chain" id="chain"></div>
+    <div class="note" id="chainnote"></div>
+  </section>
+
+  <!-- ============ scan ============ -->
+  <section class="panel">
+    <h2>Lidar — full scan vs the 32 beams the policy sees</h2>
+    <div class="scanwrap"><canvas id="scan" width="760" height="760"></canvas></div>
+    <div class="legend">
+      <span><i style="background:#3a4653"></i>/scan (raw, decimated)</span>
+      <span><i style="background:var(--accent)"></i>/ncp/scan (32 beams)</span>
+      <span><i style="background:var(--bad)"></i>stop zone</span>
+      <span><i style="background:var(--warn)"></i>slow zone</span>
+      <span><i style="background:var(--goal)"></i>goal bearing</span>
+    </div>
+  </section>
+
+  <div style="display:grid;gap:12px">
+    <!-- ============ safety ============ -->
+    <section class="panel">
+      <h2>Safety — the only /cmd_vel publisher</h2>
+      <div class="state NONE" id="safestate">—</div>
+      <dl class="kv">
+        <dt>reason</dt><dd id="safereason">—</dd>
+        <dt>min range (arcs)</dt><dd id="safemin">—</dd>
+        <dt>clamping</dt><dd id="safeclamp">—</dd>
+        <dt>command source</dt><dd id="safesrc">—</dd>
+      </dl>
+      <div class="note">
+        Zones are read from the page's defaults; the authority is
+        <code>config/safety_limits.yaml</code>.
+      </div>
+    </section>
+
+    <!-- ============ command chain ============ -->
+    <section class="panel">
+      <h2>Command — asked vs allowed</h2>
+      <table>
+        <thead><tr><th>stage</th><th>vx m/s</th><th>wz rad/s</th><th>hz</th></tr></thead>
+        <tbody id="cmdtbl"></tbody>
+      </table>
+      <div class="note">
+        The policy's trained range is ±2.0 m/s / ±3.14 rad/s and the safety
+        clamp is far tighter — a large gap between the two rows is the design
+        working, not a fault.
+      </div>
+    </section>
+  </div>
+
+  <!-- ============ observation ============ -->
+  <section class="panel wide">
+    <h2>Observation — the 36 numbers the network actually consumed</h2>
+    <div class="obs" id="obs"></div>
+    <div class="obslabels">
+      <span style="flex:32">0–31 lidar (−1 touching · +1 clear)</span>
+      <span style="flex:2;text-align:center">32–33 goal</span>
+      <span style="flex:2;text-align:right">34–35 prev action</span>
+    </div>
+    <div class="note" id="obsnote">
+      Taken from <code>/ncp_debug</code>, i.e. the exact vector policy_node fed
+      the CfC — not rebuilt here, so it cannot disagree with what ran.
+    </div>
+  </section>
+
+  <!-- ============ wheels ============ -->
+  <section class="panel wide">
+    <h2>Base — per wheel <span style="color:var(--faint);text-transform:none;letter-spacing:0">(measured map: M1=FL, M2=BL, M3=FR, M4=BR)</span></h2>
+    <table>
+      <thead><tr>
+        <th>wheel</th><th>target m/s</th><th>measured</th><th>err</th>
+        <th>ff pwm</th><th>integral</th><th>applied pwm</th><th>flags</th>
+      </tr></thead>
+      <tbody id="wheels"></tbody>
+    </table>
+    <div class="note" id="basenote"></div>
+  </section>
+
+  <!-- ============ controls + rates ============ -->
+  <section class="panel">
+    <h2>Controls</h2>
+    <div class="ctl" style="margin-bottom:10px">
+      <span class="pill">command source</span>
+      <button class="act" id="src-teleop" data-src="teleop">teleop</button>
+      <button class="act" id="src-policy" data-src="policy">policy</button>
+    </div>
+    <div class="ctl" style="margin-bottom:10px">
+      <label class="inline">goal x</label><input type="number" id="gx" value="2.5" step="0.1">
+      <label class="inline">y</label><input type="number" id="gy" value="0" step="0.1">
+      <button class="act" id="setgoal">re-target from here</button>
+    </div>
+    <div class="ctl">
+      <button class="act danger" id="resetbtn">ARM (/safety/reset)</button>
+    </div>
+    <div class="note">
+      Changing the source force-kills, so arming is always a separate act.
+      Re-targeting also resets the CfC's recurrent state.
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Topic health</h2>
+    <div class="rates" id="rates"></div>
+  </section>
+
+</main>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+// Zone radii for the scan overlay. The authority is config/safety_limits.yaml;
+// these are for DRAWING only and are never used for a decision.
+const STOP_ZONE_M = 0.35, SLOW_ZONE_M = 0.65, PLOT_MAX_M = 5.0;
+const WHEEL_NAMES = ["front-left","back-left","front-right","back-right"];
+
+const $ = id => document.getElementById(id);
+let latest = null, lastMsgAt = 0;
+
+/* ---------------- connection ---------------- */
+function connect(){
+  const es = new EventSource("/events");
+  es.onopen = () => setConn("live","ok");
+  es.onerror = () => setConn("reconnecting…","bad");
+  es.onmessage = e => {
+    try { latest = JSON.parse(e.data); } catch(err){ return; }
+    lastMsgAt = performance.now();
+    setConn("live","ok");
+    render(latest);
+  };
+}
+function setConn(text, cls){
+  $("conn").textContent = text;
+  $("conndot").className = "dot " + cls;
+}
+
+/* ---------------- helpers ---------------- */
+const num = (v, d=2) => (v===null||v===undefined||Number.isNaN(v)) ? "—" : (+v).toFixed(d);
+const hz  = t => t && t.hz!==null && t.hz!==undefined ? t.hz.toFixed(1)+" Hz" : "— Hz";
+function val(snap, topic){
+  const t = snap.topics && snap.topics[topic];
+  return (t && t.value) ? t.value : null;
+}
+function meta(snap, topic){ return (snap.topics && snap.topics[topic]) || null; }
+
+/* ---------------- chain ---------------- */
+const CHAIN = [
+  {topic:"/scan",           label:"/scan",           get:v=>num(v.min_range_m,2)+" m min"},
+  {topic:"/ncp/scan",       label:"/ncp/scan",       get:v=>v.n+" beams"},
+  {topic:"/ncp_debug",      label:"policy",          get:v=>v.action?`${num(v.action[0])} , ${num(v.action[1])}`:(v.fault||"—")},
+  {topic:"/policy/cmd_vel", label:"/policy/cmd_vel", get:v=>`${num(v.vx)} , ${num(v.wz)}`},
+  {topic:"/safety/status",  label:"rm_safety",       get:v=>v.state_name},
+  {topic:"/cmd_vel",        label:"/cmd_vel",        get:v=>`${num(v.vx)} , ${num(v.wz)}`},
+  {topic:"/base/debug",     label:"wheels",          get:v=>v.dry_run?"DRY RUN":v.control_mode},
+];
+function renderChain(snap){
+  const el = $("chain");
+  el.innerHTML = CHAIN.map((c,i)=>{
+    const m = meta(snap,c.topic), v = m && m.value;
+    let body = "—";
+    try { if(v) body = c.get(v); } catch(e){}
+    const stale = !m || m.stale;
+    const dot = stale ? (m && m.count ? "bad" : "") : "ok";
+    return (i?`<span class="arrow">→</span>`:"") +
+      `<div class="stage ${stale?"stale":""}">
+         <div class="nm"><span class="dot ${dot}"></span>${c.label}</div>
+         <div class="v">${body}</div>
+         <div class="hz">${hz(m)}</div>
+       </div>`;
+  }).join("");
+
+  // A missing stage is the single most common integration failure here, so
+  // name it explicitly rather than leaving a dim card to be noticed.
+  const dead = CHAIN.filter(c=>{const m=meta(snap,c.topic);return !m||m.count===0;});
+  $("chainnote").textContent = dead.length
+    ? "NEVER PUBLISHED: " + dead.map(d=>d.label).join(", ")
+    : "";
+}
+
+/* ---------------- scan canvas ---------------- */
+function renderScan(snap){
+  const cv = $("scan"), ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height, cx = W/2, cy = H/2;
+  const R = Math.min(W,H)/2 - 14;
+  const px = m => Math.min(m, PLOT_MAX_M) / PLOT_MAX_M * R;
+  // Screen mapping: robot +x (forward) is UP, +y (left) is LEFT.
+  const pt = (r,a) => [cx - px(r)*Math.sin(a), cy - px(r)*Math.cos(a)];
+
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle = "#0a0e14"; ctx.fillRect(0,0,W,H);
+
+  // range rings
+  ctx.strokeStyle = "#1c2530"; ctx.lineWidth = 1;
+  ctx.font = "10px ui-monospace,monospace"; ctx.fillStyle = "#4a5563";
+  for(let m=1;m<=PLOT_MAX_M;m++){
+    ctx.beginPath(); ctx.arc(cx,cy,px(m),0,7); ctx.stroke();
+    ctx.fillText(m+"m", cx+4, cy-px(m)-3);
+  }
+  // safety zones
+  for(const [r,col] of [[SLOW_ZONE_M,"rgba(210,153,34,.13)"],[STOP_ZONE_M,"rgba(248,81,73,.17)"]]){
+    ctx.beginPath(); ctx.arc(cx,cy,px(r),0,7); ctx.fillStyle=col; ctx.fill();
+  }
+  // forward 180° wedge — the only arc the policy can see
+  ctx.beginPath(); ctx.moveTo(cx,cy);
+  ctx.arc(cx,cy,R,-Math.PI,0); ctx.closePath();
+  ctx.fillStyle="rgba(88,166,255,.045)"; ctx.fill();
+
+  // raw scan
+  const raw = val(snap,"/scan");
+  if(raw && raw.ranges){
+    ctx.fillStyle = "#3a4653";
+    raw.ranges.forEach((r,i)=>{
+      if(r===null||r<=0) return;
+      const [x,y] = pt(r, raw.angle_min + i*raw.angle_increment);
+      ctx.fillRect(x-1.1,y-1.1,2.2,2.2);
+    });
+  }
+  // the 32 beams
+  const ncp = val(snap,"/ncp/scan");
+  if(ncp && ncp.ranges){
+    ctx.strokeStyle = "rgba(88,166,255,.5)"; ctx.lineWidth = 1.6;
+    ctx.fillStyle = "#58a6ff";
+    ncp.ranges.forEach((r,i)=>{
+      if(r===null) return;
+      const a = ncp.angle_min + i*ncp.angle_increment;
+      const [x,y] = pt(r,a);
+      ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(x,y); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x,y,3,0,7); ctx.fill();
+    });
+  }
+  // goal bearing
+  const dbg = val(snap,"/ncp_debug");
+  if(dbg && dbg.goal_local_m){
+    const [gx,gy] = dbg.goal_local_m;
+    const a = Math.atan2(gy,gx), d = Math.hypot(gx,gy);
+    const [x,y] = pt(Math.min(d,PLOT_MAX_M*0.94), a);
+    ctx.strokeStyle="#f0883e"; ctx.lineWidth=2.5; ctx.setLineDash([7,5]);
+    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(x,y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle="#f0883e"; ctx.beginPath(); ctx.arc(x,y,5.5,0,7); ctx.fill();
+    ctx.fillStyle="#f0883e"; ctx.font="12px ui-monospace,monospace";
+    ctx.fillText(d.toFixed(2)+" m", x+9, y+4);
+  }
+  // commanded velocity vector
+  const cmd = val(snap,"/cmd_vel");
+  if(cmd && (Math.abs(cmd.vx)>1e-4 || Math.abs(cmd.wz)>1e-4)){
+    const len = Math.min(Math.abs(cmd.vx)/0.3, 1) * R * 0.32 * Math.sign(cmd.vx||1);
+    ctx.strokeStyle="#3fb950"; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx, cy-len); ctx.stroke();
+    // yaw arc
+    if(Math.abs(cmd.wz)>1e-4){
+      ctx.beginPath();
+      ctx.arc(cx,cy,34,-Math.PI/2, -Math.PI/2 - Math.min(Math.abs(cmd.wz)/0.8,1)*1.2*Math.sign(cmd.wz), cmd.wz>0);
+      ctx.stroke();
+    }
+  }
+  // robot
+  ctx.fillStyle="#e6edf3";
+  ctx.beginPath(); ctx.moveTo(cx,cy-9); ctx.lineTo(cx-6,cy+6); ctx.lineTo(cx+6,cy+6);
+  ctx.closePath(); ctx.fill();
+}
+
+/* ---------------- safety ---------------- */
+function renderSafety(snap){
+  const s = val(snap,"/safety/status");
+  const el = $("safestate");
+  const name = s ? s.state_name : "NONE";
+  el.textContent = s ? name : "NO STATUS";
+  el.className = "state " + name;
+  $("safereason").textContent = s ? s.reason : "—";
+  $("safemin").textContent = s
+    ? (s.min_range===null ? "no perception" : num(s.min_range,3)+" m") : "—";
+  $("safeclamp").textContent = s ? (s.clamping_active ? "ACTIVE" : "no") : "—";
+}
+
+/* ---------------- command table ---------------- */
+function renderCmd(snap){
+  const rows = [
+    ["policy raw (NCP)", (()=>{const d=val(snap,"/ncp_debug");
+       return d&&d.action?{vx:d.action[0],wz:d.action[1]}:null})(), meta(snap,"/ncp_debug")],
+    ["/policy/cmd_vel", val(snap,"/policy/cmd_vel"), meta(snap,"/policy/cmd_vel")],
+    ["/teleop/cmd_vel", val(snap,"/teleop/cmd_vel"), meta(snap,"/teleop/cmd_vel")],
+    ["/cmd_vel (out)",  val(snap,"/cmd_vel"),        meta(snap,"/cmd_vel")],
+  ];
+  $("cmdtbl").innerHTML = rows.map(([label,v,m])=>
+    `<tr><td>${label}</td><td>${v?num(v.vx,3):"—"}</td>
+     <td>${v?num(v.wz,3):"—"}</td><td style="color:var(--faint)">${hz(m)}</td></tr>`
+  ).join("");
+}
+
+/* ---------------- observation ---------------- */
+function renderObs(snap){
+  const d = val(snap,"/ncp_debug");
+  const el = $("obs");
+  if(!d || !d.obs){
+    el.innerHTML = "";
+    $("obsnote").textContent = d && d.fault
+      ? "No observation this tick — policy_node fault: " + d.fault
+      : "No observation yet. policy_node publishes one only on a fault-free tick.";
+    return;
+  }
+  // Each value is in [-1,1]-ish; draw from a mid-line so sign is visible.
+  el.innerHTML = d.obs.map((v,i)=>{
+    const clamped = Math.max(-1.2, Math.min(1.2, v));
+    const h = (clamped + 1.2) / 2.4 * 100;
+    const col = i<32 ? (v<-0.5 ? "var(--bad)" : v<0 ? "var(--warn)" : "var(--accent)")
+              : i<34 ? "var(--goal)" : "var(--accent2)";
+    return `<b style="height:${h.toFixed(1)}%;background:${col}" title="obs[${i}] = ${v}"></b>`;
+  }).join("");
+  $("obsnote").textContent =
+    `36 dims · lidar min ${num(Math.min(...d.obs.slice(0,32)),3)} · `+
+    `goal (${num(d.obs[32],3)}, ${num(d.obs[33],3)}) · `+
+    `prev action (${num(d.obs[34],3)}, ${num(d.obs[35],3)})`;
+}
+
+/* ---------------- wheels ---------------- */
+function renderWheels(snap){
+  const b = val(snap,"/base/debug");
+  if(!b){ $("wheels").innerHTML =
+    `<tr><td colspan="8" style="color:var(--faint)">/base/debug not publishing</td></tr>`;
+    $("basenote").textContent=""; return; }
+  $("wheels").innerHTML = b.wheels.map((w,i)=>{
+    const flags = [
+      w.sign_fault ? `<span class="flag sign">SIGN FAULT</span>` : "",
+      w.stalled    ? `<span class="flag stall">stalled</span>` : "",
+      w.saturated  ? `<span class="flag sat">saturated</span>` : "",
+      !w.feedback_valid ? `<span class="flag nofb">no fb</span>` : "",
+    ].join("");
+    const err = w.measured_mps - w.target_mps;
+    return `<tr>
+      <td>${WHEEL_NAMES[i]}</td>
+      <td>${num(w.target_mps,3)}</td>
+      <td>${num(w.measured_mps,3)}</td>
+      <td style="color:${Math.abs(err)>0.03?"var(--warn)":"var(--faint)"}">${num(err,3)}</td>
+      <td style="color:var(--dim)">${num(w.feedforward_pwm,1)}</td>
+      <td style="color:var(--dim)">${num(w.integral_pwm,1)}</td>
+      <td>${w.applied_pwm}</td>
+      <td>${flags||"<span style='color:var(--faint)'>—</span>"}</td></tr>`;
+  }).join("");
+  const bits = [b.control_mode];
+  if(b.dry_run) bits.push("DRY RUN — zero PWM is being written whatever the table says");
+  if(b.command_stale) bits.push("command stale — no /cmd_vel within the timeout");
+  $("basenote").textContent = bits.join(" · ");
+}
+
+/* ---------------- topic health ---------------- */
+function renderRates(snap){
+  const names = Object.keys(snap.topics||{}).sort();
+  $("rates").innerHTML =
+    `<div class="h">topic</div><div class="h n">hz</div>
+     <div class="h n">exp</div><div class="h n">jitter</div>` +
+    names.map(n=>{
+      const t = snap.topics[n];
+      const cls = t.stale ? "stale" : "";
+      const age = t.count===0 ? "never" : (t.hz!==null?t.hz.toFixed(1):"—");
+      return `<div class="${cls}">${n}</div>
+        <div class="n ${cls}">${age}</div>
+        <div class="n" style="color:var(--faint)">${t.expected_hz??"—"}</div>
+        <div class="n" style="color:var(--faint)">${t.jitter_ms!==null&&t.jitter_ms!==undefined?t.jitter_ms.toFixed(1)+"ms":"—"}</div>`;
+    }).join("");
+}
+
+/* ---------------- header ---------------- */
+function renderHeader(snap){
+  const v = val(snap,"/voltage");
+  $("batt").textContent = v ? v.volts.toFixed(2)+" V" : "— V";
+  $("battdot").className = "dot " + (v ? (v.level==="good"?"ok":v.level==="low"?"warn":"bad") : "");
+  $("uptime").textContent = snap.uptime_s + "s";
+  const d = val(snap,"/ncp_debug");
+  $("ckpt").textContent = d
+    ? (d.weights_sha256 ? "checkpoint " + d.weights_sha256 : "RANDOM WEIGHTS")
+    : "checkpoint —";
+  $("ckpt").style.color = d && !d.weights_sha256 ? "var(--warn)" : "";
+
+  const en = snap.controls_enabled, svc = snap.services||{};
+  $("killbtn").disabled   = !en || !svc.kill;
+  $("resetbtn").disabled  = !en || !svc.reset;
+  $("setgoal").disabled   = !en || !svc.policy_params;
+  for(const b of document.querySelectorAll("[data-src]")) b.disabled = !en || !svc.safety_params;
+}
+
+function render(snap){
+  renderHeader(snap); renderChain(snap); renderScan(snap);
+  renderSafety(snap); renderCmd(snap); renderObs(snap);
+  renderWheels(snap); renderRates(snap);
+}
+
+/* ---------------- commands ---------------- */
+async function post(cmd, payload){
+  try{
+    const r = await fetch("/api/"+cmd, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(payload||{})
+    });
+    const j = await r.json();
+    toast(j.ok ? (j.message||cmd+" ok") : (j.error||"failed"), j.ok);
+    return j;
+  }catch(e){ toast("request failed: "+e, false); }
+}
+function toast(text, ok){
+  const el = document.createElement("div");
+  el.className = "msg " + (ok?"ok":"err");
+  el.textContent = text;
+  $("toast").appendChild(el);
+  setTimeout(()=>el.remove(), 5200);
+}
+
+$("killbtn").onclick  = () => post("kill");
+// Arming and source changes both ask first. The kill button never does:
+// a confirm dialog in front of a stop button is a hazard, not a safeguard.
+$("resetbtn").onclick = () => {
+  if(confirm("ARM the robot?\n\nThis clears the kill. If command_source is "+
+             "'policy' and the policy is publishing, the robot can move "+
+             "immediately.")) post("reset");
+};
+for(const b of document.querySelectorAll("[data-src]")){
+  b.onclick = () => {
+    const v = b.dataset.src;
+    if(confirm(`Set command_source to '${v}'?\n\nThis force-kills the robot; `+
+               `you will need to ARM again afterwards.`)) post("source",{value:v});
+  };
+}
+$("setgoal").onclick = () => post("goal",{x:+$("gx").value, y:+$("gy").value});
+
+// Stale-connection watchdog: SSE can stay open while the robot has stopped
+// sending. Without this the page would keep showing the last frame as if live.
+setInterval(()=>{
+  if(lastMsgAt && performance.now()-lastMsgAt > 2500) setConn("no data","bad");
+}, 1000);
+
+connect();
+</script>
+</body>
+</html>

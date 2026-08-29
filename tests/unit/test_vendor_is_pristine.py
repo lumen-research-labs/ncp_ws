@@ -33,9 +33,17 @@ _VENDORED = os.path.join(
 )
 
 # Recorded at vendoring time, from upstream commit
-# 0ad548c6236f2c52f8435cd58a9610604047f919. This pins the copy even where no
+# 69785c85a281f2e624db9548a7335d3fa76fe56e. This pins the copy even where no
 # upstream checkout exists, so the robot tier still catches local edits.
-_EXPECTED_SHA256 = "37c8cf2f3b57efb39e5fe9ad0487a984cba7797143f7251fc5c6788d5b7224c2"
+#
+# RE-VENDORED 2026-08-29 (was 0ad548c / sha 37c8cf2f...). The upstream actor
+# architecture CHANGED when the trained checkpoint landed: `head` went from
+# `nn.Linear(motor, 2)` to the SB3 stack `Linear-Tanh-Linear-Tanh-Linear`, and
+# `obs_mean`/`obs_var` buffers were added for the checkpoint's VecNormalize
+# statistics. weights/actor.pt is a state_dict for the NEW shape, so the old
+# copy could not load it (load_state_dict is strict -- it raised at node
+# startup rather than driving on a mismatch, which is the intended behaviour).
+_EXPECTED_SHA256 = "da3830aae93d92687f6ecd5020136055cde0c7a80fd759957136c83afeeb3b17"
 
 
 def _sha256(path: str) -> str:

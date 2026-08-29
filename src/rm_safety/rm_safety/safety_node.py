@@ -29,10 +29,18 @@ Services:
 Parameters:
     command_source        (str,   "teleop")        — active command source:
                                                      "policy" or "teleop".
-                                                     Default is "teleop" because
-                                                     no trained policy exists in
-                                                     Phase 2; switch to "policy"
-                                                     only after Phase 4 sign-off.
+                                                     Default is "teleop" so that
+                                                     bringing the stack up can
+                                                     never connect the policy to
+                                                     the base driver.
+                                                     SETTABLE AT RUNTIME (since
+                                                     2026-08-29), and every
+                                                     change force-kills, so a
+                                                     switch can only stop the
+                                                     robot, never start it. All
+                                                     other parameters here are
+                                                     read once at startup and a
+                                                     runtime set is REJECTED.
     safety_loop_rate_hz   (float, 20.0)            — control loop rate.
                                                      PROVISIONAL: 20 Hz is above
                                                      the 5 Hz prior from the
@@ -99,6 +107,7 @@ import rclpy.node
 import yaml
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import LaserScan
 from std_srvs.srv import Trigger
@@ -307,6 +316,29 @@ class SafetyNode(rclpy.node.Node):
         self.create_service(Trigger, "/safety/reset", self._reset_srv)
 
         # ------------------------------------------------------------------
+        # command_source is settable at RUNTIME, and every change force-kills.
+        #
+        # Before 2026-08-29 this parameter was read once here in __init__ with
+        # no callback, so `ros2 param set /safety_node command_source policy`
+        # printed "Set parameter successful" and changed NOTHING. That failed
+        # safe but silently, which is the worst combination to debug: the
+        # operator believes the policy is connected and the robot simply never
+        # moves, with no error anywhere.
+        #
+        # The fix could have gone either way — make it read-only so the
+        # attempt is REJECTED, or make it real. It is made real because
+        # rm_dashboard exposes source switching, and because switching source
+        # is exactly the operation you want during a policy run without
+        # tearing the whole stack down and losing the CfC's recurrent state.
+        #
+        # What makes that safe is the force-kill below: a source change can
+        # only ever STOP the robot. Handing control to the policy therefore
+        # still takes two explicit acts (set the source, then /safety/reset),
+        # which is the same two-act guarantee start_killed gives at boot.
+        # ------------------------------------------------------------------
+        self.add_on_set_parameters_callback(self._on_set_parameters)
+
+        # ------------------------------------------------------------------
         # Control loop timer — single timer drives both /cmd_vel and
         # /safety/status publishing.
         #
@@ -454,6 +486,53 @@ class SafetyNode(rclpy.node.Node):
     # ------------------------------------------------------------------
     # Service handlers
     # ------------------------------------------------------------------
+
+    def _on_set_parameters(self, params) -> SetParametersResult:
+        """Validate and apply runtime parameter changes.
+
+        Only `command_source` is settable at runtime. Everything else that
+        matters — the limits, the loop rate, the kill-state path — is read
+        once at startup by design: a safety layer whose clamps can be widened
+        by a `ros2 param set` is not a safety layer. Those are therefore
+        REJECTED here rather than silently ignored, so an attempt to change
+        one fails visibly at the caller.
+
+        A `command_source` change is applied immediately AND force-kills. The
+        kill is not a precaution about the switch itself; it is what makes the
+        switch unable to start motion. Going teleop -> policy while unkilled
+        would otherwise hand a live robot to the policy in one step, with no
+        operator act in between.
+        """
+        for param in params:
+            if param.name != "command_source":
+                return SetParametersResult(
+                    successful=False,
+                    reason=(
+                        f"{param.name!r} is not settable at runtime; it is "
+                        f"read once at startup. Restart the node to change it."
+                    ),
+                )
+            value = param.value
+            if value not in ("policy", "teleop"):
+                return SetParametersResult(
+                    successful=False,
+                    reason=(
+                        f"command_source must be 'policy' or 'teleop', "
+                        f"got {value!r}"
+                    ),
+                )
+            if value == self._command_source:
+                continue  # no-op: do not kill a running robot for nothing
+
+            previous = self._command_source
+            self._command_source = value
+            self._is_killed = True
+            self._write_kill_state(True)
+            self.get_logger().warn(
+                f"safety_node: command_source {previous!r} -> {value!r}; "
+                f"KILLED as a consequence. Call /safety/reset to arm."
+            )
+        return SetParametersResult(successful=True)
 
     def _kill_srv(
         self, request: Trigger.Request, response: Trigger.Response

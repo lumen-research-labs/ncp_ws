@@ -57,10 +57,16 @@ Parameters:  cmd_vel_topic    (str, "/policy/cmd_vel") — MUST NOT be /cmd_vel;
                               refused at startup if set to /cmd_vel.
 Parameters:  debug_topic      (str, "/ncp_debug")
 Parameters:  goal_x           (float, 2.5) — metres, robot-frame offset from
-                              the start pose, per interface.yaml goal_default_m
+                              the start pose, per interface.yaml goal_default_m.
+                              SETTABLE AT RUNTIME: a set re-fixes the goal from
+                              the CURRENT pose (always, even to an unchanged
+                              value) and resets the recurrent state.
 Parameters:  goal_y           (float, 0.0) — metres, ditto
 Parameters:  weights          (str, "") — path to a trained actor state_dict;
-                              "" means random weights (no checkpoint applied)
+                              "" means random weights (no checkpoint applied).
+                              Read once at startup; a runtime set is REJECTED.
+                              Its sha256 is logged at startup and published on
+                              /ncp_debug, so a run is traceable to exact bytes.
 Parameters:  interface_config_path (str, <repo-relative default>) — path to
                               config/interface.yaml
 Parameters:  safety_limits_path    (str, <repo-relative default>) — path to
@@ -97,12 +103,13 @@ import json
 import math
 import pathlib
 import time
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 import rclpy
 import rclpy.node
 import yaml
 from geometry_msgs.msg import Twist
+from rcl_interfaces.msg import SetParametersResult
 from nav_msgs.msg import Odometry
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
@@ -160,6 +167,14 @@ _DEFAULT_GOAL_Y_M: float = 0.0
 # Default weights path: "" means random weights (no trained checkpoint
 # applied). Matches policy_runner.PolicyRunner's own default.
 _DEFAULT_WEIGHTS_PATH: str = ""
+
+# Where the goal block sits in the 36-dim observation, and the constant its
+# normalization divides by. Both are fixed by the trained checkpoint
+# (config/interface.yaml observation.layout: 32 lidar, then goal_local, then
+# previous_action; `normalization: "xy / 5.0 - 1.0"`). Used ONLY to invert the
+# normalization for the debug stream — never to build the vector.
+_GOAL_SLICE_START: int = 32
+_GOAL_NORM_SCALE_M: float = 5.0
 
 # Throttle period (seconds) for repeated warning logs so a sustained fault
 # does not flood the log at the full control rate.
@@ -335,12 +350,28 @@ class PolicyNode(rclpy.node.Node):
         loop_period = 1.0 / self._control_rate_hz
         self._control_timer = self.create_timer(loop_period, self._control_loop)
 
+        # Runtime re-targeting. Registered AFTER the goal state and the runner
+        # exist, since the callback touches both.
+        self.add_on_set_parameters_callback(self._on_set_parameters)
+
         self.get_logger().info(
             f"policy_node ready: cmd_vel_topic={cmd_vel_topic!r}, "
             f"rate={self._control_rate_hz} Hz, weights={weights_path or '<random>'!r}, "
             f"goal_offset=({self._goal_offset_x}, {self._goal_offset_y}) m — "
             f"NOT YET APPLIED (undefined until the first /odom message)."
         )
+        # Provenance, logged once at full length. The short form goes out on
+        # /ncp_debug every tick; this is the line to grep when asking months
+        # later which bytes produced a recorded run.
+        if self._runner.weights_sha256:
+            self.get_logger().info(
+                f"policy_node checkpoint sha256={self._runner.weights_sha256}"
+            )
+        else:
+            self.get_logger().warn(
+                "policy_node is running RANDOM WEIGHTS — no checkpoint was "
+                "loaded. Any behaviour observed is the PLUMBING, not a policy."
+            )
 
     # ------------------------------------------------------------------
     # Parameter helpers
@@ -372,6 +403,73 @@ class PolicyNode(rclpy.node.Node):
     # loop does all the decision-making, matching rm_safety.safety_node's
     # split between I/O callbacks and the timer-driven evaluation.
     # ------------------------------------------------------------------
+
+    def _on_set_parameters(self, params) -> SetParametersResult:
+        """Runtime re-targeting: setting `goal_x`/`goal_y` re-fixes the goal
+        from the robot's CURRENT pose.
+
+        Only the goal offsets are settable. Topics, the weights path and the
+        config paths are structural — changing them at runtime would mean a
+        half-reconfigured node, so a set is REJECTED rather than accepted and
+        ignored (the failure mode this project already hit once with
+        rm_safety's command_source).
+
+        Semantics worth being explicit about: a set ALWAYS re-fixes the goal,
+        even to the value it already had. Writing a parameter is an explicit
+        operator act, and "re-target 2.5 m ahead of wherever I am now" is the
+        thing that act means during a debug run — treating an unchanged value
+        as a no-op would make the obvious way to re-issue a goal do nothing.
+
+        The recurrent state is reset on every re-target. A CfC carries its
+        history, and the objective changing underneath it is exactly the
+        discontinuity `PolicyRunner.reset()` exists for: without the reset the
+        network would be steering with a hidden state accumulated toward a
+        goal that no longer exists.
+        """
+        offsets = {}
+        for param in params:
+            if param.name not in ("goal_x", "goal_y"):
+                return SetParametersResult(
+                    successful=False,
+                    reason=(
+                        f"{param.name!r} is not settable at runtime; it is "
+                        f"read once at startup. Restart the node to change it."
+                    ),
+                )
+            value = float(param.value)
+            if not math.isfinite(value):
+                return SetParametersResult(
+                    successful=False, reason=f"{param.name} must be finite"
+                )
+            offsets[param.name] = value
+
+        self._goal_offset_x = offsets.get("goal_x", self._goal_offset_x)
+        self._goal_offset_y = offsets.get("goal_y", self._goal_offset_y)
+
+        if self._odom_stamp is None:
+            # No pose yet, so there is nothing to re-fix against. The offsets
+            # are stored and the normal first-/odom path will apply them —
+            # this is not an error, and it must NOT invent a pose.
+            self.get_logger().warn(
+                "policy_node: goal offset updated to "
+                f"({self._goal_offset_x}, {self._goal_offset_y}) but no /odom "
+                "has arrived — goal stays UNDEFINED until it does."
+            )
+            return SetParametersResult(successful=True)
+
+        dx, dy = _rotate_2d(
+            self._goal_offset_x, self._goal_offset_y, self._robot_yaw
+        )
+        self._goal_world_x = self._robot_x + dx
+        self._goal_world_y = self._robot_y + dy
+        self._runner.reset()
+        self.get_logger().info(
+            f"policy_node: re-targeted to offset "
+            f"({self._goal_offset_x}, {self._goal_offset_y}) m from the current "
+            f"pose — goal now ({self._goal_world_x:.3f}, "
+            f"{self._goal_world_y:.3f}) in odom; recurrent state reset."
+        )
+        return SetParametersResult(successful=True)
 
     def _scan_cb(self, msg: LaserScan) -> None:
         self._scan_ranges = list(msg.ranges)
@@ -431,10 +529,22 @@ class PolicyNode(rclpy.node.Node):
         *,
         fault: Optional[str],
         action: Optional[Tuple[float, float]],
+        obs: Optional[Sequence[float]] = None,
+        goal_local: Optional[Tuple[float, float]] = None,
     ) -> None:
         """Publish a one-line JSON status, mirroring the upstream /ncp_debug
         convention, so "is it seeing anything?" is answerable from the
-        terminal without decoding Twist messages."""
+        terminal without decoding Twist messages.
+
+        This is also the ONLY place the observation vector the network
+        actually consumed becomes visible outside this process. rm_dashboard
+        renders it from here rather than rebuilding it, because a second
+        implementation of the observation build would be a second thing that
+        can be wrong — and it would be wrong silently, showing a plausible
+        vector that is not the one the policy saw. `obs` and `goal_local` are
+        None on every fault path, which is correct: on a fault no observation
+        was consumed, and emitting the previous one would misreport the tick.
+        """
         min_range = None
         if self._scan_ranges:
             finite = [r for r in self._scan_ranges if math.isfinite(r) and r > 0.0]
@@ -451,6 +561,31 @@ class PolicyNode(rclpy.node.Node):
                 else None
             ),
             "weights": self._runner.weights_path or None,
+            # Short hash is enough to tell two checkpoints apart at a glance
+            # while keeping this message small at 5 Hz; the full hash is in
+            # the startup log line. "" (random weights) publishes as None so
+            # an untrained run is unmistakable rather than looking like a
+            # missing field.
+            "weights_sha256": (self._runner.weights_sha256 or None) and
+                              self._runner.weights_sha256[:12],
+            "obs": [round(float(x), 4) for x in obs] if obs is not None else None,
+            "goal_local_m": (
+                [round(goal_local[0], 3), round(goal_local[1], 3)]
+                if goal_local is not None
+                else None
+            ),
+            "pose": (
+                [round(self._robot_x, 3), round(self._robot_y, 3),
+                 round(self._robot_yaw, 4)]
+                if self._goal_world_x is not None
+                else None
+            ),
+            "goal_world_m": (
+                [round(self._goal_world_x, 3), round(self._goal_world_y, 3)]
+                if self._goal_world_x is not None
+                and self._goal_world_y is not None
+                else None
+            ),
         }
         self._debug_pub.publish(String(data=json.dumps(status)))
 
@@ -595,7 +730,20 @@ class PolicyNode(rclpy.node.Node):
         self._prev_action_v = float(v)
         self._prev_action_w = float(w)
 
-        self._publish_debug(fault=None, action=(v, w))
+        # Recover the robot-frame goal by INVERTING the observation's own
+        # normalization (`xy / 5.0 - 1.0`, interface.yaml goal_local) rather
+        # than recomputing local_goal() here. Two reasons: it cannot drift out
+        # of step with what the network consumed, and if it ever disagreed
+        # with the pose, the vector is the truth — that is what was fed in.
+        self._publish_debug(
+            fault=None,
+            action=(v, w),
+            obs=obs_result.obs,
+            goal_local=(
+                (float(obs_result.obs[_GOAL_SLICE_START]) + 1.0) * _GOAL_NORM_SCALE_M,
+                (float(obs_result.obs[_GOAL_SLICE_START + 1]) + 1.0) * _GOAL_NORM_SCALE_M,
+            ),
+        )
 
     @staticmethod
     def _age_ms(stamp: Optional[float], now: float) -> float:
