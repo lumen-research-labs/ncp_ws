@@ -474,3 +474,129 @@ def test_config_may_omit_reverse_keys():
                                   if "gain_pwm_per_mps_rev" in p else None),
         )
         assert m.to_pwm(0.1) != 0, name
+
+
+# ---- breakaway kick -------------------------------------------------------
+
+def _sticky() -> WheelPwmModel:
+    """front-right's measured shape: runs at ~30+132v, but needs 60 to start."""
+    return WheelPwmModel(dead_pwm=30.2, gain_pwm_per_mps=132.1,
+                         v_min_mps=0.02, max_pwm=95,
+                         dead_pwm_rev=27.7, gain_pwm_per_mps_rev=145.4,
+                         breakaway_pwm=60.0, breakaway_pwm_rev=55.0)
+
+
+def _sticky_ctrl() -> WheelController:
+    return WheelController(model=_sticky(), gains=PiGains(kp=60.0, ki=80.0),
+                           guards=Guards())
+
+
+def test_no_kick_without_a_configured_breakaway():
+    """Three of the four wheels must be completely unaffected."""
+    ctrl = make()          # no breakaway_pwm
+    for _ in range(60):
+        out = ctrl.update(0.15, 0.0, DT, feedback_valid=True, applied_pwm=20)
+    assert not out.kicking
+    assert not out.kick_exhausted
+
+
+def test_stalled_sticky_wheel_gets_kicked_to_breakaway():
+    """0.05 m/s: the loop asks ~40, well under the 60 breakaway.
+
+    Above ~0.14 m/s the proportional term already carries the output past
+    breakaway on its own, so the kick is a LOW-SPEED fix — which is exactly
+    the regime the debug policy's spins live in.
+    """
+    ctrl = _sticky_ctrl()
+    saw_kick = False
+    for _ in range(ctrl.guards.stall_ticks + 2):
+        out = ctrl.update(0.05, 0.0, DT, feedback_valid=True, applied_pwm=35)
+        if out.kicking:
+            saw_kick = True
+            assert abs(out.pwm) >= 60, "kick must reach the breakaway PWM"
+    assert saw_kick, "a stalled sticky wheel was never kicked"
+
+
+def test_kick_follows_the_commanded_direction():
+    ctrl = _sticky_ctrl()
+    for _ in range(ctrl.guards.stall_ticks + 2):
+        out = ctrl.update(-0.05, 0.0, DT, feedback_valid=True, applied_pwm=-35)
+    assert out.pwm < 0, "reverse command must kick in reverse"
+    assert abs(out.pwm) >= 55
+
+
+def test_kick_stops_once_the_wheel_turns():
+    ctrl = _sticky_ctrl()
+    for _ in range(ctrl.guards.stall_ticks + 2):
+        ctrl.update(0.05, 0.0, DT, feedback_valid=True, applied_pwm=35)
+    out = ctrl.update(0.05, 0.05, DT, feedback_valid=True, applied_pwm=60)
+    assert not out.kicking
+    assert abs(out.pwm) < 60, "should fall back to the running model"
+
+
+def test_kick_is_bounded_and_gives_up():
+    """A blocked motor must NOT be held at breakaway PWM indefinitely."""
+    ctrl = _sticky_ctrl()
+    kick_ticks = 0
+    exhausted = False
+    for _ in range(600):                       # 30 s at 20 Hz
+        out = ctrl.update(0.05, 0.0, DT, feedback_valid=True, applied_pwm=35)
+        if out.kicking:
+            kick_ticks += 1
+        if out.kick_exhausted:
+            exhausted = True
+    assert exhausted, "never gave up on a wheel that never moved"
+    g = ctrl.guards
+    assert kick_ticks <= g.kick_ticks * g.max_kick_attempts, (
+        f"kicked for {kick_ticks} ticks, cap is "
+        f"{g.kick_ticks * g.max_kick_attempts}"
+    )
+    # And once exhausted it must stop kicking for good.
+    for _ in range(200):
+        out = ctrl.update(0.05, 0.0, DT, feedback_valid=True, applied_pwm=35)
+        assert not out.kicking
+
+
+def test_kick_attempts_reset_after_the_wheel_moves():
+    ctrl = _sticky_ctrl()
+    for _ in range(600):
+        ctrl.update(0.05, 0.0, DT, feedback_valid=True, applied_pwm=35)
+    assert ctrl.update(0.05, 0.0, DT, True, applied_pwm=35).kick_exhausted
+    # It turns again (operator freed it, or it caught) — budget must refill.
+    for _ in range(10):
+        ctrl.update(0.05, 0.05, DT, feedback_valid=True, applied_pwm=60)
+    saw = False
+    for _ in range(ctrl.guards.stall_ticks + 2):
+        if ctrl.update(0.05, 0.0, DT, True, applied_pwm=35).kicking:
+            saw = True
+    assert saw, "attempt budget did not reset after the wheel moved"
+
+
+def test_kick_never_reduces_the_output():
+    """At high speed the loop already asks for more than breakaway."""
+    ctrl = _sticky_ctrl()
+    for _ in range(ctrl.guards.stall_ticks + 2):
+        out = ctrl.update(0.5, 0.0, DT, feedback_valid=True, applied_pwm=90)
+    assert abs(out.pwm) >= 60
+
+
+def test_kick_does_not_grow_the_integrator():
+    """The kick is an open-loop nudge, not extra controller authority.
+
+    If it fed the integrator, a sticky wheel would wind up exactly the way
+    the firmware did — which is the failure this package exists to escape.
+    """
+    ctrl = _sticky_ctrl()
+    for _ in range(ctrl.guards.stall_ticks):
+        ctrl.update(0.05, 0.0, DT, feedback_valid=True, applied_pwm=35)
+    # The stall guard needs stall_ticks to confirm, so a little integral
+    # accumulates first. What matters is that it stops there and the kick
+    # never adds to it.
+    frozen = ctrl._integral
+    for _ in range(400):
+        out = ctrl.update(0.05, 0.0, DT, feedback_valid=True, applied_pwm=35)
+    assert out.integral_pwm == pytest.approx(frozen), (
+        "integrator grew during the kick — it must be an open-loop nudge, "
+        "not extra controller authority"
+    )
+    assert abs(frozen) < ctrl.gains.i_max_pwm

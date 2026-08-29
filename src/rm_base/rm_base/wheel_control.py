@@ -89,6 +89,27 @@ class Guards:
     # static property of the wiring — there is nothing to learn from a wheel
     # mid-reversal, so do not judge it then at all.
     sign_settle_ticks: int = 10
+    # ---- breakaway kick ---------------------------------------------------
+    # A sticky motor needs far more PWM to START than to keep going
+    # (bernard-1's front-right: ~60 to break loose, ~30 + gain to sustain).
+    # The feedforward is fitted to the RUNNING curve, so at low speeds it
+    # never reaches breakaway and the wheel simply never starts.
+    #
+    # The integrator cannot solve this and must not be asked to: the stall
+    # guard freezes it precisely so a stalled wheel cannot wind the output to
+    # the rail, which is the firmware runaway this package exists to escape.
+    # So the kick is a SEPARATE, BOUNDED, EXPLICIT action instead — a fixed
+    # number of ticks at the measured breakaway PWM, then back to the normal
+    # model, with a cooldown and a hard attempt cap.
+    #
+    # It only ever applies to a wheel with breakaway_pwm configured, and only
+    # while that wheel is commanded and reading stalled.
+    kick_ticks: int = 8           # 0.4 s at 20 Hz — enough for the slew
+                                  # limiter to walk the PWM up to breakaway
+    kick_cooldown_ticks: int = 20  # 1.0 s between attempts
+    max_kick_attempts: int = 3     # then give up until the command clears —
+                                   # a genuinely blocked motor must not be
+                                   # driven at breakaway PWM indefinitely
     # Consecutive wrong-direction ticks before the sign guard trips.
     #
     # 3 (0.15 s at 20 Hz) was far too short and latched every wheel on the
@@ -117,6 +138,12 @@ class WheelCommand:
     saturated: bool
     stalled: bool
     sign_fault: bool
+    # True on the ticks where a breakaway kick is being applied, so the caller
+    # can log it. A wheel that is kicking is also stalled by definition.
+    kicking: bool = False
+    # True once this wheel has used up max_kick_attempts without moving.
+    # Distinguishes "sticky, being helped" from "not responding at all".
+    kick_exhausted: bool = False
 
 
 @dataclass
@@ -135,6 +162,10 @@ class WheelController:
     _prev_target_sign: int = 0
     # Ticks left in the post-reversal window where the sign guard is suspended.
     _settle_ticks: int = 0
+    # Breakaway-kick state.
+    _kick_ticks_left: int = 0
+    _kick_cooldown_left: int = 0
+    _kick_attempts: int = 0
 
     # ---- state ------------------------------------------------------------
 
@@ -146,6 +177,9 @@ class WheelController:
         self._sign_latched = False
         self._prev_target_sign = 0
         self._settle_ticks = 0
+        self._kick_ticks_left = 0
+        self._kick_cooldown_left = 0
+        self._kick_attempts = 0
 
     @property
     def sign_fault_latched(self) -> bool:
@@ -280,10 +314,72 @@ class WheelController:
             self._integral = _clamp_abs(self._integral, self.gains.i_max_pwm)
 
         pwm = self._clamp(feedforward + self._integral + self.gains.kp * error)
+
+        kicking, exhausted = self._breakaway_kick(target_mps, stalled)
+        if kicking:
+            # Deliberately REPLACES the loop output rather than adding to it:
+            # the kick is an open-loop nudge of known size, not extra
+            # controller authority. The integrator is already frozen by the
+            # stall guard, so nothing accumulates during a kick.
+            breakaway = self.model.breakaway_for(target_mps)
+            sign = 1.0 if target_mps > 0.0 else -1.0
+            kicked = self._clamp(sign * abs(breakaway))
+            # Never let the kick REDUCE the output — if the loop already asks
+            # for more than breakaway, the wheel is not short of push.
+            if abs(kicked) > abs(pwm):
+                pwm = kicked
+            else:
+                kicking = False
+
         return WheelCommand(
             pwm, feedforward, self._integral, error,
             abs(pwm) >= self.model.max_pwm, stalled, False,
+            kicking, exhausted,
         )
+
+    def _breakaway_kick(self, target_mps: float, stalled: bool) -> tuple[bool, bool]:
+        """Run the kick state machine. Returns (kicking, exhausted).
+
+        Only ever fires for a wheel with a measured breakaway_pwm, and only
+        while that wheel is commanded and reading stalled. Bounded three ways:
+        each attempt lasts kick_ticks, attempts are separated by
+        kick_cooldown_ticks, and there are at most max_kick_attempts before it
+        gives up — because a wheel that will not move after three kicks is
+        blocked or broken, and holding a blocked motor at breakaway PWM is how
+        it burns out.
+        """
+        if self.model.breakaway_for(target_mps) is None:
+            return False, False
+
+        if not stalled:
+            # It is turning: clear the attempt budget so the next genuine
+            # standstill starts fresh.
+            self._kick_ticks_left = 0
+            self._kick_cooldown_left = 0
+            self._kick_attempts = 0
+            return False, False
+
+        if self._kick_ticks_left > 0:
+            self._kick_ticks_left -= 1
+            if self._kick_ticks_left == 0:
+                self._kick_cooldown_left = self.guards.kick_cooldown_ticks
+            return True, False
+
+        if self._kick_cooldown_left > 0:
+            self._kick_cooldown_left -= 1
+            return False, False
+
+        if self._kick_attempts >= self.guards.max_kick_attempts:
+            return False, True
+
+        self._kick_attempts += 1
+        # kick_ticks - 1: THIS tick is the first of the attempt. Setting the
+        # full count here would spend kick_ticks + 1 ticks per attempt and
+        # overrun the cap that bounds how long a blocked motor is driven.
+        self._kick_ticks_left = max(self.guards.kick_ticks - 1, 0)
+        if self._kick_ticks_left == 0:
+            self._kick_cooldown_left = self.guards.kick_cooldown_ticks
+        return True, False
 
     def _clamp(self, value: float) -> int:
         return int(round(_clamp_abs(value, float(self.model.max_pwm))))

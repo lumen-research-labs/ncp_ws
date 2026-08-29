@@ -55,6 +55,14 @@ class WheelPwmModel:
     # an uncalibrated wheel exactly symmetric. See the module docstring.
     dead_pwm_rev: Optional[float] = None
     gain_pwm_per_mps_rev: Optional[float] = None
+    # PWM needed to BREAK A STOPPED WHEEL LOOSE, which for a sticky motor is
+    # much higher than the PWM needed to keep it turning. None (the default)
+    # means this wheel has no stiction problem and needs no kick — see
+    # wheel_control's breakaway kick. Measured wheels-up with the motor driven
+    # directly (scripts/diagnostics/fr_threshold.py); it is NOT the dead_pwm,
+    # and setting it as dead_pwm would over-drive the wheel at every speed.
+    breakaway_pwm: Optional[float] = None
+    breakaway_pwm_rev: Optional[float] = None
 
     def _params(self, reverse: bool) -> tuple[float, float]:
         """(dead_pwm, gain) for the requested direction."""
@@ -67,6 +75,16 @@ class WheelPwmModel:
             else self.gain_pwm_per_mps_rev
         )
         return dead, gain
+
+    def breakaway_for(self, v_mps: float) -> Optional[float]:
+        """Breakaway PWM for this direction, or None if not configured.
+
+        Falls back to the forward value when only that is set, so a wheel with
+        a single measured breakaway still gets a kick in both directions.
+        """
+        if v_mps < 0.0 and self.breakaway_pwm_rev is not None:
+            return self.breakaway_pwm_rev
+        return self.breakaway_pwm
 
     def dead_pwm_for(self, v_mps: float) -> float:
         """The dead-band that applies when driving in v_mps's direction.

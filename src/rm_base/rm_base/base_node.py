@@ -244,6 +244,15 @@ class BaseNode(rclpy.node.Node):
                     float(p["gain_pwm_per_mps_rev"])
                     if "gain_pwm_per_mps_rev" in p else None
                 ),
+                # Absent means this wheel has no stiction problem and gets no
+                # breakaway kick — the default for three of the four.
+                breakaway_pwm=(
+                    float(p["breakaway_pwm"]) if "breakaway_pwm" in p else None
+                ),
+                breakaway_pwm_rev=(
+                    float(p["breakaway_pwm_rev"])
+                    if "breakaway_pwm_rev" in p else None
+                ),
             )
         return out
 
@@ -394,6 +403,20 @@ class BaseNode(rclpy.node.Node):
                     "This is the firmware runaway signature; STOP and "
                     "re-measure the encoder sign before driving.",
                     throttle_duration_sec=5.0,
+                )
+            elif cmd.kick_exhausted:
+                self.get_logger().error(
+                    f"{_WHEELS[i]}: still not turning after "
+                    f"{self._controllers[i].guards.max_kick_attempts} "
+                    "breakaway kicks — giving up on this wheel until the "
+                    "command clears. It is blocked, unpowered, or the motor "
+                    "has failed; it is NOT being held at breakaway PWM.",
+                    throttle_duration_sec=5.0,
+                )
+            elif cmd.kicking:
+                self.get_logger().warn(
+                    f"{_WHEELS[i]}: stalled — applying breakaway kick.",
+                    throttle_duration_sec=2.0,
                 )
             elif cmd.stalled:
                 self.get_logger().warn(

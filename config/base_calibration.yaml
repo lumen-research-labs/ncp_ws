@@ -213,6 +213,22 @@ wheels:
     gain_pwm_per_mps_rev: 145.4
     v_min_mps: 0.02
     max_pwm: 95
+    # Breakaway kick, ENABLED FOR THIS WHEEL ONLY. The other three have no
+    # stiction problem and get no kick — omitting these keys disables it.
+    #
+    # When this wheel is commanded and reads stalled, rm_base applies this PWM
+    # for a bounded burst instead of the running model, then falls back.
+    # Bounded three ways (wheel_control.Guards): 8 ticks per attempt, 20 ticks
+    # of cooldown between attempts, and 3 attempts before it gives up until
+    # the command clears. A wheel that will not move after three kicks is
+    # blocked or broken, and holding a blocked motor at breakaway PWM is how
+    # it burns out.
+    #
+    # Needed below roughly 0.14 m/s. Above that the loop's proportional term
+    # already carries the output past breakaway on its own (at 0.17 m/s it
+    # asks ~63 against the 60 threshold), so the kick never fires.
+    breakaway_pwm: 60.0
+    breakaway_pwm_rev: 55.0
     # This wheel needs more integral authority than the healthy three, and
     # its encoder only reads once it is already turning — so the stall guard
     # will fire on it during every start. That is intended: it holds
