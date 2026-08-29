@@ -47,6 +47,37 @@ Launch arguments:
     with_safety   "true" (default) also launches safety.launch.py. Set
                   "false" only when rm_safety is already running.
 
+    with_lidar    "true" (default) starts the YDLIDAR TG30 on its by-id
+                  CP2102 port. Set "false" if the lidar is already up.
+    with_base     "true" (default) starts rm_base (base.launch.py), the
+                  mecanum driver that OWNS the base-board serial port.
+    with_odom     "true" (default) starts odom.launch.py — the vendor odom
+                  integrator + madgwick + EKF, fed by rm_base's /vel_raw.
+                  Without /odom, rm_safety's staleness watchdog fires at
+                  precedence 3 (above the zone checks) and zeros EVERY
+                  command with reason "odom_stale", whatever you send.
+
+    control_mode  rm_base mode: "closed_loop" (default here — the path
+                  validated on the floor 2026-08-29) or "open_loop".
+    dry_run       "false" (default here). NOTE this differs from
+                  base.launch.py's own default of "true": bringing up the
+                  full NCP stack implies intending to drive. rm_safety still
+                  starts KILLED, and command_source still defaults to
+                  "teleop", so two explicit acts are still required.
+    calibration_path  path to config/base_calibration.yaml.
+
+Bringing the WHOLE stack up:
+    This file now starts everything ROS-side, so it is the one command. It
+    does NOT do the host-level cleanup that must happen first — killing the
+    vendor Mcnamu_driver_X3 (single-writer serial port), killing the Yahboom
+    rosmaster_main.py autostart (recurs every boot), and creating
+    /var/lib/rm_safety. Run scripts/prep_robot.sh once first.
+
+    Do NOT also run scripts/bench_up.sh: it starts its own safety, base, odom
+    and lidar, and two safety_nodes means two publishers on /cmd_vel — the
+    violation this whole design exists to prevent. bench_up.sh is for base
+    calibration work on its own; this file is for the full pipeline.
+
 Why the safety layer is not optional in practice:
     ncp_policy.ACTION_HIGH is v = 2.0 m/s / w = 3.14 rad/s, and neither
     consumer scales it down -- the trained head emits final physical units.
@@ -65,7 +96,14 @@ Failure mode:
     fault, letting each consumer's deadman stop the robot.
 
 Usage (on the robot, after colcon build + source install/setup.bash):
+    bash scripts/prep_robot.sh                      # once, first
+
+    # full stack, nothing can move (command_source defaults to teleop)
     ros2 launch rm_bringup ncp.launch.py
+
+    # full stack, policy allowed to drive — operator + kill switch present
+    ros2 launch rm_bringup ncp.launch.py command_source:=policy
+
     ros2 launch rm_bringup ncp.launch.py mode:=ncp
     ros2 launch rm_bringup ncp.launch.py consumer:=policy_node
 """
@@ -91,6 +129,34 @@ _DEFAULT_LIMITS_PATH = str(_REPO_ROOT / "config" / "safety_limits.yaml")
 
 # Sibling checkout convention, matching tests/unit/test_vendor_is_pristine.py.
 _DEFAULT_UPSTREAM_PATH = str(_REPO_ROOT.parent / "NCP-on-Rosmaster")
+
+_DEFAULT_CALIBRATION_PATH = str(_REPO_ROOT / "config" / "base_calibration.yaml")
+
+# by-id, never /dev/rplidar: that symlink races between the lidar (CP2102) and
+# the base board (CH340) across reboots and has pointed at the wrong device on
+# multiple boots. See the robot-ssh skill.
+_LIDAR_PORT = (
+    "/dev/serial/by-id/"
+    "usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0"
+)
+
+# Matches Yahboom's "4ROS" config. frame_id:=laser_link is mandatory -- the
+# driver default "laser" is not in the TF tree.
+_LIDAR_PARAMS = {
+    "port": _LIDAR_PORT,
+    "baudrate": 512000,
+    "lidar_type": 0,
+    "device_type": 0,
+    "sample_rate": 20,
+    "isSingleChannel": False,
+    "support_motor_dtr": True,
+    "reversion": True,
+    "inverted": True,
+    "range_max": 64.0,
+    "range_min": 0.01,
+    "frequency": 10.0,
+    "frame_id": "laser_link",
+}
 
 # The bridge's output. Both consumers read this, never the raw /scan.
 _NCP_SCAN_TOPIC = "/ncp/scan"
@@ -142,6 +208,12 @@ def generate_launch_description() -> LaunchDescription:
     weights = LaunchConfiguration("weights")
     with_safety = LaunchConfiguration("with_safety")
     command_source = LaunchConfiguration("command_source")
+    with_lidar = LaunchConfiguration("with_lidar")
+    with_base = LaunchConfiguration("with_base")
+    with_odom = LaunchConfiguration("with_odom")
+    control_mode = LaunchConfiguration("control_mode")
+    dry_run = LaunchConfiguration("dry_run")
+    calibration_path = LaunchConfiguration("calibration_path")
 
     # `upstream` is selected inside _upstream_process (an OpaqueFunction), so
     # only the policy_node branch needs a launch-time condition here.
@@ -182,6 +254,65 @@ def generate_launch_description() -> LaunchDescription:
             "command_source", default_value="teleop",
             description="rm_safety's active source: 'teleop' (default, policy "
                         "cannot drive) or 'policy'.",
+        ),
+        DeclareLaunchArgument(
+            "with_lidar", default_value="true",
+            description="Start the YDLIDAR TG30 on its by-id CP2102 port.",
+        ),
+        DeclareLaunchArgument(
+            "with_base", default_value="true",
+            description="Start rm_base, the mecanum driver. It OWNS the "
+                        "base-board serial port -- the vendor "
+                        "Mcnamu_driver_X3 must already be dead.",
+        ),
+        DeclareLaunchArgument(
+            "with_odom", default_value="true",
+            description="Start the odom chain. Without /odom rm_safety zeros "
+                        "every command with reason 'odom_stale'.",
+        ),
+        DeclareLaunchArgument(
+            "control_mode", default_value="closed_loop",
+            description="rm_base mode. closed_loop is the floor-validated "
+                        "path; open_loop drives PWM straight from the table.",
+        ),
+        DeclareLaunchArgument(
+            "dry_run", default_value="false",
+            description="true sends only zero PWM. Defaults FALSE here "
+                        "(unlike base.launch.py) because bringing up the full "
+                        "NCP stack implies intending to drive; rm_safety "
+                        "still starts KILLED.",
+        ),
+        DeclareLaunchArgument(
+            "calibration_path", default_value=_DEFAULT_CALIBRATION_PATH,
+            description="Path to config/base_calibration.yaml.",
+        ),
+
+        # ---- hardware layer, bottom up -------------------------------------
+        # Lidar first: the scan bridge and both consumers are useless without
+        # /scan, and rm_safety treats missing perception as a stop condition.
+        Node(
+            condition=IfCondition(with_lidar),
+            package="ydlidar_ros2_driver",
+            executable="ydlidar_ros2_driver_node",
+            name="ydlidar_ros2_driver_node",
+            output="screen",
+            parameters=[_LIDAR_PARAMS],
+        ),
+
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(str(_LAUNCH_DIR / "base.launch.py")),
+            condition=IfCondition(with_base),
+            launch_arguments={
+                "control_mode": control_mode,
+                "dry_run": dry_run,
+                "calibration_path": calibration_path,
+            }.items(),
+        ),
+
+        # Consumes rm_base's /vel_raw + /imu/data_raw, produces /odom.
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(str(_LAUNCH_DIR / "odom.launch.py")),
+            condition=IfCondition(with_odom),
         ),
 
         IncludeLaunchDescription(

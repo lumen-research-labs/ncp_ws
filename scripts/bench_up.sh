@@ -27,6 +27,11 @@
 #             wheels-up dry run previews the real command safely.
 #   --source  which topic rm_safety accepts commands from. Default policy.
 #
+# SCOPE: this is for BASE work -- calibration, wheels-up checks, driving a
+# known velocity. For the full NCP pipeline use ncp.launch.py, which now
+# starts the lidar, rm_base, the odom chain and rm_safety itself. Do NOT run
+# both: two safety_nodes means two publishers on /cmd_vel.
+#
 # Tear down with bench_down.sh (restores the vendor Mcnamu_driver_X3).
 # NOTE: no `set -u`. ROS's own setup.bash chain reads unbound variables
 # (AMENT_TRACE_SETUP_FILES and friends) and aborts the script under it.
@@ -95,20 +100,10 @@ pkill -f '[r]obot_state_publisher'
 pkill -f '[j]oint_state_publisher'
 # The vendor driver is a single-writer on the base-board port -- rm_base
 # cannot open it until this is gone. Bringup does not respawn it.
-pgrep -f '[M]cnamu_driver_X3' | xargs -r kill
-# Yahboom's factory autostart grabs the same port on every boot and makes
-# every base reading silently read zero.
-if fuser /dev/ttyUSB1 2>/dev/null | grep -q .; then
-  pgrep -f '[r]osmaster_main.py' | xargs -r kill
-fi
-sleep 3
 
-# rm_safety persists its kill state here; without the directory it warns and
-# degrades to memory-only on every kill/reset. Recurs on any reflash.
-if [ ! -d /var/lib/rm_safety ]; then
-  echo "== creating /var/lib/rm_safety =="
-  sudo install -d -o jetson -g jetson /var/lib/rm_safety
-fi
+# Vendor driver, factory autostart, joy_ctrl and the kill-state directory --
+# one shared copy, also used before ncp.launch.py.
+bash "$(dirname "$0")/prep_robot.sh" || exit 1
 
 echo "== lidar =="
 setsid sh -c "ros2 run ydlidar_ros2_driver ydlidar_ros2_driver_node --ros-args \
