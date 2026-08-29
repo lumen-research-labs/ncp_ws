@@ -39,6 +39,18 @@ Launch arguments:
 
     upstream_path Path to the NCP-on-Rosmaster checkout on the robot.
 
+    obstacle_dist Debug rule only: spin away from anything closer than this,
+                  in metres. Default 0.9 here, overriding upstream's 1.5.
+                  The three thresholds must stay ordered so the POLICY reacts
+                  before the SAFETY layer has to:
+                      0.90 m  policy spins away       (this)
+                      0.50 m  safety scales velocity  (slow_zone_m)
+                      0.35 m  safety zeroes + latches (stop_zone_m)
+                  Upstream's 1.5 is measured across the whole 180 deg arc
+                  including the sides, so in a normal room something is nearly
+                  always inside it and the robot spins continuously instead of
+                  ever cruising.
+
     weights       Path to a trained actor state_dict. "" (default) means
                   RANDOM WEIGHTS. There is no trained checkpoint in this repo
                   or the upstream one as of 2026-08-27, so `mode:=ncp` with
@@ -185,6 +197,9 @@ def _upstream_process(context, *args, **kwargs):
     upstream = context.perform_substitution(LaunchConfiguration("upstream_path"))
     mode = context.perform_substitution(LaunchConfiguration("mode"))
     weights = context.perform_substitution(LaunchConfiguration("weights"))
+    obstacle_dist = context.perform_substitution(
+        LaunchConfiguration("obstacle_dist")
+    )
 
     cmd = [
         "python3", str(pathlib.Path(upstream) / "rosmaster" / "node.py"),
@@ -192,6 +207,7 @@ def _upstream_process(context, *args, **kwargs):
         "-p", f"mode:={mode}",
         "-p", f"scan_topic:={_NCP_SCAN_TOPIC}",
         "-p", "odom_topic:=/odom",
+        "-p", f"obstacle_dist:={obstacle_dist}",
         # OVERRIDE. Upstream defaults cmd_topic to /cmd_vel, which would
         # bypass rm_safety entirely at up to 2 m/s.
         "-p", f"cmd_topic:={_POLICY_CMD_TOPIC}",
@@ -239,6 +255,16 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             "weights", default_value="",
             description="Trained actor state_dict. '' = RANDOM WEIGHTS.",
+        ),
+        DeclareLaunchArgument(
+            "obstacle_dist", default_value="0.9",
+            description="Debug rule: spin away from anything closer than this "
+                        "(metres). Upstream's own default is 1.5, which in a "
+                        "normal room keeps something inside the 180 deg arc "
+                        "almost always, so the robot spins continuously and "
+                        "never cruises. 0.9 sits above safety's 0.50 m slow "
+                        "zone, so the policy still turns away before the "
+                        "safety layer has to intervene.",
         ),
         DeclareLaunchArgument(
             "with_safety", default_value="true",

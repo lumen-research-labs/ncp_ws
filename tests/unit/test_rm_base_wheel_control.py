@@ -174,7 +174,7 @@ def test_reverse_rotation_latches_a_sign_fault_and_zeroes_output():
 
 def test_sign_fault_stays_latched_after_the_feedback_looks_sane_again():
     ctrl = make()
-    for _ in range(10):
+    for _ in range(ctrl.guards.sign_fault_ticks):
         ctrl.update(0.15, -0.15, DT, feedback_valid=True)
     out = ctrl.update(0.15, 0.15, DT, feedback_valid=True)
     assert out.sign_fault
@@ -250,3 +250,52 @@ def test_implausible_jump_is_rejected():
     speeds, fresh, _ = trk.update([-9_000_000, 0, 0, 0], DT)
     assert not fresh
     assert speeds == good
+
+
+def test_commanded_reversal_does_not_latch_while_the_wheel_coasts_down():
+    """The bug that latched all four wheels on the first full-stack run.
+
+    The debug policy alternates cruise (all wheels forward) with spin (left
+    and right opposed), so a wheel's target flips sign constantly. Right after
+    the flip the wheel is still coasting the OLD way while the new target
+    points the other — genuinely "moving against the command", but from
+    momentum, not wrong polarity. The guard must ride that out.
+    """
+    ctrl = make()
+    for _ in range(20):                      # settled, driving forward
+        ctrl.update(0.15, 0.15, DT, feedback_valid=True)
+
+    # Command reverses; the wheel decays through zero over ~0.5 s.
+    speed = 0.15
+    for _ in range(10):
+        speed -= 0.03
+        out = ctrl.update(-0.10, speed, DT, feedback_valid=True)
+        assert not out.sign_fault, f"latched while coasting at {speed:+.3f}"
+    assert not ctrl.sign_fault_latched
+
+
+def test_repeated_reversals_never_latch():
+    """Cruise/spin alternation must survive indefinitely."""
+    ctrl = make()
+    for cycle in range(8):
+        target = 0.15 if cycle % 2 == 0 else -0.15
+        speed = -target          # starts fully reversed vs the new target
+        for _ in range(8):
+            speed += target * 0.25
+            ctrl.update(target, speed, DT, feedback_valid=True)
+    assert not ctrl.sign_fault_latched
+
+
+def test_genuine_polarity_inversion_still_latches_promptly():
+    """The guard must keep doing its job: inverted feedback is sustained.
+
+    Unlike a reversal, a real polarity fault reports the wrong direction on
+    every tick forever, so it trips well inside a second at 20 Hz.
+    """
+    ctrl = make()
+    for i in range(ctrl.guards.sign_fault_ticks):
+        out = ctrl.update(0.15, -0.15, DT, feedback_valid=True)
+    assert out.sign_fault
+    assert out.pwm == 0
+    # 20 Hz: must not take more than a second to notice.
+    assert ctrl.guards.sign_fault_ticks * DT <= 1.0

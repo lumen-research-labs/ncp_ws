@@ -82,7 +82,20 @@ class Guards:
     # the reading is encoder quantisation noise, not real reverse rotation.
     sign_fault_mps: float = 0.05
     # Consecutive wrong-direction ticks before the sign guard trips.
-    sign_fault_ticks: int = 3
+    #
+    # 3 (0.15 s at 20 Hz) was far too short and latched every wheel on the
+    # first hardware run of the full stack (2026-08-29). When the commanded
+    # direction REVERSES — which the debug policy does constantly, alternating
+    # cruise (all wheels forward) with spin (left and right opposed) — the
+    # wheel is still coasting the old way while the new target points the
+    # other. That is momentum, not wrong polarity, and it lasts far longer
+    # than 0.15 s.
+    #
+    # 12 ticks = 0.6 s. A REAL polarity inversion reports the wrong direction
+    # continuously and forever, so it still trips in well under a second; a
+    # spin-down through zero does not. Paired with the direction-change reset
+    # in update(), which gives each reversal a fresh window.
+    sign_fault_ticks: int = 12
 
 
 @dataclass
@@ -110,6 +123,8 @@ class WheelController:
     _stall_ticks: int = 0
     _sign_ticks: int = 0
     _sign_latched: bool = False
+    # Sign of last tick's target (+1/-1/0), to spot a commanded reversal.
+    _prev_target_sign: int = 0
 
     # ---- state ------------------------------------------------------------
 
@@ -119,6 +134,7 @@ class WheelController:
         self._stall_ticks = 0
         self._sign_ticks = 0
         self._sign_latched = False
+        self._prev_target_sign = 0
 
     @property
     def sign_fault_latched(self) -> bool:
@@ -167,6 +183,16 @@ class WheelController:
             )
 
         error = target_mps - measured_mps
+
+        # A commanded REVERSAL restarts the sign guard's window. The wheel
+        # cannot obey instantly: it has to coast down through zero first, and
+        # during that time it is genuinely moving against the new target
+        # without anything being wrong. Judging polarity across that boundary
+        # is what latched all four wheels on the first full-stack run.
+        target_sign = (target_mps > 0.0) - (target_mps < 0.0)
+        if target_sign != self._prev_target_sign:
+            self._sign_ticks = 0
+        self._prev_target_sign = target_sign
 
         moving_backwards = (
             abs(measured_mps) > self.guards.sign_fault_mps

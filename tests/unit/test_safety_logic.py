@@ -142,9 +142,22 @@ class TestLimitsFromDict:
         assert real_limits.acceleration.max_alpha_z == pytest.approx(1.0)
 
     def test_loads_estop(self, real_limits: Limits) -> None:
-        assert real_limits.estop.slow_zone_m == pytest.approx(0.80)
+        # 0.80 -> 0.50 on 2026-08-29, paired with the debug policy's
+        # obstacle_dist dropping 1.5 -> 0.9.
+        assert real_limits.estop.slow_zone_m == pytest.approx(0.50)
         assert real_limits.estop.stop_zone_m == pytest.approx(0.35)
         assert real_limits.estop.consecutive_scans_to_trigger == 3
+
+    def test_stop_zone_is_inside_slow_zone(self, real_limits: Limits) -> None:
+        """The ordering invariant, independent of the tuned values.
+
+        slow_scale() divides by (slow_zone_m - stop_zone_m). Equal thresholds
+        divide by zero; inverted ones would scale velocity UP as an obstacle
+        gets closer. Neither is caught by the value assertions above, and both
+        are easy to introduce while retuning.
+        """
+        assert real_limits.estop.stop_zone_m > 0.0
+        assert real_limits.estop.slow_zone_m > real_limits.estop.stop_zone_m
 
     def test_loads_timeouts(self, real_limits: Limits) -> None:
         assert real_limits.timeouts.command_timeout_ms == pytest.approx(300.0)
@@ -1116,13 +1129,17 @@ class TestSlowZoneDoesNotScaleYaw:
     ) -> None:
         """A spin command in the slow zone comes out at the max_wz clamp, NOT
         scaled down by proximity."""
-        # 0.50 m: inside slow_zone_m (0.80), outside stop_zone_m (0.35).
-        # Old behaviour scaled by (0.50-0.35)/(0.80-0.35) = 0.333.
+        # Halfway between the stop and slow thresholds: squarely inside the
+        # scaling band whatever those are tuned to. Derived, not hardcoded,
+        # so retuning the zones does not silently move this test off the band.
+        midpoint = (
+            real_limits.estop.stop_zone_m + real_limits.estop.slow_zone_m
+        ) / 2.0
         inputs = _make_inputs(
             real_limits,
             cmd_wz=1.2,  # what the debug reactive rule commands
             last_wz=real_limits.velocity.max_wz,  # already spinning: no ramp
-            scan_ranges=_slow_zone_scan(real_limits, 0.50),
+            scan_ranges=_slow_zone_scan(real_limits, midpoint),
         )
         d = evaluate(inputs, real_limits)
         assert d.state == State.SLOW
@@ -1134,15 +1151,18 @@ class TestSlowZoneDoesNotScaleYaw:
     ) -> None:
         """The fix must NOT have disabled slow-zone braking. Forward motion is
         what closes distance, and it stays throttled."""
+        stop_m = real_limits.estop.stop_zone_m
+        slow_m = real_limits.estop.slow_zone_m
+        midpoint = (stop_m + slow_m) / 2.0
         inputs = _make_inputs(
             real_limits,
             cmd_vx=1.0,
             last_vx=real_limits.velocity.max_vx,  # already moving: no ramp
-            scan_ranges=_slow_zone_scan(real_limits, 0.50),
+            scan_ranges=_slow_zone_scan(real_limits, midpoint),
         )
         d = evaluate(inputs, real_limits)
         assert d.state == State.SLOW
-        expected_scale = (0.50 - 0.35) / (0.80 - 0.35)
+        expected_scale = (midpoint - stop_m) / (slow_m - stop_m)
         assert d.out_vx == pytest.approx(
             real_limits.velocity.max_vx * expected_scale, rel=1e-6
         )
