@@ -49,7 +49,17 @@ def main() -> int:
     ap.add_argument("--to", dest="hi", type=int, default=80)
     ap.add_argument("--step", type=int, default=5)
     ap.add_argument("--secs", type=float, default=1.5)
+    ap.add_argument("--curve", action="store_true",
+                    help="Do not stop at the first moving step. Sweep the "
+                         "whole range and report speed at each PWM, to fit "
+                         "the RUNNING curve above breakaway.")
+    ap.add_argument("--counts-per-rev", type=float, default=2360.0)
+    ap.add_argument("--circumference", type=float, default=0.248)
     a = ap.parse_args()
+
+    def mps(counts: float) -> float:
+        """Encoder counts over one step -> wheel surface speed."""
+        return (counts / a.counts_per_rev) * a.circumference / a.secs
 
     idx = a.motor - 1
     print(f"\n  WHEELS UP. Sweeping M{a.motor} ({NAMES[a.motor]}) "
@@ -84,7 +94,8 @@ def main() -> int:
 
     first_moving = None
     try:
-        print(f"  {'pwm':>5} {'fwd counts':>11} {'rev counts':>11}   verdict")
+        print(f"  {'pwm':>5} {'fwd m/s':>9} {'rev m/s':>9}   verdict")
+        curve: list[tuple[int, float, float]] = []
         for pwm in range(a.lo, a.hi + 1, a.step):
             fwd = drive(pwm, a.secs)
             rev = drive(-pwm, a.secs)
@@ -93,11 +104,32 @@ def main() -> int:
                 "one direction only" if (fwd > NOISE_COUNTS) != (rev > NOISE_COUNTS)
                 else "still"
             )
-            print(f"  {pwm:5d} {fwd:11d} {rev:11d}   {verdict}")
-            if moving and first_moving is None:
-                first_moving = pwm
-                break
+            print(f"  {pwm:5d} {mps(fwd):9.3f} {mps(rev):9.3f}   {verdict}")
+            if moving:
+                curve.append((pwm, mps(fwd), mps(rev)))
+                if first_moving is None:
+                    first_moving = pwm
+                    if not a.curve:
+                        break
             time.sleep(1.0)   # let it cool between steps
+
+        if a.curve and len(curve) >= 2:
+            # Least-squares over the RUNNING points only. Breakaway is a
+            # separate, higher number and must not be fitted from these.
+            for label, col in (("forward", 1), ("reverse", 2)):
+                xs = [c[col] for c in curve]
+                ys = [float(c[0]) for c in curve]
+                n = len(xs)
+                mx, my = sum(xs) / n, sum(ys) / n
+                den = sum((x - mx) ** 2 for x in xs)
+                if den <= 0:
+                    continue
+                gain = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den
+                dead = my - gain * mx
+                print(f"\n  running fit ({label}): "
+                      f"dead {max(dead, 0.0):.1f}  gain {gain:.1f}")
+            print(f"  breakaway PWM: {first_moving} "
+                  f"(NOT the same as the fitted dead — stiction)")
     except KeyboardInterrupt:
         print("\n  aborted by operator")
     except Exception as exc:  # noqa: BLE001

@@ -173,8 +173,44 @@ wheels:
     # (wheels UP) before setting these. Do not simply raise dead_pwm to ~55 on
     # the strength of "it worked at 60 once" — that reading was also taken on
     # the floor with the wheel possibly being dragged.
-    dead_pwm: 34.0
-    gain_pwm_per_mps: 60.0
+    # MEASURED 2026-08-29, wheels-up, motor driven directly so nothing could
+    # drag it (scripts/diagnostics/fr_threshold.py --curve):
+    #
+    #   breakaway   PWM 60 forward, 55 reverse   <- to START it turning
+    #   running     dead 30.2 / gain 132.1 fwd,  <- to KEEP it turning
+    #               dead 27.7 / gain 145.4 rev
+    #
+    # THE TWO ARE DIFFERENT AND THAT IS THE PROBLEM. This motor has severe
+    # stiction: it needs roughly twice the PWM to break loose as to keep
+    # going, and once it does break loose it runs freely at ~0.22 m/s. Its
+    # running gain (132/145) is normal — in line with the other three
+    # (163/144/127) — so the motor is not weak, it is sticky.
+    #
+    # The RUNNING fit is what is set below, deliberately. Using the breakaway
+    # value as dead_pwm instead would command 66 PWM for a 0.05 m/s target and
+    # the wheel would take off at ~0.28 m/s — massively overshooting at every
+    # low speed. The running fit never over-drives.
+    #
+    # CONSEQUENCE, know this before trusting the base:
+    #   * Forward at max_vx 0.25 the model asks 63, above the 60 breakaway, so
+    #     front-right DOES start and contributes. Cruise is four-wheel drive.
+    #   * A spin at max_wz 0.8 asks each wheel for only ~0.17 m/s -> 52 PWM,
+    #     BELOW breakaway, so front-right never starts and turning is
+    #     three-wheel drive. It would need wz > 1.06 rad/s to self-start,
+    #     which is above the safety clamp.
+    #   * Anything below ~0.23 m/s cannot self-start, though it will sustain
+    #     down to ~0.1 m/s once already moving.
+    #
+    # The stall guard deliberately freezes the integrator on a stalled wheel,
+    # so the loop will NOT wind up to break it loose — that guard is what
+    # stops a runaway, and it should not be weakened for this. The real fixes
+    # are a breakaway kick (apply breakaway PWM briefly when a commanded wheel
+    # reads stalled, then fall back to the running model) or replacing the
+    # motor. Neither is implemented.
+    dead_pwm: 30.2
+    gain_pwm_per_mps: 132.1
+    dead_pwm_rev: 27.7
+    gain_pwm_per_mps_rev: 145.4
     v_min_mps: 0.02
     max_pwm: 95
     # This wheel needs more integral authority than the healthy three, and
