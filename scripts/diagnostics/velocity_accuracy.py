@@ -42,7 +42,13 @@ Publishes:
 Services called:
     /safety/reset, /safety/kill  [std_srvs/Trigger]
 
-Usage (on the robot, full stack already up via prep_robot.sh + ncp.launch.py):
+Usage (on the robot, base stack already up):
+    bash scripts/bench_up.sh --mode closed_loop --live --source policy
+
+    NOT ncp.launch.py: that always starts a policy consumer, and in debug mode
+    the consumer publishes /policy/cmd_vel continuously — the same topic this
+    script commands on. Two publishers would fight mid-leg.
+
     velocity_accuracy.py                      # the default matrix
     velocity_accuracy.py --legs straight      # linear legs only
     velocity_accuracy.py --legs spin
@@ -67,16 +73,29 @@ import statistics
 import sys
 import time
 
-import rclpy
-import rclpy.node
-import yaml
-from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
-from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
-from sensor_msgs.msg import LaserScan
-from std_srvs.srv import Trigger
+# ROS is imported softly so that --summary works on the WORKSTATION, which has
+# no rclpy (ROS lives in a container here). Reading a finished sheet is pure
+# arithmetic on a CSV and should not require the robot's environment; driving a
+# leg obviously does, and _require_ros() refuses that path with the real error.
+try:
+    import rclpy
+    import rclpy.node
+    from geometry_msgs.msg import Twist
+    from nav_msgs.msg import Odometry
+    from rclpy.qos import (QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile,
+                           QoSReliabilityPolicy)
+    from sensor_msgs.msg import LaserScan
+    from std_srvs.srv import Trigger
 
-from rm_interfaces.msg import BaseDebug, SafetyStatus
+    from rm_interfaces.msg import BaseDebug, SafetyStatus
+
+    _ROS_ERROR: ImportError | None = None
+    _NodeBase = rclpy.node.Node
+except ImportError as _exc:                    # workstation, or ROS not sourced
+    _ROS_ERROR = _exc
+    _NodeBase = object
+
+import yaml
 
 WHEELS = ["FL", "BL", "FR", "BR"]
 RATE_HZ = 20.0
@@ -86,14 +105,28 @@ RUNWAY_ARC_DEG = 30.0   # half-arc searched ahead for the runway check
 RUNWAY_MARGIN_M = 0.25  # clearance demanded beyond slow_zone + travel
 _STATE = {0: "OK", 1: "SLOW", 2: "STOPPED", 3: "KILLED"}
 
-# Sensor QoS — /scan is BEST_EFFORT, and a RELIABLE subscriber would silently
-# receive nothing from it (the trap that made a live lidar look dead).
-SENSOR_QOS = QoSProfile(
-    reliability=QoSReliabilityPolicy.BEST_EFFORT,
-    durability=QoSDurabilityPolicy.VOLATILE,
-    history=QoSHistoryPolicy.KEEP_LAST,
-    depth=5,
-)
+
+def _sensor_qos():
+    """/scan is BEST_EFFORT; a RELIABLE subscriber silently receives nothing
+    from it — the trap that once made a live lidar look dead. Built lazily so
+    the module still imports without ROS (see the soft import above)."""
+    return QoSProfile(
+        reliability=QoSReliabilityPolicy.BEST_EFFORT,
+        durability=QoSDurabilityPolicy.VOLATILE,
+        history=QoSHistoryPolicy.KEEP_LAST,
+        depth=5,
+    )
+
+
+def _require_ros() -> None:
+    if _ROS_ERROR is not None:
+        print(f"ERROR: this needs ROS, which did not import: {_ROS_ERROR}\n"
+              "Run it on the robot with the workspace sourced:\n"
+              "  source /opt/ros/humble/setup.bash\n"
+              "  source ~/ncp_ws/install/setup.bash\n"
+              "(--summary works anywhere; it only reads the CSV.)")
+        sys.exit(1)
+
 
 # Default matrix. Straights span a 4x speed range so dead_pwm and gain are
 # separable; each has a reverse partner because the calibration is
@@ -116,7 +149,7 @@ CSV_FIELDS = [
 ]
 
 
-class Leg(rclpy.node.Node):
+class Leg(_NodeBase):
     """One commanded leg: arm, drive, stop, kill. Reused across legs."""
 
     def __init__(self) -> None:
@@ -137,7 +170,7 @@ class Leg(rclpy.node.Node):
         self.create_subscription(Odometry, "/odom", self._on_odom, 10)
         self.create_subscription(BaseDebug, "/base/debug", self._on_debug, 10)
         self.create_subscription(SafetyStatus, "/safety/status", self._on_status, 10)
-        self.create_subscription(LaserScan, "/scan", self._on_scan, SENSOR_QOS)
+        self.create_subscription(LaserScan, "/scan", self._on_scan, _sensor_qos())
         self.kill_cli = self.create_client(Trigger, "/safety/kill")
         self.reset_cli = self.create_client(Trigger, "/safety/reset")
         self.create_timer(1.0 / RATE_HZ, self._tick)
@@ -455,21 +488,36 @@ def summarise(rows: list[dict]) -> None:
         print(f"{name:>16} {ref:>10} {meas:>10} {ratio:>7} {odom:>9} {sfty:>5}"
               f"  {r['wheel_flags']}")
 
-    for kind, label in (("straight", "LINEAR  vx"), ("spin", "ANGULAR wz")):
-        good = [r for r in rows
+    clean: dict[str, list[float]] = {}
+    for kind in ("straight", "spin"):
+        good = [float(r["ratio"]) for r in rows
                 if r["kind"] == kind and r["ratio"] != ""
                 and str(r["safety_ok"]) == "True"]
-        if not good:
+        if good:
+            clean[kind] = good
+
+    # Whether the per-wheel PWM model is exonerated. The straight legs drive
+    # the wheels over the same speed range a spin does (wz * lever_arm_m), so
+    # if they are accurate the wheels demonstrably CAN hit those speeds and no
+    # wheel-level explanation of a yaw error survives.
+    wheels_proven = (
+        "straight" in clean
+        and abs(statistics.mean(clean["straight"]) - 1.0) <= 0.05
+        and max(clean["straight"]) - min(clean["straight"]) <= 0.05
+    )
+
+    for kind, label in (("straight", "LINEAR  vx"), ("spin", "ANGULAR wz")):
+        ratios = clean.get(kind)
+        if not ratios:
             continue
-        ratios = [float(r["ratio"]) for r in good]
         mean = statistics.mean(ratios)
-        spread = (max(ratios) - min(ratios))
+        spread = max(ratios) - min(ratios)
         print(f"\n{label}: {len(ratios)} clean legs, achieved/commanded "
               f"mean {mean:.3f}, spread {spread:.3f}")
         # A consistent ratio is a SCALE error and is one constant away from
-        # fixed. A ratio that varies with speed is a dead_pwm/gain split error
-        # and needs a refit, not a scale — that distinction is the whole point
-        # of running more than one speed.
+        # fixed. A ratio that varies with speed is a modelling error, and WHICH
+        # model is wrong depends on whether the straights already cleared the
+        # wheels — that cross-check is why both axes are summarised together.
         if abs(mean - 1.0) <= 0.05 and spread <= 0.05:
             print("  -> accurate: within 5% at every speed tested.")
         elif spread <= 0.05:
@@ -477,10 +525,41 @@ def summarise(rows: list[dict]) -> None:
                       else "lever_arm_m")
             print(f"  -> CONSISTENT {(mean - 1.0) * 100:+.1f}% error at all speeds: a "
                   f"pure SCALE error.\n     Scale {factor} by {mean:.3f}.")
+        elif kind == "spin" and wheels_proven:
+            # Do NOT send the operator to refit dead_pwm/gain here. The
+            # straights just proved those are right across this very speed
+            # range, so the loss is in the rotation itself: mecanum rollers
+            # scrubbing sideways. lever_arm_m is the term that absorbs scrub —
+            # but it is ONE CONSTANT and the loss is not constant, so it can
+            # only be made exact at one wz. Fit it where the robot will spin.
+            print("  -> ratio VARIES WITH SPEED, but the straight legs were "
+                  "accurate over the\n     same wheel-speed range — so the "
+                  "wheels are fine and this is NOT a\n     dead_pwm/gain "
+                  "mis-split. It is rotational SCRUB, which lever_arm_m "
+                  "absorbs.")
+            print("     lever_arm_m implied per leg (one constant cannot fit "
+                  "them all):")
+            for r in rows:
+                if r["kind"] != "spin" or r["ratio"] == "":
+                    continue
+                if str(r["safety_ok"]) != "True":
+                    continue
+                print(f"       wz {float(r['commanded_val']):+.2f}  "
+                      f"scale current lever_arm_m by {1.0 / float(r['ratio']):.3f}")
+            print("     Pick the wz the robot actually spins at and fit there; "
+                  "expect the\n     other end of the range to stay off.")
         else:
             print("  -> ratio VARIES WITH SPEED (spread > 5%): dead_pwm and gain "
                   "are mis-split.\n     Refit with fit_reverse.py from two "
                   "STRAIGHT legs — never scale a constant to paper over this.")
+
+    if "straight" in clean and not any(
+        float(r["commanded_val"]) < 0 for r in rows
+        if r["kind"] == "straight" and r["ratio"] != ""
+    ):
+        print("\nNOTE: no REVERSE straight leg was measured. The calibration is "
+              "per-direction\n      (dead_pwm_rev / gain_pwm_per_mps_rev), so "
+              "forward accuracy says nothing\n      about reverse.")
 
 
 def load_rows(path: str) -> list[dict]:
@@ -519,6 +598,8 @@ def main() -> int:
             return 1
         summarise(rows)
         return 0
+
+    _require_ros()
 
     with open(args.limits) as fh:              # no magic numbers: the zones the
         limits = yaml.safe_load(fh)            # runway check needs come from here
