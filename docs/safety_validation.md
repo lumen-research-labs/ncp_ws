@@ -8,7 +8,8 @@ and operator. **Phase 4 does not begin until this document is signed off.**
 > is run with the wheels off the ground first, and with a human hand on the
 > power switch.
 
-Software tiers (unit + replay) are automated and passing as of 2026-08-13.
+Software tiers (unit + replay) are automated and passing as of 2026-08-13;
+**210 tests as of 2026-08-29** (unit + replay, workstation tier).
 The hardware tier (§3) has NOT been run — it requires the operator, wheels off
 the ground, and a hand on the power switch, and cannot be run by an agent.
 
@@ -152,11 +153,55 @@ blind sector behaves as expected in practice, not just in the scan math.
 | Cover the lidar | stale-scan e-stop | | | |
 | Restart node while killed | comes up killed, does not move | | | |
 
+### 3a. Evidence accumulated 2026-08-29 (NOT a sign-off)
+
+Two floor sessions with the operator present exercised much of the table
+above incidentally. Recording it so the eventual sign-off run knows what is
+already evidenced and what is genuinely untested:
+
+| Observed | Evidence |
+|---|---|
+| Clamping limits speed | policy asked `vx 0.400` / `wz 1.200`; `/cmd_vel` carried 0.250 / 0.800 continuously |
+| Starts KILLED, does not move | every launch this session; `min_range` reads `inf` while KILLED because `evaluate()` returns before processing the scan |
+| Kill/reset services work | used dozens of times across both sessions, including mid-motion |
+| E-stop latches, needs explicit reset | 2026-08-13 replay tier; not re-exercised on hardware this session |
+| Acceleration limiter holds | 343 consecutive `/cmd_vel` samples: max |dvx/dt| within limit except one **deceleration to zero** (5.6 m/s², fail-closed paths deliberately bypass the limiter — braking hard is always safe); max |dwz/dt| 1.063 vs 1.0 limit, within timing jitter |
+| Sole `/cmd_vel` publisher | `ros2 topic info /cmd_vel` → `Publisher count: 1`, checked before every arm |
+| Command timeout fails closed | `reason: command_timeout` whenever `command_source` pointed at an unpublished topic |
+
+**Still genuinely untested on hardware:** walking toward the lidar to trigger
+the slow→stop zones under real motion, covering the lidar for a stale-scan
+e-stop, and killing the command publisher mid-motion to prove the watchdog.
+Those three are the gap.
+
+### 3b. LIMITS IN FORCE ARE ABOVE THE LAST SIGNED VALUES
+
+Raised 2026-08-29 at operator request to make the NCP debug test run at a
+watchable pace, ahead of any sign-off:
+
+| | signed-off basis | in force |
+|---|---|---|
+| `max_vx` | 0.15 m/s | **0.25** |
+| `max_wz` | 0.4 rad/s | **0.8** |
+| `slow_zone_m` | 0.80 m | **0.65** |
+
+The slow zone was widened back from an interim 0.50 specifically to pay for
+the higher speed. Stopping distance at 0.25 m/s is ~0.117 m (0.042 braking +
+0.075 travelled during the 3-scan noise filter) against a 0.30 m band — about
+2.5× margin. **`max_vx` and `slow_zone_m` are coupled: raising one requires
+redoing that sum.** Revert to 0.15 / 0.4 for unattended or long-running use.
+
+Threshold ordering that must be preserved, policy reacting before the safety
+layer has to: **0.90 m** (debug policy `obstacle_dist`) > **0.65 m** (safety
+scales) > **0.35 m** (safety zeroes and latches).
+
 ## 4. Acceptance criteria
 
 - [ ] Every test above passes, recorded with date and operator.
 - [ ] Verified by inspection that nothing other than `rm_safety` publishes `/cmd_vel`.
 - [ ] E-stop latches and requires explicit `/safety/reset`.
+- [ ] Limits in force at sign-off recorded below, and §3b reconciled — either
+      the raised values are signed off on their own evidence, or reverted.
 
 ## Sign-off
 

@@ -802,13 +802,148 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   Robot left: bringup + lidar + odom chain running, rm_safety KILLED holding
   `/cmd_vel` at zero, battery ~11.7 V.
 
+- 2026-08-29 (session 2): **THE NCP DEBUG TEST RAN END TO END ON HARDWARE, and
+  the base now drives accurately on all four wheels.** One command brings up 11
+  nodes with exactly one `/cmd_vel` publisher; measured live: `/scan` 10.13,
+  `/ncp/scan` 10.14, `/odom` 30.0, `/policy/cmd_vel` 5.0, `/cmd_vel` 20.0,
+  `/base/debug` 20.0 Hz. Final cruise, all four wheels, target 0.250 m/s:
+  FL 0.256 / BL 0.257 / FR 0.257 / BR 0.257, **no flags, integrals under 2.3
+  PWM** — i.e. the feedforward is genuinely right rather than being propped up
+  by the loop. Getting there took five real bugs, below.
+
+  **`ncp.launch.py` now brings up the WHOLE stack** (lidar + rm_base + odom
+  chain + safety + bridge + consumer) behind `with_lidar` / `with_base` /
+  `with_odom`, plus `control_mode`, `dry_run`, `calibration_path` and
+  `obstacle_dist`. `dry_run` defaults FALSE here (unlike `base.launch.py`),
+  because bringing up the full stack implies intent to drive; rm_safety still
+  starts KILLED and `command_source` still defaults to `teleop`.
+  **`scripts/prep_robot.sh`** is the host-level cleanup a launch file cannot
+  do (vendor driver, `rosmaster_main.py`, `yahboom_joy_X3`, `/var/lib/rm_safety`),
+  shared with `bench_up.sh`. **Do NOT run `bench_up.sh` and `ncp.launch.py`
+  together — two safety_nodes means two `/cmd_vel` publishers.** bench_up is
+  for base-only work now.
+
+  **BUG 1 — config silently shadowed a module default.** `base_node` splats
+  `closed_loop.guards` straight into `wheel_control.Guards`, and both YAML
+  files still said `sign_fault_ticks: 3`. Raising the module default to 12
+  therefore did NOTHING on the robot for several runs. A test now pins every
+  config guard key against the module default. **Any key in that block wins
+  over the code — check both when changing a guard.**
+
+  **BUG 2 — the sign guard was judging the SLEW LIMITER, not the wiring.**
+  `base_node` slew-limits PWM (8/tick) AFTER the controller returns, so coming
+  out of cruise at +33 the applied PWM needs ~8 ticks just to reach zero.
+  Throughout that the wheel is still being DRIVEN the old way while the target
+  says reverse, so of course it keeps moving the old way. Measured: FR target
+  -0.131, feedforward -35.6, **applied PWM +6**, measured +0.032 -> latched.
+  All four wheels latched to zero PWM on the first full-stack run and the robot
+  could not move. Fixed in three steps, all needed: reset the counter on a
+  reversal; suspend the guard for `sign_settle_ticks` (10) after one; and
+  **gate it on the ACTUAL applied PWM** — `update()` now takes `applied_pwm`
+  and will not judge polarity until the wheel is genuinely being driven the
+  commanded way, past its own dead band. A reversal is +1<->-1 only; starting
+  from rest still arms the guard immediately.
+
+  **BUG 3 — `max_pwm` was left at the floor-test ceiling when `max_vx` rose.**
+  At 0.25 m/s three of four wheels ran SATURATED at 33 against a ceiling of 35
+  and could not reach the commanded speed. Ceilings restored to 60 (FR 95),
+  sized for feedforward + `i_max`. **`max_vx` and `max_pwm` are coupled.**
+
+  **BUG 4 — THE CALIBRATION METHOD ITSELF WAS WRONG.** The 2026-08-29 s1 fit
+  used two speeds — but one was a STRAIGHT run and the other a SPIN. A spin
+  carries **rotational scrub load** (mecanum rollers must slide sideways), so
+  the extra PWM that load demands was misattributed to the dead-band: dead_pwm
+  came out far too high and gain far too low. The model then matched only at
+  the single speed it was fitted at — straight-line distance at 0.10 m/s was
+  correct while cruise at 0.25 m/s undershot to ~87%. **NEVER mix a turning
+  measurement into a dead_pwm/gain fit.** Refitted from TWO STRAIGHT LEGS
+  (0.06 and 0.12 m/s) via `scripts/diagnostics/fit_reverse.py`, solving
+  against MEASURED speed:
+  `FL 12.0/62 -> 1.3/162.9`, `BL 20.0/42 -> 3.1/143.6`, `BR 13.0/60 -> 6.5/126.6`.
+  Forward and reverse fits agreed within ~10%, so these wheels are effectively
+  symmetric and no reverse overrides are set for them.
+
+  **BUG 5 / CORRECTION OF A CORRECTION — front-right IS bad, and a dead wheel
+  reads like a working one on the floor.** Earlier the same day this file
+  recorded "front-right is NOT a failing motor" because it appeared to track
+  its target exactly on the floor (0.250 against 0.254). **It was being DRAGGED
+  by the other three** — its encoder reported the robot's motion, not its own
+  drive, and the suspiciously PERFECT tracking was the tell. Wheels-up, with
+  nothing to drag it, FR read 0.0000 m/s across four 6-second legs at applied
+  PWM 42-49, in both directions. **Measure a suspect wheel WHEELS-UP with the
+  motor driven directly** (`scripts/diagnostics/fr_threshold.py`), or the other
+  wheels will lie to you on your behalf.
+
+  **FRONT-RIGHT IS STICKY, NOT WEAK** (measured, `fr_threshold.py --curve`):
+  * breakaway **PWM 60 forward, 55 reverse** — to START it turning
+  * running **dead 30.2 / gain 132.1 fwd, 27.7 / 145.4 rev** — to KEEP it going
+  Its running gain is NORMAL (132/145 vs the others' 163/144/127), so the motor
+  is not weak; it needs roughly twice the PWM to break loose as to sustain, and
+  once loose runs freely at ~0.22 m/s. The RUNNING fit is what is configured —
+  using breakaway as `dead_pwm` would command 66 PWM for a 0.05 m/s target and
+  the wheel would take off at ~0.28 m/s.
+
+  **New: per-direction calibration** (`dead_pwm_rev`, `gain_pwm_per_mps_rev`)
+  and a **bounded breakaway kick** (`breakaway_pwm`, `breakaway_pwm_rev`).
+  All four keys are optional and default to "same as forward" / "no kick", so
+  an unconfigured wheel is untouched — only front-right has them set. The kick
+  REPLACES the loop output with a fixed open-loop nudge; it never feeds the
+  integrator (pinned by a test), because the stall guard freezing the
+  integrator is what stops the firmware runaway and must not be weakened.
+  Bounded three ways: 8 ticks per attempt, 20-tick cooldown, 3 attempts then
+  it gives up until the command clears — holding a blocked motor at breakaway
+  PWM is how it burns out. Measured: exactly 24 kick ticks then `XXX` forever.
+  **The kick is DEPLOYED BUT NOT YET EXERCISED ON HARDWARE** — it only fires
+  below ~0.14 m/s, and cruise never goes there (at 0.17 m/s the proportional
+  term already asks ~63 against the 60 threshold).
+
+  **Tuning this session, all operator-requested:** `obstacle_dist` 1.5 -> 0.9
+  (upstream's 1.5 is measured across the whole 180 deg arc INCLUDING the sides,
+  so in a normal room something is nearly always inside it — measured 380 spin
+  samples to 49 cruise, i.e. it spun continuously and never drove);
+  `slow_zone_m` 0.80 -> 0.50 -> 0.65; `max_vx` 0.15 -> **0.25**;
+  `max_wz` 0.4 -> **0.8**. Ordering that must be preserved:
+  **0.90 policy spins > 0.65 safety scales > 0.35 safety latches.**
+  `slow_zone_m` and `max_vx` are COUPLED — at 0.25 m/s stopping needs ~0.117 m
+  (0.042 braking + 0.075 travelled during the 3-scan filter) and the band is
+  0.30 m. Raising `max_vx` again means redoing that sum.
+  **These clamps are AHEAD OF THE PHASE 2 HARDWARE SIGN-OFF** — revert to
+  0.15 / 0.4 for anything unattended.
+
+  **Not a bug, verified:** the acceleration limiter holds. The one violation
+  measured (`vx 0.25 -> 0.0` in a tick, 5.6 m/s^2) is a DECELERATION TO ZERO,
+  which fail-closed paths deliberately bypass the limiter for. Braking hard is
+  always safe.
+
+  **Standing behaviour of the debug rule, not a fault:** it picks spin
+  direction by comparing the left and right halves of the scan with NO
+  hysteresis, so in a near-symmetric spot the choice flips every ~2 s and the
+  robot turns one way then equally far the other, netting zero. Measured
+  policy `wz` mean -0.004 over 301 samples while individual reads were +-1.2.
+  Put the robot somewhere clearly asymmetric to get a committed spin. The
+  vendored policy stays byte-exact, so this is not "fixed".
+
+  Robot: rebooted mid-session; clock reset to May (pushed from the workstation),
+  `/dev/rplidar` pointed at the BASE BOARD again, `rosmaster_main.py` back and
+  holding ttyUSB1, and `/tmp` cleared (the ad-hoc probes had to be re-copied).
+  Battery ended at **10.3 V** — bottom third, operator charging.
+
 ## 4. Current Goal
 
-**THE NEXT THING IS THE NCP DEBUG TEST: a rough end-to-end pipeline run of the
-complete stack, to verify everything works as expected.** That is what all the
-base work below was for. Every piece now exists and is individually validated;
-what has never been done is running them all together and letting the policy
-actually drive the wheels.
+**THE NCP DEBUG TEST HAS RUN END TO END ON HARDWARE (2026-08-29 s2).** One
+command brings up the whole stack, the policy drives the wheels through
+rm_safety, and the base tracks commanded speed on all four wheels to within 3%.
+The pipeline is proven. What is proven is the PLUMBING — there is still no
+trained checkpoint.
+
+Still outstanding from that test:
+* **The breakaway kick is deployed but never exercised** — it only fires below
+  ~0.14 m/s and cruise never goes there. Needs a slow commanded turn
+  (`wz` under ~0.65 rad/s) to confirm on hardware.
+* **No clean spin has been measured** since the calibration refit. The debug
+  rule's direction flipping (see §3) makes this awkward — use an asymmetric
+  spot.
+* Battery was 10.3 V at the end; charge before the next run.
 
 **The full NCP pipeline runs on bernard-1 hardware** (2026-08-27 s2): lidar ->
 32-beam bridge -> observation -> CfC -> `/policy/cmd_vel` -> rm_safety clamp,
@@ -817,9 +952,15 @@ with all three consumers validated. Phases 1-3 are effectively done.
 **MOTION IS NO LONGER GATED (2026-08-29).** The base drives accurately:
 commanded 1.00 m -> 1.00 m measured, commanded 180 deg -> 172 deg, both
 tape-verified wheels-down with the operator present. `rm_base` in
-`control_mode:=closed_loop` is the validated path. Bring the stack up with
-`scripts/bench_up.sh` (see §3); `dry_run` still defaults true and rm_safety
-still starts KILLED, so motion still takes two explicit acts.
+`control_mode:=closed_loop` is the validated path. Cruise now tracks 0.250 m/s
+on all four wheels to within 3% with the integrals under 2.3 PWM (2026-08-29
+s2, after the calibration refit).
+
+Bring the FULL stack up with `prep_robot.sh` then `ncp.launch.py`; use
+`bench_up.sh` only for base-only work, and **never both at once** (two
+safety_nodes = two `/cmd_vel` publishers). rm_safety still starts KILLED and
+`command_source` still defaults to `teleop`, so motion still takes two
+explicit acts.
 
 **The velocity failure is root-caused (2026-08-28 s2): the STM32 firmware's
 closed-loop speed control is broken on this robot** — encoder feedback is
@@ -846,65 +987,60 @@ proven is the PLUMBING, not a policy. `ACTION_HIGH` v = 2.0 m/s vs safety
 
 ### Next session, in order
 
-Items 2b, 3, 4 and 7 are DONE (2026-08-29). What remains, in order:
+Items 1, 2b, 3, 4 and 7 of the previous list are DONE. What remains:
 
-1. **Bring the stack up** — one command now:
-   `bash scripts/bench_up.sh --mode closed_loop --live` (see §3 for the flags).
-   Check the clock and battery first; `rosmaster_main.py` returns every boot
-   and the script kills it. Then **THE NCP DEBUG TEST** — the goal:
-   `ros2 launch rm_bringup ncp.launch.py` with `command_source:=policy`, on the
-   floor, operator + kill switch, and confirm the whole chain end to end:
-   `/scan` -> `/ncp/scan` (32 beams) -> observation -> CfC -> `/policy/cmd_vel`
-   -> rm_safety clamp -> `/cmd_vel` -> rm_base -> wheels actually turning.
-   Start in `mode:=debug` (the scripted obstacle-avoider, known-good output)
-   BEFORE `mode:=ncp` (random weights, near-constant output), so a problem is
-   attributable.
-   **TRAP — do not launch both naively: `ncp.launch.py` starts its OWN
-   `safety.launch.py` (`with_safety` defaults true) and so does
-   `bench_up.sh`. Running both puts TWO safety_nodes on `/cmd_vel`** — the
-   two-publisher violation the plan forbids. `ncp.launch.py` also does NOT
-   start the lidar, rm_base or the odom chain, all of which the base now
-   needs. So the sequence is:
+1. **Bring the stack up** — clock, battery, then:
    ```
-   bash scripts/bench_up.sh --mode closed_loop --live --source policy
-   ros2 launch rm_bringup ncp.launch.py with_safety:=false mode:=debug
+   cd ~/ncp_ws
+   bash scripts/prep_robot.sh                 # must print "== ready =="
+   ros2 launch rm_bringup ncp.launch.py mode:=debug command_source:=policy
+   ros2 service call /safety/reset std_srvs/srv/Trigger
    ```
-   `--source policy` is what lets the NCP actually reach the wheels; drop it
-   (defaults to policy in bench_up.sh, teleop in ncp.launch.py) if you only
-   want to watch the chain run without motion. Verify `ros2 topic info
-   /cmd_vel` shows **exactly 1 publisher** before arming.
-   Folding rm_base + the odom chain into `ncp.launch.py`, and defaulting
-   `with_safety` off there, would remove this footgun.
-2. **A wheels-UP revolution count.** The single cheapest experiment left: it
-   separates wheel SLIP from encoder SCALE in `counts_per_rev`, which is
-   currently fitted to the tape with slip baked in. Count turns on slow-mo
-   video over ~10 s at a known command. Until this is done `/odom` is
-   "matches the tape", not "correct".
-3. `policy_node` derives pose + goal from `/odom`. The chain is live now, but
-   see the caveat in §4 — decide whether it is good enough, or give the policy
-   a goal source that does not need odometry.
-4. Do NOT build a heading-hold drift controller until 2/3 give a trustworthy
+   `ncp.launch.py` now starts everything (lidar, rm_base, odom chain, safety,
+   bridge, consumer). **Do NOT also run `bench_up.sh`** — two safety_nodes is
+   two `/cmd_vel` publishers. Verify `ros2 topic info /cmd_vel` says exactly
+   1 publisher before arming. Stop button:
+   `ros2 service call /safety/kill std_srvs/srv/Trigger`, in its own terminal.
+   Watch with `scripts/diagnostics/watch_stack.py`.
+2. **Exercise the breakaway kick.** Deployed but never fired on hardware — it
+   only engages below ~0.14 m/s. Command a slow turn (`wz` under ~0.65 rad/s)
+   and confirm front-right starts, and that `still not turning after 3
+   breakaway kicks` does NOT appear.
+3. **Measure a clean spin** since the calibration refit. Use an asymmetric spot
+   so the debug rule commits to a direction (see the no-hysteresis note in §3).
+   Tape-check the achieved angle against commanded; `lever_arm_m` 0.213 was
+   fitted before the refit and may need revisiting.
+4. **A wheels-UP revolution count.** The cheapest experiment left: it separates
+   wheel SLIP from encoder SCALE in `counts_per_rev`, which is currently fitted
+   to the tape with slip baked in. Until then `/odom` is "matches the tape",
+   not "correct".
+5. `policy_node` derives pose + goal from `/odom`. The chain is live, but see
+   the caveat in §4 — decide whether it is good enough, or give the policy a
+   goal source that needs no odometry.
+6. Do NOT build a heading-hold drift controller until 4/5 give a trustworthy
    heading signal.
-5. Make `command_source` read-only on `safety_node` (it is read once at init,
-   so `ros2 param set` reports success and changes nothing).
-6. Hardware safety checklist (`safety_validation.md` §3); sign off its hardware
-   rows and the 2026-08-28 yaw fix (Phase 2 gate). The floor runs on
-   2026-08-29 exercised most of it — the e-stop arcs under real motion are the
-   notable gap.
-7. Consider per-direction `dead_pwm` in `pwm_map.py` (back-left is
-   directionally asymmetric; the model is symmetric and currently carries the
-   reverse threshold for both).
-8. Check whether bernard-2 has the same firmware sign fault (if yes it is
-   systemic). Front-right motor replacement is NO LONGER needed — see the
-   2026-08-29 correction in §3.
+7. Make `command_source` read-only on `safety_node` (read once at init, so
+   `ros2 param set` reports success and changes nothing).
+8. Hardware safety checklist (`safety_validation.md` §3); sign off its hardware
+   rows and the 2026-08-28 yaw fix (Phase 2 gate). The 2026-08-29 floor runs
+   exercised most of it — the e-stop arcs under real motion are the gap. Note
+   the clamps are currently ABOVE their signed-off values.
+9. Replace the front-right motor to remove the stiction workaround entirely.
+10. Check whether bernard-2 has the same firmware sign fault (if yes it is
+   systemic).
 
-### Robot state at end of 2026-08-29
+### Robot state at end of 2026-08-29 session 2
 
-Clean. bernard-1 left with yahboom bringup + lidar + the odom chain RUNNING
-and `safety_node` KILLED holding `/cmd_vel` at zero; battery ~11.7 V. All
-rm_base motion stopped. `rosmaster_main.py` was killed by PID and WILL return
-on the next boot. Clock was correct this session. The robot is on
-`bernard-1.local` / 192.168.4.100 static.
+bernard-1 rebooted mid-session and came back on its static IP. Clock was reset
+to May and was pushed from the workstation; `/dev/rplidar` pointed at the BASE
+BOARD again (the documented symlink race — use the by-id CP2102 path);
+`rosmaster_main.py` was back holding ttyUSB1; `/tmp` was cleared, so any
+ad-hoc probe scripts need re-copying.
+
+Left with the full NCP stack RUNNING and rm_safety ARMED at the operator's
+hand (they were mid-test). Battery **10.3 V** — bottom third of the usable
+range, operator charging. All code is committed and deployed; workstation and
+robot verified byte-identical for every file touched.
 
 Offline work available any time: the 3.0.0 contract doc refresh, a clear-path
 open-space bag (operator), `ros2 topic delay` latency capture.
@@ -943,9 +1079,30 @@ Settled, do not re-open:
   direction** (2026-08-29). A one-speed fit cannot separate it from
   `gain_pwm_per_mps`, and setting it too low means a wheel never starts —
   which the stall guard then makes permanent.
-- **Front-right (M3) is NOT a failing motor** (corrected 2026-08-29). The
-  wheels-up "weak motor" diagnosis was wrong; on the floor it is normal and
-  over-driving it was curving the robot. No replacement needed.
+- **Front-right (M3) IS bad — it is STICKY, not weak** (settled 2026-08-29 s2,
+  after a correction and a re-correction; read §3 before reopening).
+  Breakaway PWM 60 fwd / 55 rev to START, running dead 30.2/gain 132.1 fwd and
+  27.7/145.4 rev to KEEP GOING. Its running gain is normal, so the motor has
+  torque — it has stiction. The RUNNING fit is configured plus a bounded
+  breakaway kick; do NOT set breakaway as dead_pwm.
+- **A dead wheel reads like a working one on the floor.** The other three drag
+  it and its encoder reports the ROBOT's motion — front-right showed 0.250
+  against a 0.254 target while contributing nothing. Suspiciously PERFECT
+  tracking is the tell. Diagnose a suspect wheel WHEELS-UP with the motor
+  driven directly (`scripts/diagnostics/fr_threshold.py`).
+- **Never fit dead_pwm/gain from a measurement that includes a TURN.** A spin
+  carries rotational scrub load, which the fit misattributes to the dead-band —
+  dead_pwm comes out far too high, gain far too low, and the model then only
+  matches at the one speed it was fitted at. Two STRAIGHT legs at different
+  speeds (`fit_reverse.py`).
+- **`closed_loop.guards` in the calibration YAML SHADOWS the module defaults**
+  in `wheel_control.Guards`. A stale key there silently overrode the code for
+  several hardware runs. Change both, or delete the key.
+- **`max_vx` is coupled to `slow_zone_m` AND to `max_pwm`.** Raising it means
+  redoing the stopping-distance sum and checking the wheels do not saturate.
+- **The debug rule has no spin-direction hysteresis** — in a symmetric spot it
+  flips every ~2 s and nets zero rotation. Environmental, not a stack fault;
+  the vendored policy stays byte-exact.
 - **Motor→wheel map is `M1=FL, M2=BL, M3=FR, M4=BR`** (measured 2026-08-28),
   NOT the Yahboom sample order. `set_motor(+)` = forward; forward wheel =
   DECREASING `get_motor_encoder` count.
