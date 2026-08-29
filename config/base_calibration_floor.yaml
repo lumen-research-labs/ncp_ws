@@ -49,11 +49,12 @@
 # It is a fudge for scrub, not the real half-wheelbase (which is 0.165 from
 # the firmware). Do not treat it as a physical measurement.
 #
-# 2026-08-29 s3: 0.213 -> 0.236, fitted at wz 0.60 from velocity_accuracy.py.
-# Kept identical to base_calibration.yaml on purpose. Full reasoning and the
-# per-leg numbers are in that file; scrub is speed-dependent, so wz ~0.30 is
-# expected to stay ~15% short.
-lever_arm_m: 0.236
+# 2026-08-29 s3: 0.213 -> 0.236 -> 0.227, from velocity_accuracy.py. 0.213
+# under-rotated at wz 0.60 (ratio 0.904) and 0.236 overshot it (1.060), which
+# brackets 1.000 at 0.227. Kept identical to base_calibration.yaml on purpose.
+# Full reasoning and the per-leg numbers are in that file; scrub is
+# speed-dependent, so wz ~0.30 is expected to stay ~20% short.
+lever_arm_m: 0.227
 
 # Encoder scale for the /vel_raw reconstruction. Firmware bsp_encoder.h:
 # 30 gear * 11 PPR * 2 edges * 2 channels = 1320. Circumference is the

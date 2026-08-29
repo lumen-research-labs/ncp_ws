@@ -22,7 +22,12 @@
 # the physical value. It affects turning only; straight-line driving has no
 # yaw component and is unaffected.
 #
-# 2026-08-29 s3, velocity_accuracy.py: 0.213 -> 0.236. Measured achieved/
+# 2026-08-29 s3, velocity_accuracy.py: 0.213 -> 0.236 -> 0.227.
+# 0.236 OVERSHOT (wz 0.60 gave ratio 1.060, i.e. 184 deg for 173.5 commanded),
+# which together with 0.213's 0.904 brackets 1.000 at lever 0.227. That is the
+# value here; it is an interpolation between two measured runs, not a new fit.
+#
+# The measurements behind all of it. At lever 0.213, achieved/
 # commanded yaw of 0.780 at wz 0.30, 0.904 at wz 0.60, 0.721 at wz -0.30 —
 # while the straight legs came out 1.000/0.992/1.016 over the SAME wheel-speed
 # range (a spin at wz 0.30 asks each wheel for wz*lever_arm_m = 0.064 m/s,
@@ -30,11 +35,26 @@
 # speed and the shortfall is scrub, not calibration.
 #
 # SCRUB IS SPEED-DEPENDENT AND THIS IS ONE CONSTANT, so it cannot be right
-# everywhere: the three legs imply 0.273, 0.236 and 0.295. Fitted at wz 0.60
-# because max_wz is 0.8 and the debug rule saturates it, so real spins live at
-# the top of the range. EXPECT wz ~0.30 TO STILL UNDER-ROTATE by ~15%; that is
-# inherent to a single constant, not a regression to chase.
-lever_arm_m: 0.236
+# everywhere. Fitted at wz 0.60 because max_wz is 0.8 and the debug rule
+# saturates it, so real spins live at the top of the range. EXPECT wz ~0.30 TO
+# STILL UNDER-ROTATE by ~20%; that is inherent to a single constant, not a
+# regression to chase. Raising this to fix wz 0.30 would badly over-rotate
+# wz 0.60 — at lever 0.236 the 0.30 legs still only reached 0.815 / 0.733
+# while 0.60 had already overshot to 1.060.
+#
+# WHY one constant cannot cover the range: fitting all six measured legs gives
+# achieved_yaw_rate ~ 311 * (wheel_speed - 0.025 m/s), i.e. an effective
+# ROTATIONAL DEAD-BAND — about the first 0.107 rad/s of any commanded spin is
+# lost to scrub before the chassis turns at all. lever_arm_m is a pure
+# multiplier and a multiplier cannot cancel an offset. Fixing the whole range
+# needs an affine yaw term (gain + per-direction dead-band), the same shape as
+# dead_pwm/gain one level up. Not done: no trained policy commands low wz yet.
+#
+# Measured CW/CCW asymmetry, two samples each at |wz| 0.30: CCW 0.797 vs CW
+# 0.727, a 9.7% gap. Consistent in sign across both calibrations. Suspected
+# cause is front-right's direction-dependent stiction (breakaway 60 fwd /
+# 55 rev), which a spin drives one way for CCW and the other for CW.
+lever_arm_m: 0.227
 
 # Encoder scale for the /vel_raw reconstruction. BOTH of these were wrong, and
 # the errors partly cancelled, which is why the fault hid for so long: the
