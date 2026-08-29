@@ -77,7 +77,18 @@ closed_loop:
     stall_measured_mps: 0.01  # measured below this => "not turning"
     stall_ticks: 4            # ~200 ms at 20 Hz before freezing the integrator
     sign_fault_mps: 0.05      # reverse motion above this is real, not noise
-    sign_fault_ticks: 3
+    # NOTE: this block is splatted straight into wheel_control.Guards
+    # (base_node.py), so ANY value here SHADOWS the module default. A 3 here
+    # silently overrode the module's 12 through several hardware runs on
+    # 2026-08-29 and kept latching wheels. If you change a guard default in
+    # wheel_control.py, change it here too or delete the key.
+    #
+    # 3 ticks (0.15 s) was far too short: on a commanded reversal the wheel is
+    # still coasting the old way, and the slew limiter needs ~8 ticks just to
+    # walk the PWM across zero.
+    sign_fault_ticks: 12
+    # Ticks after a reversal during which the guard is suspended outright.
+    sign_settle_ticks: 10
 
 # Defensive backstop only — rm_safety is the real clamp and is always
 # tighter. These just catch a grossly wrong /cmd_vel; keep them well above
@@ -90,13 +101,6 @@ max_body:
 # Per-wheel open-loop model: |pwm| = dead_pwm + gain_pwm_per_mps * |v|,
 # zero below v_min_mps, clamped to +/- max_pwm.
 #
-#   front_left  (M1)  healthy
-#   back_left   (M2)  healthy
-#   front_right (M3)  FAILING MOTOR — needs ~5x the PWM to move, runs slow,
-#                     encoder only reads at speed. High dead_pwm + gain and a
-#                     raised ceiling try to make it keep up; it will still be
-#                     the weak wheel. Replace the motor to remove this.
-#   back_right  (M4)  healthy, slightly stickier than the fronts
 # Per-wheel PWM model: pwm = dead_pwm + gain_pwm_per_mps * speed.
 #
 # dead_pwm is the push needed to START a stopped wheel; gain is the extra push
@@ -111,9 +115,13 @@ max_body:
 # So: when in doubt, err HIGH on dead_pwm. Too much starting push overshoots
 # and gets trimmed by the loop; too little means the wheel never moves.
 #
-# max_pwm ceilings are kept at the reduced floor-test values. At the top clamp
-# speed (0.15 m/s) the model asks for ~26, so 35 is ample headroom and a lower
-# ceiling bounds what a bad reading can command. Raise only with evidence.
+# max_pwm ceilings restored to 60 (front_right 95) on 2026-08-29 when max_vx
+# went to 0.25 m/s. The reduced floor-test ceiling of 35 was sized for a
+# 0.15 m/s clamp; at 0.25 the model asks ~28-49 before any integral trim, and
+# three of four wheels ran SATURATED at 33 and could not reach the commanded
+# speed. Worst case now is feedforward + i_max: front_left 27.5+25, back_left
+# 30.5+25, front_right 49+45, back_right 28+25 — which is what these ceilings
+# are sized for. Raising max_vx again means redoing that sum.
 #
 # front_right was previously described as a failing motor needing ~5x the PWM.
 # That was measured with the wheels in the air. On the floor it is not weak —
@@ -124,7 +132,7 @@ wheels:
     dead_pwm: 12.0
     gain_pwm_per_mps: 62.0
     v_min_mps: 0.02
-    max_pwm: 35
+    max_pwm: 60
   back_left:
     # Highest starting push of the three healthy wheels: this one is
     # measurably stickier in REVERSE (dead at PWM 11, moves at 16), and
@@ -132,12 +140,12 @@ wheels:
     dead_pwm: 20.0
     gain_pwm_per_mps: 42.0
     v_min_mps: 0.02
-    max_pwm: 35
+    max_pwm: 60
   front_right:
     dead_pwm: 34.0
     gain_pwm_per_mps: 60.0
     v_min_mps: 0.02
-    max_pwm: 80
+    max_pwm: 95
     # This wheel needs more integral authority than the healthy three, and
     # its encoder only reads once it is already turning — so the stall guard
     # will fire on it during every start. That is intended: it holds
@@ -150,4 +158,4 @@ wheels:
     dead_pwm: 13.0
     gain_pwm_per_mps: 60.0
     v_min_mps: 0.02
-    max_pwm: 35
+    max_pwm: 60

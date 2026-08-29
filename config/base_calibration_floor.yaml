@@ -110,15 +110,30 @@ closed_loop:
     stall_measured_mps: 0.01  # measured below this => "not turning"
     stall_ticks: 4            # ~200 ms at 20 Hz before freezing the integrator
     sign_fault_mps: 0.05      # reverse motion above this is real, not noise
-    sign_fault_ticks: 3
+    # NOTE: this block is splatted straight into wheel_control.Guards
+    # (base_node.py), so ANY value here SHADOWS the module default. A 3 here
+    # silently overrode the module's 12 through several hardware runs on
+    # 2026-08-29 and kept latching wheels. If you change a guard default in
+    # wheel_control.py, change it here too or delete the key.
+    #
+    # 3 ticks (0.15 s) was far too short: on a commanded reversal the wheel is
+    # still coasting the old way, and the slew limiter needs ~8 ticks just to
+    # walk the PWM across zero.
+    sign_fault_ticks: 12
+    # Ticks after a reversal during which the guard is suspended outright.
+    sign_settle_ticks: 10
 
 # Defensive backstop only — rm_safety is the real clamp and is always
 # tighter. These just catch a grossly wrong /cmd_vel; keep them well above
 # interface.yaml action scaling so a legitimate command is never clipped here.
+# Raised back to the production values 2026-08-29: rm_safety's clamps are now
+# max_vx 0.25 / max_wz 0.8, and a 0.2 / 0.6 backstop here would clip a
+# LEGITIMATE command before the real clamp ever saw it. This is a backstop for
+# a grossly wrong /cmd_vel, never a second speed limit.
 max_body:
-  vx: 0.2     # m/s   floor test: was 0.5
-  vy: 0.2     # m/s   floor test: was 0.5
-  wz: 0.6     # rad/s floor test: was 1.5
+  vx: 0.5     # m/s
+  vy: 0.5     # m/s
+  wz: 1.5     # rad/s
 
 # Per-wheel open-loop model: |pwm| = dead_pwm + gain_pwm_per_mps * |v|,
 # zero below v_min_mps, clamped to +/- max_pwm.
@@ -151,7 +166,7 @@ wheels:
     dead_pwm: 12.0
     gain_pwm_per_mps: 62.0
     v_min_mps: 0.02
-    max_pwm: 35      # floor test: was 60
+    max_pwm: 60
   back_left:
     # ASYMMETRIC WHEEL, measured wheels-up 2026-08-29. BL turns FORWARD at
     # PWM 7 but is DEAD in reverse at PWM 11; it only breaks loose in reverse
@@ -171,7 +186,7 @@ wheels:
     dead_pwm: 20.0
     gain_pwm_per_mps: 42.0
     v_min_mps: 0.02
-    max_pwm: 35      # floor test: was 60
+    max_pwm: 60
   front_right:
     # 40.0 -> 19.6, from the floor run: the loop had to take 20.4 away to
     # stop this wheel running fast. The "weak motor" numbers were measured
@@ -180,7 +195,7 @@ wheels:
     dead_pwm: 34.0
     gain_pwm_per_mps: 60.0
     v_min_mps: 0.02
-    max_pwm: 80      # floor test: was 95
+    max_pwm: 95
     # This wheel needs more integral authority than the healthy three, and
     # its encoder only reads once it is already turning — so the stall guard
     # will fire on it during every start. That is intended: it holds
@@ -194,4 +209,4 @@ wheels:
     dead_pwm: 13.0
     gain_pwm_per_mps: 60.0
     v_min_mps: 0.02
-    max_pwm: 35      # floor test: was 60
+    max_pwm: 60

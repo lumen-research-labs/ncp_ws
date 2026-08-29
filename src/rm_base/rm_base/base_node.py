@@ -347,8 +347,14 @@ class BaseNode(rclpy.node.Node):
                     )
                 )
             return out
+        # self._applied_pwm is LAST tick's post-slew output. The sign guard
+        # needs it to tell "this wheel is wired backwards" apart from "the
+        # slew limiter has not finished reversing this wheel yet".
         return [
-            self._controllers[i].update(targets_mps[i], measured[i], dt, usable)
+            self._controllers[i].update(
+                targets_mps[i], measured[i], dt, usable,
+                applied_pwm=self._applied_pwm[i],
+            )
             for i in range(4)
         ]
 

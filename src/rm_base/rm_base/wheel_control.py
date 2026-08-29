@@ -165,6 +165,7 @@ class WheelController:
         measured_mps: float,
         dt: float,
         feedback_valid: bool,
+        applied_pwm: float | None = None,
     ) -> WheelCommand:
         """Advance the loop one tick and return the PWM to apply.
 
@@ -216,9 +217,35 @@ class WheelController:
         if target_sign != 0:
             self._prev_target_sign = target_sign
 
-        if self._settle_ticks > 0:
-            # Mid-reversal: the wheel is still coasting the old way and there
-            # is nothing to learn about polarity from that.
+        # Are we ACTUALLY pushing the wheel the way we asked it to go?
+        #
+        # base_node slew-limits the PWM (max_pwm_step_per_tick) AFTER this
+        # returns, so on a reversal the applied PWM crawls from the old
+        # direction, through zero, to the new one — measured at ~8.5 ticks
+        # coming out of cruise. For all of that time the wheel is still being
+        # driven the OLD way while the target points the new way, so of course
+        # it keeps moving the old way. Judging polarity there is judging the
+        # slew limiter, not the wiring. `applied_pwm` is last tick's actual
+        # output; None means the caller cannot say, and the guard falls back
+        # to the time-based window alone.
+        if applied_pwm is None:
+            driving_as_commanded = True
+        else:
+            driving_as_commanded = (
+                (applied_pwm > 0.0) == (target_mps > 0.0)
+                and abs(applied_pwm) > self.model.dead_pwm
+            )
+
+        if not driving_as_commanded:
+            # Not yet pushing it that way: nothing to conclude, and re-arm the
+            # settle window so the wheel also gets time to physically turn
+            # around once the PWM does arrive.
+            self._settle_ticks = self.guards.sign_settle_ticks
+            self._sign_ticks = 0
+            moving_backwards = False
+        elif self._settle_ticks > 0:
+            # Driving correctly now, but the wheel is still coasting the old
+            # way. Momentum, not polarity.
             self._settle_ticks -= 1
             moving_backwards = False
         else:

@@ -330,3 +330,66 @@ def test_settle_window_does_not_disable_the_guard_permanently():
     assert out.pwm == 0
     # Still prompt: settle + trip must stay inside ~1.5 s at 20 Hz.
     assert total * DT <= 1.5
+
+
+def test_slew_ramp_through_zero_does_not_latch():
+    """base_node slew-limits the PWM AFTER the controller returns.
+
+    Coming out of cruise at +33 with an 8/tick cap, the applied PWM needs
+    ~8 ticks just to reach zero and more to reverse. Throughout that the wheel
+    is still being DRIVEN forward, so it keeps moving forward — and judging
+    polarity there judges the slew limiter, not the wiring. This is what
+    latched front-right and back-right on hardware.
+    """
+    ctrl = make()
+    for _ in range(20):
+        ctrl.update(0.15, 0.15, DT, feedback_valid=True, applied_pwm=33)
+
+    # Phase 1: the slew ramp. PWM walks +33 -> -35 at 8/tick while the wheel,
+    # still being pushed forward for most of it, keeps reading forward.
+    pwm = 33
+    while pwm > -35:
+        pwm = max(pwm - 8, -35)
+        out = ctrl.update(-0.10, 0.12, DT, feedback_valid=True, applied_pwm=pwm)
+        assert not out.sign_fault, f"latched during slew ramp at pwm={pwm}"
+
+    # Phase 2: PWM is now fully reversed, so the wheel actually turns around
+    # over the next few ticks. Still no fault — this is normal operation.
+    speed = 0.12
+    for _ in range(ctrl.guards.sign_settle_ticks):
+        speed -= 0.03
+        out = ctrl.update(-0.10, speed, DT, feedback_valid=True, applied_pwm=-35)
+        assert not out.sign_fault, f"latched while reversing at {speed:+.3f}"
+    assert not ctrl.sign_fault_latched
+
+
+def test_guard_still_latches_once_actually_driven_the_other_way():
+    """The gate must not disable the guard — only defer it."""
+    ctrl = make()
+    total = ctrl.guards.sign_settle_ticks + ctrl.guards.sign_fault_ticks + 2
+    for _ in range(total):
+        # Fully reversed PWM, well past dead_pwm, wheel still going forward.
+        out = ctrl.update(-0.10, 0.12, DT, feedback_valid=True, applied_pwm=-40)
+    assert out.sign_fault
+    assert out.pwm == 0
+
+
+def test_config_guards_match_module_defaults():
+    """config/base_calibration.yaml's closed_loop.guards is splatted into
+    Guards, so any key there SHADOWS the module default.
+
+    A stale sign_fault_ticks: 3 in the config silently overrode the module's
+    12 through several hardware runs. Pin the two together so changing one
+    without the other fails here rather than on the robot.
+    """
+    import yaml
+    root = pathlib.Path(__file__).resolve().parents[2]
+    for name in ("base_calibration.yaml", "base_calibration_floor.yaml"):
+        cfg = yaml.safe_load((root / "config" / name).read_text())
+        block = cfg["closed_loop"]["guards"]
+        defaults = Guards()
+        for key, value in block.items():
+            assert getattr(defaults, key) == pytest.approx(value), (
+                f"{name}: closed_loop.guards.{key}={value} shadows "
+                f"Guards.{key}={getattr(defaults, key)}"
+            )
