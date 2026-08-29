@@ -1,0 +1,197 @@
+# base_calibration_floor.yaml — FLOOR-TEST calibration. NOT the production file.
+#
+# A copy of base_calibration.yaml with the per-wheel `max_pwm` ceilings cut,
+# for the first wheels-DOWN run. Purpose: bound how much authority the closed
+# loop can command while its feedforward numbers are still wheels-up guesses.
+#
+# Why the ceiling matters more on the ground than in the air. Rough measured
+# scale (wheels up, 2026-08-28): set_motor(12) ~ 0.10 m/s. The stock ceiling of
+# 60 is therefore ~5x the PWM a 0.10 m/s command needs. Open loop never asks
+# for it, but closed loop WILL climb toward it whenever a wheel reads slower
+# than its target -- and on the floor, under load, every wheel reads slower.
+# The integral is capped (i_max_pwm) but sits on top of feedforward, so max_pwm
+# is the real binding constraint. Cut it and a bad measurement costs a lurch
+# rather than a bolt.
+#
+# front_right keeps a high ceiling. Its dead_pwm is 40, so ff(0.10 m/s) is
+# already 59 -- cap that wheel at 35 and it simply never turns, which makes the
+# robot veer harder, not less. The weak motor sets its own floor here.
+#
+# Use with:
+#   ros2 launch rm_bringup base.launch.py dry_run:=false \
+#     control_mode:=closed_loop \
+#     calibration_path:=/home/jetson/ncp_ws/config/base_calibration_floor.yaml
+#
+# Once the wheels-down tape-measure calibration is done, fold the tuned
+# dead_pwm/gain values back into base_calibration.yaml and delete this file.
+
+# Open-loop base driver calibration — consumed by rm_base.base_node.
+#
+# This is a CALIBRATION, not a controller. rm_base drives the wheels open
+# loop (raw PWM, no encoder feedback) because bernard-1's firmware speed PID
+# is unusable (see base_node.py docstring / CLAUDE.md 2026-08-28). Every
+# number below is a starting guess derived from wheels-UP open-loop probes
+# on 2026-08-28 and MUST be re-tuned wheels-DOWN against a tape measure
+# before the robot is trusted to drive a commanded distance.
+#
+# PWM values are Rosmaster `set_motor` units, [-100, 100], dimensionless.
+
+# Half-wheelbase + half-track, metres. Yaw lever arm for a mecanum wheel.
+# Firmware bsp_motion.h MECANUM_MINI_APB = 164.555 mm.
+# 0.165 -> 0.213, measured 2026-08-29. Asked for 180 deg, got 139 deg with all
+# four wheels running at the speed the maths asked for. The wheels scrub
+# sideways when turning on the spot, so the robot turns less than the wheel
+# speeds imply. Scaling this up makes the wheels run proportionally faster and
+# the commanded angle come out right: 0.165 * (180/139.3) = 0.213.
+#
+# This only affects turning -- driving straight uses no turn component, so the
+# straight-line calibration above is untouched.
+# It is a fudge for scrub, not the real half-wheelbase (which is 0.165 from
+# the firmware). Do not treat it as a physical measurement.
+lever_arm_m: 0.213
+
+# Encoder scale for the /vel_raw reconstruction. Firmware bsp_encoder.h:
+# 30 gear * 11 PPR * 2 edges * 2 channels = 1320. Circumference is the
+# "mecanum mini" value; measure the real wheel and correct.
+# Both numbers corrected 2026-08-29 from a floor run measured with a tape.
+#
+# Commanded 1.00 m, robot actually moved 0.75 m, odom claimed 1.11 m. So the
+# speed the encoders report was too high by about a third, and the closed loop
+# happily held the wheels at the wrong speed because it trusts that number.
+#
+# Wheel measured with a ruler: 79 mm across, so one turn = 3.14 * 79mm =
+# 0.248 m. The old 0.204 was a guess and was too small.
+#
+# Fixing the wheel size alone makes the reported speed go UP, and it was
+# already too high, so the counts-per-turn had to be too low as well. 2140 is
+# what makes the reported distance match the tape. It is close to 48*11*4 =
+# 2112, which would be a 48:1 gearbox rather than the 30:1 the old number
+# assumed -- but that is a guess, and 2140 is the measured value.
+#
+# Still unconfirmed: some of the gap may be wheels slipping rather than a bad
+# count. A wheels-up turn count would separate the two. Until then treat this
+# as "tuned to match the tape", not "known correct".
+# 2140 -> 2360: second tape check said 0.95 m while odom claimed 1.048 m,
+# so the reported distance was still ~10% high. 2140 * (1.048/0.95) = 2360.
+counts_per_rev: 2360.0
+wheel_circumference_m: 0.248
+
+# Per-tick PWM change cap (drivetrain / STM32 protection). 20 Hz * 8 = full
+# 60-count range in ~0.4 s.
+max_pwm_step_per_tick: 8
+
+# Any reconstructed wheel speed above this is a serial/decode glitch, not a
+# measurement: it is discarded and the loop degrades to feedforward. The X3
+# tops out well under 1 m/s per wheel.
+max_plausible_wheel_mps: 2.0
+
+# ---------------------------------------------------------------------------
+# Closed-loop trim — used ONLY when rm_base_node runs control_mode:=closed_loop.
+#
+# The wheels above are a calibration; this is the controller. Feedforward is
+# the per-wheel model above, so these gains only have to absorb the residual:
+# load, tyre wear, and the failing front-right motor. Keep them small — the
+# integrator's total authority is i_max_pwm, and that is the whole margin by
+# which a bad measurement can push the PWM past the open-loop value.
+#
+# Feedback resolution sets the floor on useful gain. At 20 Hz with 1320
+# counts/rev and a 0.204 m wheel, one encoder count per tick is
+#   0.204 / 1320 * 20 = 0.0031 m/s
+# so speeds down to ~0.02 m/s are resolved to a few percent. Do not raise the
+# control rate past the board's auto-report rate chasing finer feedback — you
+# get repeated samples, not more information (EncoderTracker rejects them).
+closed_loop:
+  gains:
+    kp: 60.0          # PWM per (m/s) of instantaneous error
+    ki: 80.0          # PWM per (m/s * s) of accumulated error
+    i_max_pwm: 25.0   # hard ceiling on integral authority
+  guards:
+    stall_target_mps: 0.03    # commanded above this => expected to be turning
+    stall_measured_mps: 0.01  # measured below this => "not turning"
+    stall_ticks: 4            # ~200 ms at 20 Hz before freezing the integrator
+    sign_fault_mps: 0.05      # reverse motion above this is real, not noise
+    sign_fault_ticks: 3
+
+# Defensive backstop only — rm_safety is the real clamp and is always
+# tighter. These just catch a grossly wrong /cmd_vel; keep them well above
+# interface.yaml action scaling so a legitimate command is never clipped here.
+max_body:
+  vx: 0.2     # m/s   floor test: was 0.5
+  vy: 0.2     # m/s   floor test: was 0.5
+  wz: 0.6     # rad/s floor test: was 1.5
+
+# Per-wheel open-loop model: |pwm| = dead_pwm + gain_pwm_per_mps * |v|,
+# zero below v_min_mps, clamped to +/- max_pwm.
+#
+#   front_left  (M1)  healthy
+#   back_left   (M2)  healthy
+#   front_right (M3)  FAILING MOTOR — needs ~5x the PWM to move, runs slow,
+#                     encoder only reads at speed. High dead_pwm + gain and a
+#                     raised ceiling try to make it keep up; it will still be
+#                     the weak wheel. Replace the motor to remove this.
+#   back_right  (M4)  healthy, slightly stickier than the fronts
+wheels:
+  # ALL FOUR WHEELS re-fitted 2026-08-29 from TWO speeds, not one.
+  #
+  # dead_pwm is the push needed to START a stopped wheel; gain is the extra
+  # push per unit of speed once rolling. A single measurement at one speed
+  # cannot tell those apart -- an earlier attempt folded the whole correction
+  # into dead_pwm, which fitted 0.10 m/s fine but set dead_pwm far too low, and
+  # both right wheels then failed to start at the slower speed a spin needs.
+  # A wheel that fails to start stays stuck, because the stall guard stops the
+  # controller pushing harder (by design -- that guard is what stops runaway).
+  #
+  # Fitted from: pwm needed at 0.100 m/s (straight run) and at 0.052 m/s
+  # (spin run). Two points, two unknowns.
+  # Front-right and back-right never moved in the spin, so their gain is
+  # assumed similar to front-left and dead_pwm is set from the 0.10 m/s point.
+  # Values are rounded UP: too much starting push just overshoots and gets
+  # trimmed, too little means the wheel never moves at all.
+  front_left:
+    dead_pwm: 12.0
+    gain_pwm_per_mps: 62.0
+    v_min_mps: 0.02
+    max_pwm: 35      # floor test: was 60
+  back_left:
+    # ASYMMETRIC WHEEL, measured wheels-up 2026-08-29. BL turns FORWARD at
+    # PWM 7 but is DEAD in reverse at PWM 11; it only breaks loose in reverse
+    # around PWM 16. The pwm_map model is symmetric (|pwm| = dead_pwm +
+    # gain*|v|), so it cannot hold two dead-bands -- this value is set for the
+    # REVERSE threshold, the harder of the two, and the closed-loop integral
+    # trims the resulting forward overshoot. That trim only works while the
+    # wheel is moving: the stall guard freezes the integrator, so a wheel
+    # parked below its dead-band can never climb out on its own. Erring high
+    # is the only safe direction here.
+    # This matters most for SPIN, which drives the left wheels backwards at
+    # low speed -- with dead_pwm 2.0 a wz<=0.3 spin left BL stationary.
+    # The floor run says lower this to 9.0. NOT applied on purpose: this wheel
+    # needs about 14 to start moving BACKWARDS, and spinning on the spot needs
+    # it to go backwards. Dropping it would make the robot fail to spin again.
+    # The small forward overshoot it causes is corrected while driving.
+    dead_pwm: 20.0
+    gain_pwm_per_mps: 42.0
+    v_min_mps: 0.02
+    max_pwm: 35      # floor test: was 60
+  front_right:
+    # 40.0 -> 19.6, from the floor run: the loop had to take 20.4 away to
+    # stop this wheel running fast. The "weak motor" numbers were measured
+    # with the wheels in the air; on the floor this wheel is not weak, and
+    # over-driving it is what curves the robot to the left.
+    dead_pwm: 34.0
+    gain_pwm_per_mps: 60.0
+    v_min_mps: 0.02
+    max_pwm: 80      # floor test: was 95
+    # This wheel needs more integral authority than the healthy three, and
+    # its encoder only reads once it is already turning — so the stall guard
+    # will fire on it during every start. That is intended: it holds
+    # feedforward instead of winding up, which is exactly what the firmware
+    # PID failed to do.
+    gains:
+      ki: 120.0
+      i_max_pwm: 45.0
+  back_right:
+    # 8.0 -> 2.3, from the floor run: the loop had to take 5.7 away.
+    dead_pwm: 13.0
+    gain_pwm_per_mps: 60.0
+    v_min_mps: 0.02
+    max_pwm: 35      # floor test: was 60

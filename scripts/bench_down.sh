@@ -11,6 +11,12 @@ pkill -f 'topic pub .*policy/cmd_vel'
 pkill -f '[r]m_base_node'
 pkill -f '[s]afety_node'
 pkill -f '[y]dlidar_ros2_driver_node'
+# odom chain started by odom.launch.py
+pkill -f '[b]ase_node_X3'
+pkill -f '[i]mu_filter_madgwick_node'
+pkill -f '[e]kf_node'
+pkill -f '[r]obot_state_publisher'
+pkill -f '[j]oint_state_publisher'
 sleep 3
 fuser -v /dev/ttyUSB1 2>&1 | grep -q ttyUSB1 && echo "port still held" || echo "base board port free"
 
