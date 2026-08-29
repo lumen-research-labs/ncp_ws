@@ -21,7 +21,20 @@
 # It is a scrub compensation, not a measurement — do not "correct" it back to
 # the physical value. It affects turning only; straight-line driving has no
 # yaw component and is unaffected.
-lever_arm_m: 0.213
+#
+# 2026-08-29 s3, velocity_accuracy.py: 0.213 -> 0.236. Measured achieved/
+# commanded yaw of 0.780 at wz 0.30, 0.904 at wz 0.60, 0.721 at wz -0.30 —
+# while the straight legs came out 1.000/0.992/1.016 over the SAME wheel-speed
+# range (a spin at wz 0.30 asks each wheel for wz*lever_arm_m = 0.064 m/s,
+# i.e. the 0.06 m/s straight leg). The wheels therefore hit their commanded
+# speed and the shortfall is scrub, not calibration.
+#
+# SCRUB IS SPEED-DEPENDENT AND THIS IS ONE CONSTANT, so it cannot be right
+# everywhere: the three legs imply 0.273, 0.236 and 0.295. Fitted at wz 0.60
+# because max_wz is 0.8 and the debug rule saturates it, so real spins live at
+# the top of the range. EXPECT wz ~0.30 TO STILL UNDER-ROTATE by ~15%; that is
+# inherent to a single constant, not a regression to chase.
+lever_arm_m: 0.236
 
 # Encoder scale for the /vel_raw reconstruction. BOTH of these were wrong, and
 # the errors partly cancelled, which is why the fault hid for so long: the
