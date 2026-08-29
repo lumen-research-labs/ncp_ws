@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 """
-fit_reverse.py — measure each wheel's REVERSE dead_pwm / gain.
+fit_reverse.py — measure each wheel's dead_pwm / gain, per direction.
+
+    --forward fits the forward constants; the default fits the reverse ones.
+
+    FIT FROM TWO STRAIGHT LEGS ONLY. An earlier fit used one straight run and
+    one SPIN, and a spin carries rotational scrub load (the mecanum rollers
+    must slide sideways), so the extra PWM that load demands was misattributed
+    to the dead-band: dead_pwm came out far too high and gain far too low.
+    That model then undershot badly at any speed other than the one it was
+    fitted at. Never mix a turning measurement into this fit.
 
 What it does:
-    Drives the base backwards at two speeds, records the steady-state applied
+    Drives the base in a STRAIGHT LINE at two speeds, records the steady-state
+    applied
     PWM and the speed each wheel actually reached, and solves the two-point
     fit per wheel:
 
@@ -149,16 +159,23 @@ def main() -> int:
     ap.add_argument("--slow", type=float, default=0.06)
     ap.add_argument("--fast", type=float, default=0.12)
     ap.add_argument("--secs", type=float, default=6.0)
+    ap.add_argument("--forward", action="store_true",
+                    help="Fit the FORWARD constants instead (dead_pwm / "
+                         "gain_pwm_per_mps). Drives forwards, which the "
+                         "safety layer actually monitors.")
     args = ap.parse_args()
+    sign = 1.0 if args.forward else -1.0
+    suffix = "" if args.forward else "_rev"
 
     print(__doc__.split("Usage:")[0].split("!!! READ")[1][:400])
-    print("\nThe robot will drive BACKWARDS. Ctrl-C aborts.\n")
+    print(f"\nThe robot will drive "
+          f"{'FORWARDS' if args.forward else 'BACKWARDS'}. Ctrl-C aborts.\n")
 
     rclpy.init()
     node = Fit()
     try:
-        slow = run_leg(node, -abs(args.slow), args.secs)
-        fast = run_leg(node, -abs(args.fast), args.secs)
+        slow = run_leg(node, sign * abs(args.slow), args.secs)
+        fast = run_leg(node, sign * abs(args.fast), args.secs)
     except Exception as exc:  # noqa: BLE001
         print(f"\n!! aborted: {exc}")
         slow = fast = None
@@ -193,8 +210,8 @@ def main() -> int:
                   f"({p1:.1f}@{v1:.3f} -> {p2:.1f}@{v2:.3f}).")
             continue
         print(f"  {name}:")
-        print(f"    dead_pwm_rev: {max(dead, 0.0):.1f}")
-        print(f"    gain_pwm_per_mps_rev: {gain:.1f}")
+        print(f"    dead_pwm{suffix}: {max(dead, 0.0):.1f}")
+        print(f"    gain_pwm_per_mps{suffix}: {gain:.1f}")
     print("=" * 62)
     print("Omit a wheel entirely to keep it symmetric (forward values).")
     return 0

@@ -104,16 +104,24 @@ max_body:
 # Per-wheel PWM model: pwm = dead_pwm + gain_pwm_per_mps * speed.
 #
 # dead_pwm is the push needed to START a stopped wheel; gain is the extra push
-# per unit speed once it is rolling. FITTED FROM TWO SPEEDS (0.100 m/s from the
-# straight run, 0.052 m/s from the turn), because one speed cannot separate
-# them. An earlier single-speed fit put the whole correction into dead_pwm: it
-# drove straight correctly and silently broke turning, because both right
-# wheels could not start at the slower speed a turn needs — and a wheel that
-# fails to start STAYS stuck, since the stall guard deliberately stops the
-# controller pushing harder.
+# per unit speed once it is rolling.
 #
-# So: when in doubt, err HIGH on dead_pwm. Too much starting push overshoots
-# and gets trimmed by the loop; too little means the wheel never moves.
+# REFITTED 2026-08-29 (second pass) from TWO STRAIGHT LEGS at 0.06 and
+# 0.12 m/s, via scripts/diagnostics/fit_reverse.py, solving against MEASURED
+# speed. The previous values (dead 12/20/34/13, gain 62/42/60/60) came from a
+# fit that mixed one straight run with one SPIN — and a spin carries
+# rotational scrub load, because the mecanum rollers must slide sideways. That
+# extra PWM was misattributed to the dead-band, so dead_pwm came out far too
+# high and gain far too low. The model then matched only at the single speed
+# it was fitted at: straight-line distance at 0.10 m/s was correct, while
+# cruise at 0.25 m/s undershot to ~87%.
+#
+# NEVER mix a turning measurement into this fit.
+#
+# Forward and reverse fits agreed within ~10% (reverse, on the floor: FL
+# 1.8/157.0, BL 3.4/140.1, BR 4.8/141.3), so no dead_pwm_rev overrides are
+# set — these wheels are effectively symmetric at these speeds and the
+# integral absorbs the remainder.
 #
 # max_pwm ceilings restored to 60 (front_right 95) on 2026-08-29 when max_vx
 # went to 0.25 m/s. The reduced floor-test ceiling of 35 was sized for a
@@ -129,19 +137,42 @@ max_body:
 # starting push of the four and its encoder reads unreliably at low speed.
 wheels:
   front_left:
-    dead_pwm: 12.0
-    gain_pwm_per_mps: 62.0
+    dead_pwm: 1.3
+    gain_pwm_per_mps: 162.9
     v_min_mps: 0.02
     max_pwm: 60
   back_left:
     # Highest starting push of the three healthy wheels: this one is
     # measurably stickier in REVERSE (dead at PWM 11, moves at 16), and
     # reverse is what turning on the spot needs from the left side.
-    dead_pwm: 20.0
-    gain_pwm_per_mps: 42.0
+    dead_pwm: 3.1
+    gain_pwm_per_mps: 143.6
     v_min_mps: 0.02
     max_pwm: 60
   front_right:
+    # UNFITTED AND KNOWN BAD. This wheel did not turn AT ALL in either
+    # direction at applied PWM 42-49 (measured 0.0000 m/s across four
+    # 6-second legs, wheels-up and on the floor), while the other three
+    # tracked their targets to within a few percent.
+    #
+    # RETRACTION: earlier on 2026-08-29 this file said front-right was "not a
+    # failing motor" because it appeared to track perfectly on the floor
+    # (0.250 against a 0.254 target). That reading was the wheel being DRAGGED
+    # by the other three — its encoder was reporting the robot's motion, not
+    # its own drive. Suspiciously exact tracking was the tell. Wheels-up,
+    # with nothing to drag it, it reads exactly zero. The original 2026-08-28
+    # diagnosis (dead at low PWM, moves around 50) stands.
+    #
+    # These numbers are therefore STALE and left only so the wheel is not
+    # over-driven while unmeasured: at max_vx they ask 49, which is below the
+    # threshold, so front-right currently contributes NOTHING and the base is
+    # effectively three-wheel drive. On a mecanum base that breaks the
+    # kinematics and the robot will pull to the left.
+    #
+    # Measure the real threshold with scripts/diagnostics/fr_threshold.py
+    # (wheels UP) before setting these. Do not simply raise dead_pwm to ~55 on
+    # the strength of "it worked at 60 once" — that reading was also taken on
+    # the floor with the wheel possibly being dragged.
     dead_pwm: 34.0
     gain_pwm_per_mps: 60.0
     v_min_mps: 0.02
@@ -155,7 +186,7 @@ wheels:
       ki: 120.0
       i_max_pwm: 45.0
   back_right:
-    dead_pwm: 13.0
-    gain_pwm_per_mps: 60.0
+    dead_pwm: 6.5
+    gain_pwm_per_mps: 126.6
     v_min_mps: 0.02
     max_pwm: 60
