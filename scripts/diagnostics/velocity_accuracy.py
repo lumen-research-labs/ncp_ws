@@ -198,8 +198,15 @@ class Leg(rclpy.node.Node):
         rclpy.spin_until_future_complete(self, fut, timeout_sec=5.0)
         return fut.result() is not None
 
-    def forward_min_range(self) -> float | None:
-        """Min real return within +-RUNWAY_ARC_DEG of dead ahead, metres.
+    def min_range(self, centre_rad: float) -> float | None:
+        """Min real return within +-RUNWAY_ARC_DEG of `centre_rad`, metres.
+
+        Centre is 0 for a forward leg and pi for a reverse one. Checking the
+        direction of TRAVEL matters more here than anywhere else in the stack:
+        rm_safety's e-stop arcs are forward and lateral only (forward_arc_deg,
+        lateral_arc_deg -- there is no rear arc), so when this script commands
+        a negative vx NOTHING downstream will stop the robot for an obstacle
+        behind it. This check is the only thing looking that way.
 
         Applies the same 0.0-is-a-no-return rule the observation builder does:
         the TG30 reports no-return as 0.0, never inf, so an untreated 0.0 reads
@@ -211,7 +218,7 @@ class Leg(rclpy.node.Node):
         half = math.radians(RUNWAY_ARC_DEG)
         best = math.inf
         for i, r in enumerate(s.ranges):
-            ang = s.angle_min + i * s.angle_increment
+            ang = s.angle_min + i * s.angle_increment - centre_rad
             if abs(math.atan2(math.sin(ang), math.cos(ang))) > half:
                 continue
             if r <= s.range_min or math.isnan(r) or math.isinf(r):
@@ -293,18 +300,33 @@ def run_leg(node: Leg, kind: str, val: float, secs: float, limits: dict) -> dict
     # a meaningless under-drive. Check BEFORE arming, not after wondering.
     spin_for(node, 0.5)
     slow = float(limits["estop"]["slow_zone_m"])
-    runway = node.forward_min_range()
-    need = slow + abs(naive_m) + RUNWAY_MARGIN_M if kind == "straight" else slow
+    reversing = vx < 0.0
+    where = "behind" if reversing else "ahead"
+    runway = node.min_range(math.pi if reversing else 0.0)
+    # A reverse leg gets no slow-zone scaling (the arcs face forward), so the
+    # clearance it needs is the travel plus a margin -- but for the same reason
+    # nothing downstream will stop it, so say so out loud.
+    if kind != "straight":
+        need = slow
+    elif reversing:
+        need = abs(naive_m) + RUNWAY_MARGIN_M
+    else:
+        need = slow + abs(naive_m) + RUNWAY_MARGIN_M
+    if reversing:
+        print("  NOTE: reversing. rm_safety has forward and lateral e-stop arcs "
+              "only —\n        nothing will stop this leg for an obstacle "
+              "behind the robot. Watch it.")
     if runway is None:
-        print("!! no /scan — cannot check the runway. Is the lidar up?")
+        print(f"!! no /scan — cannot check the runway {where}. Is the lidar up?")
         if input("   type YES to run anyway: ").strip() != "YES":
             return None
         runway = float("nan")
     else:
-        print(f"  runway ahead: {runway:.2f} m   (need > {need:.2f} m)")
+        print(f"  runway {where}: {runway:.2f} m   (need > {need:.2f} m)")
         if runway < need:
-            print("  !! TOO SHORT — the slow zone would scale the command down "
-                  "and corrupt the measurement. Reposition the robot.")
+            print(f"  !! TOO SHORT — reposition the robot."
+                  + ("" if reversing else " Inside the slow zone the command is "
+                     "scaled\n     down, which would corrupt the measurement."))
             if input("   type YES to run anyway: ").strip() != "YES":
                 return None
 
