@@ -4,9 +4,11 @@
   <name>rm_base</name>
   <version>0.0.0</version>
   <description>
-    ROBOT. Open-loop mecanum base driver. Replaces the vendor Mcnamu_driver_X3:
-    owns the base-board serial, drives raw PWM (bypassing the broken firmware
-    speed PID), and republishes IMU / voltage / corrected vel_raw.
+    ROBOT. Mecanum base driver. Replaces the vendor Mcnamu_driver_X3: owns the
+    base-board serial, drives raw PWM (bypassing the broken firmware speed
+    PID), and republishes IMU / voltage / corrected vel_raw. Runs open loop or,
+    with control_mode:=closed_loop, closes the speed loop in ROS on the
+    sign-corrected encoders.
   </description>
   <maintainer email="devsp2003@gmail.com">Dev Patel</maintainer>
   <license>Proprietary</license>
@@ -15,6 +17,9 @@
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
+
+  <!-- rm_interfaces/msg/BaseDebug — the /base/debug diagnostics topic. -->
+  <depend>rm_interfaces</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

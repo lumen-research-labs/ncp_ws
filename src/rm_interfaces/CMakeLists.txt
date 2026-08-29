@@ -9,8 +9,11 @@ find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
+find_package(geometry_msgs REQUIRED)
 
 # Phase 2: SafetyStatus message.
+# BaseDebug is rm_base's diagnostics topic (/base/debug) — never a runtime
+# dependency of the control path.
 # Phase 4 will add msg/PolicyStatus.msg (not yet authored — add it here then).
 #
 # Kill (/safety/kill) and reset (/safety/reset) use std_srvs/srv/Trigger and
@@ -18,7 +21,8 @@ find_package(builtin_interfaces REQUIRED)
 # dependency belongs to rm_safety, which calls those services, not here.
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/SafetyStatus.msg"
-  DEPENDENCIES std_msgs builtin_interfaces
+  "msg/BaseDebug.msg"
+  DEPENDENCIES std_msgs builtin_interfaces geometry_msgs
 )
 
 if(BUILD_TESTING)

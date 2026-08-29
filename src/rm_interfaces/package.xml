@@ -22,6 +22,10 @@
   <depend>std_msgs</depend>
   <depend>builtin_interfaces</depend>
 
+  <!-- geometry_msgs provides geometry_msgs/Twist, used in BaseDebug.msg to
+       echo back the /cmd_vel that rm_base last received. -->
+  <depend>geometry_msgs</depend>
+
   <!-- Kill (/safety/kill) and reset (/safety/reset) use std_srvs/srv/Trigger.
        That is a no-argument, success+message service — exactly the right shape
        and idiomatic ROS2. rm_interfaces therefore ships NO custom srv for
