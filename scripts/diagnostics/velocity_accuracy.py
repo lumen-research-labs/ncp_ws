@@ -103,6 +103,7 @@ FLOOD_SECS = 2.0        # zero flood after each leg; also captures the ramp-down
 SETTLE_SECS = 1.5       # zeros before arming, so rm_safety has a fresh source
 RUNWAY_ARC_DEG = 30.0   # half-arc searched ahead for the runway check
 RUNWAY_MARGIN_M = 0.25  # clearance demanded beyond slow_zone + travel
+SCAN_WAIT_SECS = 8.0    # how long to wait for the first /scan before giving up
 _STATE = {0: "OK", 1: "SLOW", 2: "STOPPED", 3: "KILLED"}
 
 
@@ -272,6 +273,18 @@ def spin_for(node: rclpy.node.Node, secs: float) -> None:
         rclpy.spin_once(node, timeout_sec=0.05)
 
 
+def wait_for_scan(node: Leg, timeout: float) -> bool:
+    """Block until a /scan has arrived, or `timeout` elapses.
+
+    Returns whether one arrived. The scan is kept across legs, so this only
+    ever actually waits on the first leg of a run.
+    """
+    end = time.monotonic() + timeout
+    while node.scan is None and time.monotonic() < end:
+        rclpy.spin_once(node, timeout_sec=0.05)
+    return node.scan is not None
+
+
 def integrate(track: list[tuple[float, float, float]]) -> tuple[float, float]:
     """Trapezoidal integral of the /cmd_vel track -> (metres, radians)."""
     dist = yaw = 0.0
@@ -338,7 +351,14 @@ def run_leg(node: Leg, kind: str, val: float, secs: float, limits: dict,
     # The slow zone scales vx down proportionally and says nothing about it in
     # the motion itself, so an obstacle inside it turns a calibration run into
     # a meaningless under-drive. Check BEFORE arming, not after wondering.
-    spin_for(node, 0.5)
+    # WAIT for a scan rather than spinning a fixed 0.5 s and hoping. On the
+    # FIRST leg of a run the node has just been created and DDS discovery plus
+    # the first 10 Hz message routinely take longer than that -- which silently
+    # turned the check into "no /scan, type YES to run anyway" on every
+    # single-leg invocation of the first session. Losing the check is worst
+    # exactly when it is skipped without being noticed.
+    if not wait_for_scan(node, SCAN_WAIT_SECS):
+        print(f"  (no /scan yet after {SCAN_WAIT_SECS:.0f} s)")
     slow = float(limits["estop"]["slow_zone_m"])
     reversing = vx < 0.0
     where = "behind" if reversing else "ahead"
@@ -447,9 +467,28 @@ def run_leg(node: Leg, kind: str, val: float, secs: float, limits: dict,
         print("  !! no /base/debug samples — is rm_base_node running?")
 
     # ---- the ruler --------------------------------------------------------
+    # Ask for a MAGNITUDE and apply the commanded sign here. Asking the
+    # operator to sign it by hand produced a wrong-signed entry twice in the
+    # first session -- a reverse leg recorded +0.69 against a -0.72 command
+    # reads as ratio -0.959, which is not a small error but a robot that drove
+    # the wrong way. Reading a tape gives a magnitude; the direction is already
+    # known from what was commanded, so the tool should not ask twice.
     print("\n  MEASURE IT. Tape measure / protractor — not the numbers above.")
-    measured = ask(f"  achieved {'distance (m)' if kind == 'straight' else 'yaw (deg)'}, "
-                   f"signed, blank to skip: ")
+    unit_name = "distance (m)" if kind == "straight" else "yaw (deg)"
+    if kind == "straight":
+        went = "FORWARD" if cmd_ref >= 0 else "BACKWARD"
+    else:
+        went = "LEFT/CCW" if cmd_ref >= 0 else "RIGHT/CW"
+    magnitude = ask(f"  achieved {unit_name} — how far it went, unsigned "
+                    f"(commanded {went}), blank to skip: ")
+    measured = None
+    if magnitude is not None:
+        if magnitude < 0:
+            print("     (negative entered — taking the magnitude; the "
+                  "commanded direction is used)")
+        measured = math.copysign(abs(magnitude), cmd_ref)
+        print(f"     recorded as {measured:+.3f} "
+              f"{'m' if kind == 'straight' else 'deg'}")
     lateral = None
     if kind == "straight" and measured is not None:
         lateral = ask("  sideways drift off the start line (m, blank if none): ")
@@ -519,37 +558,59 @@ def summarise(rows: list[dict]) -> None:
     rows = [r for r in rows
             if r["kind"] != "spin" or (r.get("lever_arm") or "") == current]
 
-    clean: dict[str, list[float]] = {}
-    for kind in ("straight", "spin"):
-        good = [float(r["ratio"]) for r in rows
+    # Group by DIRECTION as well as axis. The calibration is per-direction
+    # (dead_pwm_rev / gain_pwm_per_mps_rev), and the robot has a measured
+    # forward/reverse and CW/CCW asymmetry, so pooling the two directions turns
+    # a direction difference into a fake "varies with speed" verdict — which is
+    # exactly what it did to a 0.959 reverse leg sitting beside three accurate
+    # forward ones.
+    def _clean(kind: str, sign: int) -> list[float]:
+        return [float(r["ratio"]) for r in rows
                 if r["kind"] == kind and r["ratio"] != ""
-                and str(r["safety_ok"]) == "True"]
-        if good:
-            clean[kind] = good
+                and str(r["safety_ok"]) == "True"
+                and (float(r["commanded_val"]) >= 0) == (sign > 0)]
+
+    clean = {(k, s): _clean(k, s)
+             for k in ("straight", "spin") for s in (1, -1)}
 
     # Whether the per-wheel PWM model is exonerated. The straight legs drive
     # the wheels over the same speed range a spin does (wz * lever_arm_m), so
     # if they are accurate the wheels demonstrably CAN hit those speeds and no
-    # wheel-level explanation of a yaw error survives.
+    # wheel-level explanation of a yaw error survives. Judged on the FORWARD
+    # straights: they are the group with several speeds in it.
+    fwd = clean[("straight", 1)]
     wheels_proven = (
-        "straight" in clean
-        and abs(statistics.mean(clean["straight"]) - 1.0) <= 0.05
-        and max(clean["straight"]) - min(clean["straight"]) <= 0.05
+        len(fwd) >= 2
+        and abs(statistics.mean(fwd) - 1.0) <= 0.05
+        and max(fwd) - min(fwd) <= 0.05
     )
 
-    for kind, label in (("straight", "LINEAR  vx"), ("spin", "ANGULAR wz")):
-        ratios = clean.get(kind)
+    for (kind, sign), label in (
+        (("straight", 1), "LINEAR  vx forward"),
+        (("straight", -1), "LINEAR  vx reverse"),
+        (("spin", 1), "ANGULAR wz left/CCW"),
+        (("spin", -1), "ANGULAR wz right/CW"),
+    ):
+        ratios = clean[(kind, sign)]
         if not ratios:
             continue
         mean = statistics.mean(ratios)
         spread = max(ratios) - min(ratios)
-        print(f"\n{label}: {len(ratios)} clean legs, achieved/commanded "
-              f"mean {mean:.3f}, spread {spread:.3f}")
+        print(f"\n{label}: {len(ratios)} clean leg{'s' if len(ratios) > 1 else ''}, "
+              f"achieved/commanded mean {mean:.3f}"
+              + (f", spread {spread:.3f}" if len(ratios) > 1 else ""))
         # A consistent ratio is a SCALE error and is one constant away from
         # fixed. A ratio that varies with speed is a modelling error, and WHICH
         # model is wrong depends on whether the straights already cleared the
         # wheels — that cross-check is why both axes are summarised together.
-        if abs(mean - 1.0) <= 0.05 and spread <= 0.05:
+        # With only one leg there is no speed dependence to see either way.
+        if len(ratios) < 2:
+            verdict = ("within 5%" if abs(mean - 1.0) <= 0.05
+                       else f"{(mean - 1.0) * 100:+.1f}% off")
+            print(f"  -> {verdict}, but ONE leg only — a single speed cannot "
+                  f"separate a scale\n     error from a dead-band. Add a second "
+                  f"speed before trusting it.")
+        elif abs(mean - 1.0) <= 0.05 and spread <= 0.05:
             print("  -> accurate: within 5% at every speed tested.")
         elif spread <= 0.05:
             factor = ("wheel_circumference_m / counts_per_rev" if kind == "straight"
@@ -575,6 +636,8 @@ def summarise(rows: list[dict]) -> None:
                     continue
                 if str(r["safety_ok"]) != "True":
                     continue
+                if (float(r["commanded_val"]) >= 0) != (sign > 0):
+                    continue
                 print(f"       wz {float(r['commanded_val']):+.2f}  "
                       f"scale current lever_arm_m by {1.0 / float(r['ratio']):.3f}")
             print("     Pick the wz the robot actually spins at and fit there; "
@@ -584,10 +647,7 @@ def summarise(rows: list[dict]) -> None:
                   "are mis-split.\n     Refit with fit_reverse.py from two "
                   "STRAIGHT legs — never scale a constant to paper over this.")
 
-    if "straight" in clean and not any(
-        float(r["commanded_val"]) < 0 for r in rows
-        if r["kind"] == "straight" and r["ratio"] != ""
-    ):
+    if clean[("straight", 1)] and not clean[("straight", -1)]:
         print("\nNOTE: no REVERSE straight leg was measured. The calibration is "
               "per-direction\n      (dead_pwm_rev / gain_pwm_per_mps_rev), so "
               "forward accuracy says nothing\n      about reverse.")
