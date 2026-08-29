@@ -146,6 +146,12 @@ DEFAULT_LEGS = [
 CSV_FIELDS = [
     "kind", "commanded_val", "secs", "naive", "cmd_integral", "odom",
     "measured", "ratio", "lateral", "safety_ok", "runway_m", "wheel_flags",
+    # The calibration the leg was driven with. Recorded because the CSV
+    # accumulates across sessions and the natural workflow is measure ->
+    # change a constant -> measure again: without this, summarise() averages
+    # legs from before and after the change together and reports a spread
+    # that is really just the edit. It bit us the first time this was used.
+    "lever_arm",
 ]
 
 
@@ -309,7 +315,8 @@ def ask(prompt: str) -> float | None:
             print("   (enter a number, or blank to skip)")
 
 
-def run_leg(node: Leg, kind: str, val: float, secs: float, limits: dict) -> dict | None:
+def run_leg(node: Leg, kind: str, val: float, secs: float, limits: dict,
+            lever_arm: float | str = "") -> dict | None:
     """Drive one leg and return its result row, or None if the operator skipped."""
     vx = val if kind == "straight" else 0.0
     wz = val if kind == "spin" else 0.0
@@ -467,6 +474,7 @@ def run_leg(node: Leg, kind: str, val: float, secs: float, limits: dict) -> dict
         "lateral": "" if lateral is None else lateral,
         "safety_ok": safety_ok,
         "runway_m": round(runway, 2),
+        "lever_arm": lever_arm,
         "wheel_flags": " ".join(sorted(set(flags))),
     }
 
@@ -476,7 +484,7 @@ def summarise(rows: list[dict]) -> None:
     print("VELOCITY ACCURACY SUMMARY")
     print("=" * 78)
     print(f"{'leg':>16} {'cmd(int)':>10} {'achieved':>10} {'ratio':>7} "
-          f"{'odom':>9} {'sfty':>5}  flags")
+          f"{'odom':>9} {'sfty':>5} {'lever':>6}  flags")
     for r in rows:
         unit = "m" if r["kind"] == "straight" else "d"
         name = f"{r['kind'][:4]} {float(r['commanded_val']):+.2f} {float(r['secs']):.0f}s"
@@ -485,8 +493,31 @@ def summarise(rows: list[dict]) -> None:
         ratio = f"{float(r['ratio']):.3f}" if r["ratio"] != "" else "--"
         odom = f"{float(r['odom']):+.3f}"
         sfty = "ok" if str(r["safety_ok"]) == "True" else "CLAMP"
+        lever = r.get("lever_arm") or "--"
         print(f"{name:>16} {ref:>10} {meas:>10} {ratio:>7} {odom:>9} {sfty:>5}"
-              f"  {r['wheel_flags']}")
+              f" {lever:>6}  {r['wheel_flags']}")
+
+    # Analyse ONE lever_arm at a time. The workflow is measure -> change the
+    # constant -> measure again, all appending to the same sheet, so averaging
+    # every spin leg reports a "spread" that is really the edit.
+    #
+    # Only SPIN legs are filtered: lever_arm_m scales the wheel speeds a yaw
+    # command asks for and has no effect on straight-line driving, so straight
+    # legs stay valid across the change and are all kept. (A change to
+    # dead_pwm/gain WOULD invalidate them, and is not tracked here — start a
+    # fresh --out after one.)
+    levers = [r.get("lever_arm") or "" for r in rows if r["kind"] == "spin"]
+    current = next((l for l in reversed(levers) if l != ""), "")
+    older = {l for l in levers if l != current}
+    if older:
+        shown = ", ".join(sorted(x or "untracked" for x in older | {current}))
+        print(f"\n  NOTE: spin legs here span more than one lever_arm ({shown}). "
+              f"Analysing only\n        the most recent, "
+              f"{current or 'untracked'} — earlier spins are listed above but "
+              f"excluded.\n        Straight legs are unaffected by lever_arm "
+              f"and are all kept.")
+    rows = [r for r in rows
+            if r["kind"] != "spin" or (r.get("lever_arm") or "") == current]
 
     clean: dict[str, list[float]] = {}
     for kind in ("straight", "spin"):
@@ -585,6 +616,9 @@ def main() -> int:
     ap.add_argument("--wz", type=float, help="single ad-hoc spin leg")
     ap.add_argument("--secs", type=float, default=5.0, help="duration of an ad-hoc leg")
     ap.add_argument("--out", default="velocity_accuracy.csv")
+    ap.add_argument("--calibration",
+                    default=os.path.expanduser(
+                        "~/ncp_ws/config/base_calibration.yaml"))
     ap.add_argument("--limits",
                     default=os.path.expanduser("~/ncp_ws/config/safety_limits.yaml"))
     ap.add_argument("--summary", metavar="CSV",
@@ -603,6 +637,11 @@ def main() -> int:
 
     with open(args.limits) as fh:              # no magic numbers: the zones the
         limits = yaml.safe_load(fh)            # runway check needs come from here
+    try:
+        with open(args.calibration) as fh:
+            lever_arm = yaml.safe_load(fh).get("lever_arm_m", "")
+    except OSError:                            # not fatal — it is only a label
+        lever_arm = ""
 
     if args.vx is not None:
         legs = [("straight", args.vx, args.secs)]
@@ -621,7 +660,7 @@ def main() -> int:
     rows: list[dict] = []
     try:
         for kind, val, secs in legs:
-            row = run_leg(node, kind, val, secs, limits)
+            row = run_leg(node, kind, val, secs, limits, lever_arm)
             if row is None:
                 print("   (leg skipped)")
                 continue
