@@ -235,6 +235,15 @@ class BaseNode(rclpy.node.Node):
                 gain_pwm_per_mps=float(p["gain_pwm_per_mps"]),
                 v_min_mps=float(p.get("v_min_mps", 0.02)),
                 max_pwm=int(p.get("max_pwm", 60)),
+                # Optional per-direction overrides. Absent means "same as
+                # forward", i.e. the previous symmetric behaviour.
+                dead_pwm_rev=(
+                    float(p["dead_pwm_rev"]) if "dead_pwm_rev" in p else None
+                ),
+                gain_pwm_per_mps_rev=(
+                    float(p["gain_pwm_per_mps_rev"])
+                    if "gain_pwm_per_mps_rev" in p else None
+                ),
             )
         return out
 

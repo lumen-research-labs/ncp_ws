@@ -231,9 +231,12 @@ class WheelController:
         if applied_pwm is None:
             driving_as_commanded = True
         else:
+            # dead_pwm_for, not .dead_pwm: a wheel with a separate reverse
+            # calibration must be tested against the dead-band for the
+            # direction it is being asked to go.
             driving_as_commanded = (
                 (applied_pwm > 0.0) == (target_mps > 0.0)
-                and abs(applied_pwm) > self.model.dead_pwm
+                and abs(applied_pwm) > self.model.dead_pwm_for(target_mps)
             )
 
         if not driving_as_commanded:

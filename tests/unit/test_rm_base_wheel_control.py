@@ -393,3 +393,84 @@ def test_config_guards_match_module_defaults():
                 f"{name}: closed_loop.guards.{key}={value} shadows "
                 f"Guards.{key}={getattr(defaults, key)}"
             )
+
+
+# ---- per-direction calibration --------------------------------------------
+
+def _asym() -> WheelPwmModel:
+    """Back-left's measured shape: easy forwards, sticky in reverse."""
+    return WheelPwmModel(dead_pwm=7.0, gain_pwm_per_mps=62.0,
+                         v_min_mps=0.02, max_pwm=60,
+                         dead_pwm_rev=16.0, gain_pwm_per_mps_rev=90.0)
+
+
+def test_reverse_params_default_to_forward():
+    """An uncalibrated wheel must stay exactly symmetric."""
+    m = WheelPwmModel(dead_pwm=12.0, gain_pwm_per_mps=62.0)
+    assert m.to_pwm(0.10) == -m.to_pwm(-0.10)
+    assert m.dead_pwm_for(0.1) == m.dead_pwm_for(-0.1) == 12.0
+
+
+def test_reverse_calibration_is_used_for_negative_speeds():
+    m = _asym()
+    assert m.to_pwm(0.10) == round(7.0 + 62.0 * 0.10)      # 13
+    assert m.to_pwm(-0.10) == -round(16.0 + 90.0 * 0.10)   # -25
+    # The whole point: reverse needs materially more push.
+    assert abs(m.to_pwm(-0.10)) > abs(m.to_pwm(0.10))
+
+
+def test_forward_is_unaffected_by_reverse_calibration():
+    m, sym = _asym(), WheelPwmModel(dead_pwm=7.0, gain_pwm_per_mps=62.0)
+    for v in (0.02001, 0.05, 0.15, 0.4):
+        assert m.to_pwm(v) == sym.to_pwm(v)
+
+
+def test_to_speed_inverts_to_pwm_per_direction():
+    m = _asym()
+    for v in (0.05, 0.15, -0.05, -0.15):
+        assert m.to_speed(m.to_pwm(v)) == pytest.approx(v, abs=0.01)
+
+
+def test_dead_pwm_for_picks_the_right_direction():
+    m = _asym()
+    assert m.dead_pwm_for(0.1) == 7.0
+    assert m.dead_pwm_for(-0.1) == 16.0
+
+
+def test_sign_guard_uses_the_reverse_dead_band():
+    """A reverse command must be judged against the REVERSE dead-band.
+
+    With forward dead 7 and reverse dead 16, an applied -12 is past the
+    forward band but NOT actually driving this wheel in reverse. Testing it
+    against the wrong band would re-open the latching bug.
+    """
+    ctrl = WheelController(model=_asym(), gains=PiGains(kp=60.0, ki=80.0),
+                           guards=Guards())
+    for _ in range(ctrl.guards.sign_settle_ticks + ctrl.guards.sign_fault_ticks + 5):
+        out = ctrl.update(-0.10, 0.12, DT, feedback_valid=True, applied_pwm=-12)
+    assert not out.sign_fault, "judged against the forward dead-band"
+
+    ctrl2 = WheelController(model=_asym(), gains=PiGains(kp=60.0, ki=80.0),
+                            guards=Guards())
+    for _ in range(ctrl2.guards.sign_settle_ticks + ctrl2.guards.sign_fault_ticks + 5):
+        out2 = ctrl2.update(-0.10, 0.12, DT, feedback_valid=True, applied_pwm=-30)
+    assert out2.sign_fault, "past the reverse dead-band, so it must still latch"
+
+
+def test_config_may_omit_reverse_keys():
+    """The production config need not define reverse params."""
+    import yaml
+    root = pathlib.Path(__file__).resolve().parents[2]
+    cfg = yaml.safe_load((root / "config" / "base_calibration.yaml").read_text())
+    for name, p in cfg["wheels"].items():
+        m = WheelPwmModel(
+            dead_pwm=float(p["dead_pwm"]),
+            gain_pwm_per_mps=float(p["gain_pwm_per_mps"]),
+            v_min_mps=float(p.get("v_min_mps", 0.02)),
+            max_pwm=int(p.get("max_pwm", 60)),
+            dead_pwm_rev=(float(p["dead_pwm_rev"])
+                          if "dead_pwm_rev" in p else None),
+            gain_pwm_per_mps_rev=(float(p["gain_pwm_per_mps_rev"])
+                                  if "gain_pwm_per_mps_rev" in p else None),
+        )
+        assert m.to_pwm(0.1) != 0, name
