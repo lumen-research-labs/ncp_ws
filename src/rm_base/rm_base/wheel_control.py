@@ -81,6 +81,14 @@ class Guards:
     # Reverse motion must exceed this before the sign guard trips — below it
     # the reading is encoder quantisation noise, not real reverse rotation.
     sign_fault_mps: float = 0.05
+    # Ticks after a commanded direction change during which the sign guard is
+    # SUSPENDED entirely. Resetting the counter on a reversal (see update())
+    # was not enough on hardware: front-right has the highest dead_pwm of the
+    # four, so it takes the longest to coast down and start turning the other
+    # way, and it still latched inside the post-reset window. Polarity is a
+    # static property of the wiring — there is nothing to learn from a wheel
+    # mid-reversal, so do not judge it then at all.
+    sign_settle_ticks: int = 10
     # Consecutive wrong-direction ticks before the sign guard trips.
     #
     # 3 (0.15 s at 20 Hz) was far too short and latched every wheel on the
@@ -125,6 +133,8 @@ class WheelController:
     _sign_latched: bool = False
     # Sign of last tick's target (+1/-1/0), to spot a commanded reversal.
     _prev_target_sign: int = 0
+    # Ticks left in the post-reversal window where the sign guard is suspended.
+    _settle_ticks: int = 0
 
     # ---- state ------------------------------------------------------------
 
@@ -135,6 +145,7 @@ class WheelController:
         self._sign_ticks = 0
         self._sign_latched = False
         self._prev_target_sign = 0
+        self._settle_ticks = 0
 
     @property
     def sign_fault_latched(self) -> bool:
@@ -190,14 +201,31 @@ class WheelController:
         # without anything being wrong. Judging polarity across that boundary
         # is what latched all four wheels on the first full-stack run.
         target_sign = (target_mps > 0.0) - (target_mps < 0.0)
-        if target_sign != self._prev_target_sign:
-            self._sign_ticks = 0
-        self._prev_target_sign = target_sign
-
-        moving_backwards = (
-            abs(measured_mps) > self.guards.sign_fault_mps
-            and (measured_mps > 0.0) != (target_mps > 0.0)
+        # Only a genuine REVERSAL (+1 -> -1 or -1 -> +1) opens a settle
+        # window. Starting from rest (previous sign 0) is not a reversal:
+        # there is no momentum to coast off, so the guard applies immediately
+        # and a truly inverted wheel is caught on its very first move.
+        reversed_direction = (
+            target_sign != 0
+            and self._prev_target_sign != 0
+            and target_sign != self._prev_target_sign
         )
+        if reversed_direction:
+            self._sign_ticks = 0
+            self._settle_ticks = self.guards.sign_settle_ticks
+        if target_sign != 0:
+            self._prev_target_sign = target_sign
+
+        if self._settle_ticks > 0:
+            # Mid-reversal: the wheel is still coasting the old way and there
+            # is nothing to learn about polarity from that.
+            self._settle_ticks -= 1
+            moving_backwards = False
+        else:
+            moving_backwards = (
+                abs(measured_mps) > self.guards.sign_fault_mps
+                and (measured_mps > 0.0) != (target_mps > 0.0)
+            )
         self._sign_ticks = self._sign_ticks + 1 if moving_backwards else 0
         if self._sign_ticks >= self.guards.sign_fault_ticks:
             self._sign_latched = True

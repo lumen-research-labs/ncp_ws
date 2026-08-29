@@ -299,3 +299,34 @@ def test_genuine_polarity_inversion_still_latches_promptly():
     assert out.pwm == 0
     # 20 Hz: must not take more than a second to notice.
     assert ctrl.guards.sign_fault_ticks * DT <= 1.0
+
+
+def test_slow_reversing_wheel_survives_the_settle_window():
+    """Front-right's case: highest dead_pwm, so slowest to turn around.
+
+    It stayed moving the old way for longer than the post-reset window and
+    latched anyway. The guard must be suspended outright while a reversal is
+    in progress, not merely restarted.
+    """
+    ctrl = make()
+    for _ in range(20):
+        ctrl.update(0.15, 0.15, DT, feedback_valid=True)
+    # Reverses, but only crawls toward zero — still wrong-way for many ticks.
+    for _ in range(ctrl.guards.sign_settle_ticks):
+        out = ctrl.update(-0.10, 0.14, DT, feedback_valid=True)
+        assert not out.sign_fault
+    assert not ctrl.sign_fault_latched
+
+
+def test_settle_window_does_not_disable_the_guard_permanently():
+    """After settling, a wheel still going the wrong way must still latch."""
+    ctrl = make()
+    for _ in range(20):
+        ctrl.update(0.15, 0.15, DT, feedback_valid=True)
+    total = ctrl.guards.sign_settle_ticks + ctrl.guards.sign_fault_ticks
+    for _ in range(total):
+        out = ctrl.update(-0.10, 0.14, DT, feedback_valid=True)
+    assert out.sign_fault
+    assert out.pwm == 0
+    # Still prompt: settle + trip must stay inside ~1.5 s at 20 Hz.
+    assert total * DT <= 1.5
