@@ -93,6 +93,15 @@ Launch arguments:
                   "teleop", so two explicit acts are still required.
     calibration_path  path to config/base_calibration.yaml.
 
+    with_slam     "false" (default) starts slam_toolbox, which publishes
+                  map -> odom and corrects the odometry drift. Turning it on
+                  also switches pose_source to "map" unless overridden.
+    pose_source   policy_node's pose: "odom" (dead reckoning, drifts) or
+                  "map" (SLAM-corrected via TF). Empty (default) follows
+                  with_slam. Set explicitly to "odom" WITH with_slam:=true to
+                  run SLAM while still driving on odometry — the safe way to
+                  watch the map build before trusting it.
+
     with_dashboard    "true" (default) also starts rm_dashboard, the live web
                   view of every stage at http://<robot>:8080/. It subscribes
                   only — it publishes no topic and cannot become a second
@@ -271,6 +280,8 @@ def generate_launch_description() -> LaunchDescription:
     control_mode = LaunchConfiguration("control_mode")
     dry_run = LaunchConfiguration("dry_run")
     calibration_path = LaunchConfiguration("calibration_path")
+    with_slam = LaunchConfiguration("with_slam")
+    pose_source = LaunchConfiguration("pose_source")
     with_dashboard = LaunchConfiguration("with_dashboard")
     dashboard_port = LaunchConfiguration("dashboard_port")
     dashboard_controls = LaunchConfiguration("dashboard_controls")
@@ -360,6 +371,23 @@ def generate_launch_description() -> LaunchDescription:
             description="Path to config/base_calibration.yaml.",
         ),
         DeclareLaunchArgument(
+            "with_slam", default_value="false",
+            description="Start slam_toolbox, which publishes map -> odom and "
+                        "corrects the odometry drift. Default FALSE: it is a "
+                        "new layer and the odom path is the one with hardware "
+                        "history behind it. Turning this on ALSO switches "
+                        "pose_source to 'map' unless you override it.",
+        ),
+        DeclareLaunchArgument(
+            "pose_source", default_value="",
+            description="policy_node's pose: 'odom' (dead reckoning) or 'map' "
+                        "(SLAM-corrected, via TF). Empty (the default) means "
+                        "'follow with_slam' — 'map' when SLAM is up, 'odom' "
+                        "when it is not. Set it explicitly to run SLAM while "
+                        "still driving on odom, which is the safe way to watch "
+                        "the map build before trusting it.",
+        ),
+        DeclareLaunchArgument(
             "with_dashboard", default_value="true",
             description="Start rm_dashboard — the live web view of the whole "
                         "stack at http://<robot>:8080/. Subscribe-only on "
@@ -423,6 +451,11 @@ def generate_launch_description() -> LaunchDescription:
         OpaqueFunction(function=_upstream_process),
 
         IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(str(_LAUNCH_DIR / "slam.launch.py")),
+            condition=IfCondition(with_slam),
+        ),
+
+        IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(_LAUNCH_DIR / "dashboard.launch.py")),
             condition=IfCondition(with_dashboard),
             launch_arguments={
@@ -445,6 +478,16 @@ def generate_launch_description() -> LaunchDescription:
                 "odom_topic": "/odom",
                 "cmd_vel_topic": _POLICY_CMD_TOPIC,
                 "weights": weights,
+                # Empty pose_source means "follow with_slam". Written as one
+                # expression so there is a single place that decides, rather
+                # than a default here that can silently disagree with whether
+                # slam_toolbox is actually running — a policy_node asking for
+                # a map pose that nothing publishes is a fail-closed stop, and
+                # one reading odom while SLAM runs is a silent downgrade.
+                "pose_source": PythonExpression([
+                    "'", pose_source, "' or ('map' if '", with_slam,
+                    "'.lower() == 'true' else 'odom')",
+                ]),
                 "interface_config_path": _DEFAULT_INTERFACE_PATH,
                 "safety_limits_path": _DEFAULT_LIMITS_PATH,
             }],

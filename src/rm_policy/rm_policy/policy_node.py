@@ -72,6 +72,13 @@ Parameters:  interface_config_path (str, <repo-relative default>) — path to
 Parameters:  safety_limits_path    (str, <repo-relative default>) — path to
                               config/safety_limits.yaml, for the scan/odom
                               timeout constants shared with rm_safety
+Parameters:  pose_source      (str, "odom") — "odom" reads the pose from /odom
+                              (dead reckoning, drifts); "map" looks up
+                              map -> base_footprint via TF, which slam_toolbox
+                              corrects. In "map" mode the goal is fixed in the
+                              MAP frame on the first usable pose, so it stops
+                              migrating with odometry drift. Read once at
+                              startup; a runtime set is REJECTED.
 Failure mode:
     - Node refuses to construct (raises, never starts spinning) if:
         * `config/interface.yaml` cannot be read, or its `interface_version`
@@ -83,6 +90,15 @@ Failure mode:
         * `weights` is non-empty and fails to load (see policy_runner.py).
     - Before the first `/odom` message: goal undefined -> publish zero every
       tick, throttled warning. No motion is possible on startup.
+    - `pose_source:="map"` and the map -> base_footprint transform missing,
+      unconnected, un-extrapolatable or stale: publish zero, reason
+      `pose_tf_unavailable:*` / `pose_stale:*`. NEVER falls back to /odom —
+      a silent downgrade to the drifting pose is exactly the failure this
+      mode exists to remove, and it would be invisible.
+    - A pose DISCONTINUITY (a SLAM loop closure or relocalization) does not
+      stop the robot: the corrected pose is adopted and the policy runner's
+      recurrent state is reset, because the hidden state was accumulated
+      toward a goal position that has just moved. See pose_source.py.
     - Stale `/scan` or `/odom` (age > the shared timeout from
       safety_limits.yaml): publish zero, throttled warning, and reset the
       policy runner's recurrent state (so a resumed session does not carry
@@ -115,8 +131,10 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
+import tf2_ros
 from rm_policy.observation_builder import build_observation
 from rm_policy.policy_runner import PolicyRunner
+from rm_policy.pose_source import Pose2D, detect_pose_jump, pose_is_usable
 
 # ---------------------------------------------------------------------------
 # Interface-contract version this node was written against. Loaded-and-checked
@@ -173,6 +191,18 @@ _DEFAULT_WEIGHTS_PATH: str = ""
 # (config/interface.yaml observation.layout: 32 lidar, then goal_local, then
 # previous_action; `normalization: "xy / 5.0 - 1.0"`). Used ONLY to invert the
 # normalization for the debug stream — never to build the vector.
+# Pose sources. "odom" reads the pose straight from /odom (the pre-SLAM
+# behaviour and still the default). "map" looks up map -> base_footprint via
+# TF, which is what slam_toolbox corrects. See pose_source.py.
+_POSE_SOURCE_ODOM: str = "odom"
+_POSE_SOURCE_MAP: str = "map"
+
+# Frames for the map pose lookup. base_footprint, not base_link: /odom's
+# child_frame_id is base_footprint and that is what the EKF and slam_toolbox
+# both terminate at (interface.yaml coordinate_frames).
+_MAP_FRAME: str = "map"
+_BASE_FRAME: str = "base_footprint"
+
 _GOAL_SLICE_START: int = 32
 _GOAL_NORM_SCALE_M: float = 5.0
 
@@ -216,6 +246,7 @@ class PolicyNode(rclpy.node.Node):
         self.declare_parameter("weights", _DEFAULT_WEIGHTS_PATH)
         self.declare_parameter("interface_config_path", _DEFAULT_INTERFACE_CONFIG_PATH)
         self.declare_parameter("safety_limits_path", _DEFAULT_SAFETY_LIMITS_PATH)
+        self.declare_parameter("pose_source", _POSE_SOURCE_ODOM)
 
         scan_topic = self._get_str_param("scan_topic")
         odom_topic = self._get_str_param("odom_topic")
@@ -226,6 +257,12 @@ class PolicyNode(rclpy.node.Node):
         weights_path = self._get_str_param("weights")
         interface_config_path = self._get_str_param("interface_config_path")
         safety_limits_path = self._get_str_param("safety_limits_path")
+        self._pose_source = self._get_str_param("pose_source")
+        if self._pose_source not in (_POSE_SOURCE_ODOM, _POSE_SOURCE_MAP):
+            raise ValueError(
+                f"policy_node: pose_source must be {_POSE_SOURCE_ODOM!r} or "
+                f"{_POSE_SOURCE_MAP!r}, got {self._pose_source!r}"
+            )
 
         # ------------------------------------------------------------------
         # HARD RULE: never publish to /cmd_vel from this node. rm_safety is
@@ -285,6 +322,14 @@ class PolicyNode(rclpy.node.Node):
                 f"timeouts.scan_timeout_ms / odom_timeout_ms: {exc}"
             ) from exc
 
+        # Freshness bound on the pose, whichever source it comes from. Reuses
+        # the odom timeout rather than inventing a second constant: a pose is
+        # an odometry-derived quantity in both modes (map mode corrects it,
+        # but the odom -> base_footprint edge is still underneath), so the two
+        # should go stale on the same schedule. Deriving it also means it
+        # cannot drift out of step with rm_safety's own watchdog.
+        self._pose_max_age_s: float = self._odom_timeout_ms / 1000.0
+
         # ------------------------------------------------------------------
         # Policy runner — constructed (and weights loaded, if given) before
         # any subscription/timer exists, so a bad weights file prevents the
@@ -322,6 +367,17 @@ class PolicyNode(rclpy.node.Node):
         self._last_scan_stale: bool = True
         self._last_odom_stale: bool = True
 
+        # Previous pose sample, for jump detection. A SLAM correction is a
+        # step change in the pose and therefore in goal_local, which the CfC
+        # reads — see pose_source.py for why a stateful network makes the
+        # recurrent-state reset mandatory rather than tidy.
+        self._prev_pose: Optional[Pose2D] = None
+
+        # Offset between the ROS clock TF transforms are stamped in and this
+        # node's monotonic clock, established on the first successful lookup.
+        # Only used in map mode.
+        self._tf_epoch_offset: Optional[float] = None
+
         # ------------------------------------------------------------------
         # QoS — best-effort/volatile, matching rm_safety's sensor QoS.
         # ------------------------------------------------------------------
@@ -342,7 +398,23 @@ class PolicyNode(rclpy.node.Node):
         # Subscriptions
         # ------------------------------------------------------------------
         self.create_subscription(LaserScan, scan_topic, self._scan_cb, sensor_qos)
+        # /odom is subscribed in BOTH pose modes. In "map" mode the pose comes
+        # from TF, but this subscription still drives the odom staleness
+        # watchdog — which mirrors rm_safety's, and rm_safety zeroes every
+        # command on odom_stale at precedence 3 regardless of what this node
+        # thinks. Dropping it in map mode would let this node keep commanding
+        # while the safety layer had already gone quiet, which is a confusing
+        # disagreement to debug and buys nothing.
         self.create_subscription(Odometry, odom_topic, self._odom_cb, sensor_qos)
+
+        # TF, only in map mode. Creating a TransformListener spawns a
+        # subscription to /tf and /tf_static, so it is not free; in odom mode
+        # nothing here is used and it is left unbuilt.
+        self._tf_buffer: Optional[tf2_ros.Buffer] = None
+        self._tf_listener = None
+        if self._pose_source == _POSE_SOURCE_MAP:
+            self._tf_buffer = tf2_ros.Buffer()
+            self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
         # ------------------------------------------------------------------
         # Control loop timer — rate sourced from interface.yaml control.rate_hz.
@@ -403,6 +475,67 @@ class PolicyNode(rclpy.node.Node):
     # loop does all the decision-making, matching rm_safety.safety_node's
     # split between I/O callbacks and the timer-driven evaluation.
     # ------------------------------------------------------------------
+
+    def _current_pose(self, now: float) -> Tuple[Optional[Pose2D], Optional[str]]:
+        """The robot's pose for this tick, or a fault reason.
+
+        In "odom" mode this is whatever `_odom_cb` last recorded. In "map"
+        mode it is a TF lookup of map -> base_footprint, which is the pose
+        slam_toolbox corrects; `/odom` is still subscribed, but only to drive
+        the staleness watchdog.
+
+        Returns `(pose, None)` or `(None, reason)`. There is no third outcome
+        and no default pose: a substituted pose is a plausible-looking lie
+        about where the robot is, and every downstream number — goal_local,
+        the observation, the command — would inherit it silently.
+        """
+        if self._pose_source == _POSE_SOURCE_ODOM:
+            if self._odom_stamp is None:
+                return None, "pose_missing"
+            return Pose2D(
+                x=self._robot_x, y=self._robot_y, yaw=self._robot_yaw,
+                stamp=self._odom_stamp,
+            ), None
+
+        # --- map mode: TF ---
+        if self._tf_buffer is None:  # unreachable; defensive
+            return None, "pose_no_tf_buffer"
+        try:
+            # rclpy.time.Time() means "latest available" rather than a
+            # specific stamp. Asking for `now` instead invites extrapolation
+            # errors on a robot whose clock has been pushed by hand, and the
+            # freshness of what comes back is checked below anyway — which is
+            # the honest way round: take what exists, then judge its age.
+            tf = self._tf_buffer.lookup_transform(
+                _MAP_FRAME, _BASE_FRAME, rclpy.time.Time()
+            )
+        except Exception as exc:
+            # Covers the whole tf2 exception family (LookupException,
+            # ConnectivityException, ExtrapolationException) plus anything
+            # else the buffer raises. All of them mean the same thing here:
+            # no trustworthy pose, so do not drive.
+            return None, f"pose_tf_unavailable:{type(exc).__name__}"
+
+        t = tf.transform.translation
+        q = tf.transform.rotation
+        # The transform carries a ROS stamp; convert to the monotonic clock
+        # this node measures ages against, by trusting the buffer's own
+        # freshness rather than mixing two clocks. The age is derived from
+        # how long ago we received it, tracked below.
+        stamp_s = tf.header.stamp.sec + tf.header.stamp.nanosec * 1e-9
+        if self._tf_epoch_offset is None:
+            # First successful lookup establishes the offset between the ROS
+            # clock the transform is stamped in and this node's monotonic
+            # clock. Mixing the two directly is what produces nonsense ages
+            # on a robot whose wall clock jumps months when it is corrected.
+            self._tf_epoch_offset = now - stamp_s
+        mono_stamp = stamp_s + self._tf_epoch_offset
+
+        return Pose2D(
+            x=float(t.x), y=float(t.y),
+            yaw=_yaw_from_quaternion(q.x, q.y, q.z, q.w),
+            stamp=mono_stamp,
+        ), None
 
     def _on_set_parameters(self, params) -> SetParametersResult:
         """Runtime re-targeting: setting `goal_x`/`goal_y` re-fixes the goal
@@ -487,7 +620,7 @@ class PolicyNode(rclpy.node.Node):
         self._robot_yaw = yaw
         self._odom_stamp = time.monotonic()
 
-        if self._goal_world_x is None:
+        if self._goal_world_x is None and self._pose_source == _POSE_SOURCE_ODOM:
             # Fix the goal ONCE, from the first /odom message: start position
             # plus the launch-parameter (goal_x, goal_y) offset, rotated by
             # the start yaw into the world (odom) frame. This is a one-time
@@ -560,6 +693,10 @@ class PolicyNode(rclpy.node.Node):
                 if action is not None
                 else None
             ),
+            # Which pose the goal is being computed from. Worth publishing:
+            # "the goal is drifting" and "the goal is fixed in a corrected
+            # frame" look identical on a plot until you know which mode ran.
+            "pose_source": self._pose_source,
             "weights": self._runner.weights_path or None,
             # Short hash is enough to tell two checkpoints apart at a glance
             # while keeping this message small at 5 Hz; the full hash is in
@@ -643,6 +780,56 @@ class PolicyNode(rclpy.node.Node):
             )
             self._publish_zero(reason="odom_stale")
             return
+
+        # ------------------------------------------------------------------
+        # Pose. In map mode this is the SLAM-corrected TF pose; in odom mode
+        # it is /odom's, exactly as before. Fail-closed either way.
+        # ------------------------------------------------------------------
+        pose, pose_fault = self._current_pose(now)
+        if pose_fault is None:
+            pose_fault = pose_is_usable(pose, now, self._pose_max_age_s)
+        if pose_fault is not None or pose is None:
+            self.get_logger().warn(
+                f"policy_node: pose unavailable ({pose_fault}) — publishing "
+                f"zero.",
+                throttle_duration_sec=_WARN_THROTTLE_SEC,
+            )
+            self._publish_zero(reason=str(pose_fault))
+            return
+
+        # JUMP DETECTION. A corrected pose is a BETTER pose, so it is adopted
+        # — what is discarded is the recurrent state, which was accumulated
+        # while steering toward where the goal appeared to be before the
+        # correction. Not resetting here is the failure that would be hardest
+        # to see: the policy would keep acting on a hidden history that no
+        # longer corresponds to anything.
+        jump = detect_pose_jump(self._prev_pose, pose)
+        if jump is not None:
+            self._runner.reset()
+            self.get_logger().warn(
+                f"policy_node: pose discontinuity ({jump}) — recurrent state "
+                f"reset. Expected on a SLAM loop closure; investigate if it "
+                f"repeats while stationary."
+            )
+        self._prev_pose = pose
+
+        self._robot_x, self._robot_y, self._robot_yaw = pose.x, pose.y, pose.yaw
+
+        # In map mode the goal is fixed on the first usable MAP pose, not on
+        # the first /odom message — that is the entire point. A goal fixed in
+        # the odom frame migrates with the odometry drift; one fixed in the
+        # map frame does not.
+        if self._goal_world_x is None and self._pose_source == _POSE_SOURCE_MAP:
+            dx, dy = _rotate_2d(
+                self._goal_offset_x, self._goal_offset_y, pose.yaw
+            )
+            self._goal_world_x = pose.x + dx
+            self._goal_world_y = pose.y + dy
+            self.get_logger().info(
+                f"policy_node: goal fixed in the {_MAP_FRAME} frame at "
+                f"({self._goal_world_x:.3f}, {self._goal_world_y:.3f}) from "
+                f"pose ({pose.x:.3f}, {pose.y:.3f}, {pose.yaw:.3f})."
+            )
 
         # ------------------------------------------------------------------
         # Goal must be defined. No default is ever substituted (interface.yaml

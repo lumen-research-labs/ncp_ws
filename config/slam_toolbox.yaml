@@ -1,0 +1,109 @@
+# slam_toolbox (async online mapping) for the ROSMASTER X3.
+#
+# WHY: policy_node derives the robot's pose, and therefore `goal_local` — 2 of
+# the 36 numbers the trained network reads — from /odom. /odom on this robot is
+# dead reckoning over wheel encoders and the IMU, with counts_per_rev FITTED to
+# a tape measure with wheel slip baked in, and it over-reads linear distance by
+# ~5% (measured 2026-08-29). It drifts, and the operator confirmed the goal
+# visibly drifting during driven runs.
+#
+# slam_toolbox publishes map -> odom, correcting that drift by scan-matching
+# against a map it builds. The goal is then fixed in the MAP frame, so it stops
+# migrating with the odometry error.
+#
+# WHAT THIS DOES NOT FIX: the odometry itself. base_node still integrates the
+# same encoders and the EKF still fuses them; odom -> base_footprint is
+# unchanged. This adds a correcting frame on top, it does not repair the one
+# underneath. /odom remains untrustworthy for anything that reads it directly.
+#
+# THE COST: a corrected pose is a DISCONTINUOUS pose. Every loop closure is a
+# step change, by design. rm_policy.pose_source detects those and policy_node
+# resets the CfC's recurrent state when one happens — see that module for why
+# a stateful network makes this mandatory rather than tidy.
+
+slam_toolbox:
+  ros__parameters:
+    # ---- plugins (stock async online defaults) ----
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+
+    # ---- frames ----
+    # base_frame is base_footprint, NOT base_link: /odom's child_frame_id is
+    # base_footprint (interface.yaml coordinate_frames), and the EKF publishes
+    # odom -> base_footprint. Naming base_link here would ask slam_toolbox to
+    # bridge a frame the odometry does not actually terminate at.
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_footprint
+    scan_topic: /scan
+    use_map_saver: true
+    mode: mapping
+
+    # ---- rates ----
+    # /scan is 10.1 Hz and the control loop is 5 Hz. Matching the map update
+    # to the control rate is pointless — the map does not change that fast —
+    # and scan matching is the expensive part. 2 Hz map, 0.5 s transform
+    # publish period keeps map -> odom fresher than the 5 Hz consumer needs.
+    transform_publish_period: 0.02
+    map_update_interval: 0.5
+    resolution: 0.05
+
+    # ---- laser range gating: CRITICAL ON THIS SENSOR ----
+    # The YDLIDAR TG30 encodes a no-return as 0.0, NOT inf (measured on
+    # bernard-1: 1982 points, 781 zeros = 39.4%, 0 inf; the driver's
+    # invalid_range_is_inf flag is INERT). A 0.0 taken at face value is an
+    # obstacle at the sensor origin, and ~39% of rays being phantom
+    # zero-range hits would wreck scan matching completely.
+    #
+    # min_laser_range is what discards them here. It is the same class of
+    # protection scan_resampler provides on the policy path, applied
+    # independently because slam_toolbox reads the RAW /scan and nothing in
+    # our pipeline sits between the driver and it.
+    min_laser_range: 0.15
+    max_laser_range: 12.0
+
+    minimum_time_interval: 0.2
+    transform_timeout: 0.2
+    tf_buffer_duration: 10.0
+    stack_size_to_use: 40000000
+    enable_interactive_mode: false
+
+    # ---- matcher ----
+    use_scan_matching: true
+    use_scan_barycenter: true
+    # 0.5 m / 0.5 rad between processed scans. At max_vx 0.25 m/s that is one
+    # update per ~2 s of driving, which is ample for a room-sized map and
+    # keeps the Orin's CPU free for the policy.
+    minimum_travel_distance: 0.2
+    minimum_travel_heading: 0.2
+    scan_buffer_size: 10
+    scan_buffer_maximum_scan_distance: 10.0
+    link_match_minimum_response_fine: 0.1
+    link_scan_maximum_distance: 1.5
+    loop_search_maximum_distance: 3.0
+    do_loop_closing: true
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45
+
+    correlation_search_space_dimension: 0.5
+    correlation_search_space_resolution: 0.01
+    correlation_search_space_smear_deviation: 0.1
+
+    loop_search_space_dimension: 8.0
+    loop_search_space_resolution: 0.05
+    loop_search_space_smear_deviation: 0.03
+
+    distance_variance_penalty: 0.5
+    angle_variance_penalty: 1.0
+    fine_search_angle_offset: 0.00349
+    coarse_search_angle_offset: 0.349
+    coarse_angle_resolution: 0.0349
+    minimum_angle_penalty: 0.9
+    minimum_distance_penalty: 0.5
+    use_response_expansion: true
