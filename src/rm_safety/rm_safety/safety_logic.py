@@ -87,15 +87,65 @@ class EstopLimits:
     """Lidar e-stop zone configuration."""
     slow_zone_m: float
     stop_zone_m: float
+    # The STOP zone's arcs, and the default for the slow zone.
     forward_arc_deg: float
     lateral_arc_deg: float
     consecutive_scans_to_trigger: int
     latching: bool
+    # ------------------------------------------------------------------
+    # SLOW-ZONE ARCS, separate from the stop zone's (added 2026-08-29).
+    #
+    # Before this, ONE arc pair served both zones, so narrowing the slow zone
+    # to stop side walls from throttling forward motion also narrowed the
+    # STOP zone — trading a comfort problem for a safety reduction. These
+    # exist so the slow zone can be a narrow forward cone while the stop zone
+    # keeps its full coverage.
+    #
+    # None means "same as the stop arcs", which is the pre-2026-08-29
+    # behaviour and what a config without these keys gets.
+    #
+    # INVARIANT, enforced in from_dict: the slow arcs must not be WIDER than
+    # the stop arcs. The logic relies on the slow arc being a subset, so that
+    # min_range_slow >= min_range always holds; a wider slow arc would mean an
+    # obstacle could be "slow" without the stop zone ever having looked at it.
+    slow_forward_arc_deg: Optional[float] = None
+    slow_lateral_arc_deg: Optional[float] = None
     # Chassis self-hit exclusion zones, degrees, [(lo, hi), ...]. A ray whose
     # angle falls in any zone is dropped before the forward/lateral arc
     # check in min_range_in_arcs(). See safety_limits.yaml estop.
     # self_occlusion_zones_deg for the measurement behind this.
     self_occlusion_zones_deg: Tuple[Tuple[float, float], ...] = ()
+
+    @property
+    def effective_slow_forward_arc_deg(self) -> float:
+        """Slow-zone forward arc, falling back to the stop zone's."""
+        return (
+            self.forward_arc_deg
+            if self.slow_forward_arc_deg is None
+            else self.slow_forward_arc_deg
+        )
+
+    @property
+    def effective_slow_lateral_arc_deg(self) -> float:
+        """Slow-zone lateral arc, falling back to the stop zone's.
+
+        0.0 is meaningful and is NOT the same as None: it disables lateral
+        monitoring for the slow zone entirely, which is the point of narrowing
+        to a forward cone. None means "inherit the stop zone's arc".
+        """
+        return (
+            self.lateral_arc_deg
+            if self.slow_lateral_arc_deg is None
+            else self.slow_lateral_arc_deg
+        )
+
+    @property
+    def slow_arcs_differ(self) -> bool:
+        """True when the slow zone has its own, narrower geometry."""
+        return (
+            self.effective_slow_forward_arc_deg != self.forward_arc_deg
+            or self.effective_slow_lateral_arc_deg != self.lateral_arc_deg
+        )
 
 
 @dataclass(frozen=True)
@@ -154,7 +204,7 @@ class Limits:
         e = d["estop"]
         t = d["timeouts"]
 
-        return Limits(
+        limits = Limits(
             velocity=VelocityLimits(
                 max_vx=float(v["max_vx"]),
                 max_vy=float(v["max_vy"]),
@@ -172,6 +222,14 @@ class Limits:
                 stop_zone_m=float(e["stop_zone_m"]),
                 forward_arc_deg=float(e["forward_arc_deg"]),
                 lateral_arc_deg=float(e["lateral_arc_deg"]),
+                slow_forward_arc_deg=(
+                    float(e["slow_forward_arc_deg"])
+                    if e.get("slow_forward_arc_deg") is not None else None
+                ),
+                slow_lateral_arc_deg=(
+                    float(e["slow_lateral_arc_deg"])
+                    if e.get("slow_lateral_arc_deg") is not None else None
+                ),
                 consecutive_scans_to_trigger=int(e["consecutive_scans_to_trigger"]),
                 latching=bool(e["latching"]),
                 self_occlusion_zones_deg=tuple(
@@ -185,6 +243,32 @@ class Limits:
                 odom_timeout_ms=float(t["odom_timeout_ms"]),
             ),
         )
+
+        # INVARIANT: the slow arcs must be a SUBSET of the stop arcs.
+        #
+        # The zone logic relies on min_range_slow >= min_range, which holds
+        # only while the slow arc is contained in the stop arc. A wider slow
+        # arc would let an obstacle register as "slow" in a sector the stop
+        # zone never examines — a slow zone with no stop zone behind it, which
+        # is the opposite of the layering this design depends on.
+        #
+        # Fatal rather than clamped: a misconfigured safety arc must stop the
+        # node from starting, not be silently corrected into something the
+        # operator did not write.
+        es = limits.estop
+        if es.effective_slow_forward_arc_deg > es.forward_arc_deg:
+            raise ValueError(
+                f"slow_forward_arc_deg ({es.effective_slow_forward_arc_deg}) "
+                f"must not exceed forward_arc_deg ({es.forward_arc_deg}): the "
+                f"slow zone must sit inside the stop zone's coverage."
+            )
+        if es.effective_slow_lateral_arc_deg > es.lateral_arc_deg:
+            raise ValueError(
+                f"slow_lateral_arc_deg ({es.effective_slow_lateral_arc_deg}) "
+                f"must not exceed lateral_arc_deg ({es.lateral_arc_deg}): the "
+                f"slow zone must sit inside the stop zone's coverage."
+            )
+        return limits
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +550,9 @@ def min_range_in_arcs(
     angle_min: float,
     angle_increment: float,
     limits: Limits,
+    *,
+    forward_arc_deg: Optional[float] = None,
+    lateral_arc_deg: Optional[float] = None,
 ) -> float:
     """Compute the minimum valid range within the monitored forward and lateral arcs.
 
@@ -520,8 +607,20 @@ def min_range_in_arcs(
     if not ranges or angle_increment <= 0.0 or not math.isfinite(angle_increment):
         return math.inf
 
-    half_fwd = math.radians(limits.estop.forward_arc_deg / 2.0)
-    half_lat = math.radians(limits.estop.lateral_arc_deg / 2.0)
+    fwd_deg = (
+        limits.estop.forward_arc_deg if forward_arc_deg is None else forward_arc_deg
+    )
+    lat_deg = (
+        limits.estop.lateral_arc_deg if lateral_arc_deg is None else lateral_arc_deg
+    )
+    half_fwd = math.radians(fwd_deg / 2.0)
+    half_lat = math.radians(lat_deg / 2.0)
+    # A lateral arc of zero DISABLES lateral monitoring rather than degenerating
+    # into a hairline arc that only matches rays landing exactly on ±90°. That
+    # distinction matters: the narrow slow cone sets this to 0 deliberately, and
+    # "occasionally catches a ray that happens to hit ±90.0°" would be a
+    # non-deterministic slow trigger rather than a disabled one.
+    lateral_enabled = lat_deg > 0.0
 
     # Lateral arc centres at ±90°
     lat_centre_left  = math.pi / 2.0
@@ -551,8 +650,8 @@ def min_range_in_arcs(
             continue
 
         in_forward = abs(angle) <= half_fwd
-        in_left    = abs(angle - lat_centre_left)  <= half_lat
-        in_right   = abs(angle - lat_centre_right) <= half_lat
+        in_left  = lateral_enabled and abs(angle - lat_centre_left)  <= half_lat
+        in_right = lateral_enabled and abs(angle - lat_centre_right) <= half_lat
 
         if in_forward or in_left or in_right:
             if r < min_r:
@@ -564,6 +663,7 @@ def min_range_in_arcs(
 def estop_zone(
     min_range: float,
     limits: Limits,
+    min_range_slow: Optional[float] = None,
 ) -> str:
     """Map a minimum range value to an e-stop zone label.
 
@@ -594,7 +694,11 @@ def estop_zone(
     """
     if min_range < limits.estop.stop_zone_m:
         return "stop"
-    if min_range < limits.estop.slow_zone_m:
+    # The slow test uses the SLOW arcs' minimum when one was supplied. An
+    # obstacle off to the side is then still fully covered by the stop test
+    # above (which used the wide arcs) but no longer throttles forward motion.
+    slow_r = min_range if min_range_slow is None else min_range_slow
+    if slow_r < limits.estop.slow_zone_m:
         return "slow"
     return "clear"
 
@@ -802,6 +906,32 @@ def _evaluate_inner(inputs: EvalInputs, limits: Limits) -> Decision:
         limits,
     )
 
+    # The SLOW zone gets its own, narrower arcs (2026-08-29). Computed as a
+    # second pass over the same cleaned ranges rather than folded into the
+    # first, because the two numbers answer different questions and are used
+    # at different precedence levels:
+    #
+    #   min_r       — the WIDE stop arcs. Governs the stop zone and the latch,
+    #                 and is what gets reported on /safety/status. Coverage
+    #                 here is unchanged by the slow-arc narrowing.
+    #   min_r_slow  — the NARROW slow arcs. Governs velocity scaling only.
+    #
+    # Since the slow arc is validated to be a subset of the stop arc,
+    # min_r_slow >= min_r always. When the arcs are identical (the default,
+    # and every config written before 2026-08-29) the second pass is skipped
+    # and the two are the same value, so behaviour is bit-identical.
+    if limits.estop.slow_arcs_differ:
+        min_r_slow = min_range_in_arcs(
+            cleaned_ranges,
+            inputs.scan_angle_min,
+            inputs.scan_angle_increment,
+            limits,
+            forward_arc_deg=limits.estop.effective_slow_forward_arc_deg,
+            lateral_arc_deg=limits.estop.effective_slow_lateral_arc_deg,
+        )
+    else:
+        min_r_slow = min_r
+
     # ------------------------------------------------------------------
     # Precedence 2: SCAN STALE or NO VALID PERCEPTION
     # ------------------------------------------------------------------
@@ -842,7 +972,7 @@ def _evaluate_inner(inputs: EvalInputs, limits: Limits) -> Decision:
     # ------------------------------------------------------------------
     # Consecutive-scan noise filter and latch management
     # ------------------------------------------------------------------
-    zone = estop_zone(min_r, limits)
+    zone = estop_zone(min_r, limits, min_range_slow=min_r_slow)
     is_stop_zone = (zone == "stop")
 
     new_count = update_stop_counter(
@@ -946,7 +1076,20 @@ def _evaluate_inner(inputs: EvalInputs, limits: Limits) -> Decision:
     # immediately, same effect as SLOW state ramping to zero at the boundary.
     # ------------------------------------------------------------------
     if zone in ("slow", "stop"):
-        scale = slow_scale(min_r, limits)
+        # WHICH range sets the scale depends on which zone we are in, and
+        # getting this backwards would undo the 2026-08-14 pre-latch fix.
+        #
+        #   zone == "stop"  -> a stop-zone reading, seen by the WIDE arcs and
+        #                      not yet latched. Scale from min_r, so
+        #                      slow_scale() returns 0.0 and the pre-latch
+        #                      window brakes immediately. Using min_r_slow
+        #                      here would let a stop-zone obstacle that sits
+        #                      outside the narrow cone scale to 1.0 and emit
+        #                      FULL velocity for the whole pre-latch window.
+        #   zone == "slow"  -> scale from min_r_slow, the narrow forward cone.
+        #                      That is the entire point of the split: things
+        #                      beside the robot no longer throttle it.
+        scale = slow_scale(min_r if zone == "stop" else min_r_slow, limits)
         # TRANSLATION is scaled: moving the body through space is what closes
         # the distance to an obstacle, so proximity must throttle it.
         vx *= scale

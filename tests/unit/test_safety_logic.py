@@ -149,7 +149,7 @@ class TestLimitsFromDict:
         # 0.80 -> 0.50 -> 0.65 on 2026-08-29: down to sit under the debug
         # policy's new 0.9 m obstacle_dist, then back out to buy stopping
         # room when max_vx was raised to 0.25.
-        assert real_limits.estop.slow_zone_m == pytest.approx(0.65)
+        assert real_limits.estop.slow_zone_m == pytest.approx(0.55)
         assert real_limits.estop.stop_zone_m == pytest.approx(0.35)
         assert real_limits.estop.consecutive_scans_to_trigger == 3
 

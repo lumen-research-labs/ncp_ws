@@ -1047,7 +1047,7 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   `dry_run` throughout — and the stack was stopped cleanly before the operator
   ran the real tests.
 
-- 2026-08-30: **THE TRAINED POLICY RUNS THE PIPELINE ON HARDWARE, and there is
+- 2026-08-29: **THE TRAINED POLICY RUNS THE PIPELINE ON HARDWARE, and there is
   now a web dashboard.** Weights `actor.pt` (m4 BARN run, sha256 `3c9bf0ee112b…`)
   landed upstream and the full stack ran with the NCP deciding actions:
   `ncp(+1.19,-0.37) -> /policy/cmd_vel -> rm_safety -> /cmd_vel(+0.250,-0.100)`,
@@ -1241,7 +1241,7 @@ enough for rough distance. It is NOT a basis for a heading-hold controller or
 for trusting `policy_node`'s derived pose/goal. A wheels-up revolution count
 would separate slip from scale and settle it.
 
-**THE TRAINED CHECKPOINT IS IN AND RUNNING (2026-08-30).** `actor.pt`, the m4
+**THE TRAINED CHECKPOINT IS IN AND RUNNING (2026-08-29).** `actor.pt`, the m4
 BARN run, sha256 `3c9bf0ee112b…`, deployed to bernard-1 and exercised through
 the full stack with `policy_node` as the consumer. On a REAL scan it produces
 sensible commands — forward `v` 0.23–0.42 m/s scaling with goal distance,
@@ -1251,7 +1251,7 @@ not raise the clamp.
 
 **But the policy has NEVER DRIVEN THE WHEELS.** Every run so far has been
 `dry_run:=true` or safety-KILLED. The remaining unknown is behavioural, not
-structural: see the stationary limit cycle in §3 (2026-08-30), which resolves
+structural: see the stationary limit cycle in §3 (2026-08-29), which resolves
 when the observation updates but has not been confirmed in real motion. The
 checkpoint is also only a 30/100 held-out BARN policy — judge the pipeline,
 not the policy.
@@ -1299,7 +1299,7 @@ Items 1, 2b, 3, 4 and 7 of the previous list are DONE. What remains:
    goal source that needs no odometry.
 6. Do NOT build a heading-hold drift controller until 4/5 give a trustworthy
    heading signal.
-7. ~~Make `command_source` read-only on `safety_node`.~~ **DONE 2026-08-30**,
+7. ~~Make `command_source` read-only on `safety_node`.~~ **DONE 2026-08-29**,
    in the other direction: it is now genuinely runtime-settable and every
    change FORCE-KILLS, so a switch can only ever stop the robot. Verified live.
    Every other parameter on `safety_node` and `policy_node` is now rejected at
@@ -1312,7 +1312,7 @@ Items 1, 2b, 3, 4 and 7 of the previous list are DONE. What remains:
 10. Check whether bernard-2 has the same firmware sign fault (if yes it is
    systemic).
 
-### Robot state at end of 2026-08-30 session
+### Robot state at end of 2026-08-29 session
 
 bernard-1 up on its static IP, battery **11.3 V**, clock pushed from the
 workstation. Left **clean**: every stack node stopped, `/safety/kill` called
@@ -1428,18 +1428,18 @@ Settled, do not re-open:
   DECREASING `get_motor_encoder` count.
 - **The scan bridge publishes RELIABLE and subscribes BEST_EFFORT.** Asymmetric
   on purpose (2026-08-27 s2); matching them breaks upstream silently.
-- **`PolicyRunner.load_state_dict` stays STRICT.** The 2026-08-30 vendor-pin
+- **`PolicyRunner.load_state_dict` stays STRICT.** The 2026-08-29 vendor-pin
   mismatch was a startup crash precisely because of it. Under `strict=False`
   the missing tensors would have been left at random init and the robot would
   have run a half-trained network with no error anywhere.
 - **Probe this checkpoint with a REAL scan, never a synthetic one.** An
   all-beams-at-max synthetic scan is far off-distribution and produces alarming
-  full-reverse/full-yaw output that says nothing about the policy (2026-08-30).
+  full-reverse/full-yaw output that says nothing about the policy (2026-08-29).
   Fixtures are in `tests/fixtures/`; `tg30_open_scan.yaml` is MULTI-DOCUMENT.
 - **The policy limit-cycles in `wz` when the robot is STATIONARY** — a period-2
   oscillation driven by the `previous_action` feedback, which rm_safety's
   acceleration limiter filters to ~zero net yaw. It largely resolves once the
-  observation updates with motion (2026-08-30). Do not diagnose yaw behaviour
+  observation updates with motion (2026-08-29). Do not diagnose yaw behaviour
   from a dry-run bench test, and do not "fix" the feedback convention — it is
   faithful to upstream and the choice is the open `clamped_action_note`.
 - **`pkill -f ncp.launch.py` DOES NOT STOP THE STACK — use
@@ -1449,16 +1449,34 @@ Settled, do not re-open:
   `odom->base_footprint` TF, two rm_base_nodes on the base-board port, and two
   lidar drivers racing for ttyUSB0 — which kills BOTH, so the symptom you
   actually notice is **a stale `/scan`**, several layers from the cause.
-  Happened twice on 2026-08-30. Doubled rates on the dashboard (`/odom` 61 vs
+  Happened twice on 2026-08-29. Doubled rates on the dashboard (`/odom` 61 vs
   30, `/cmd_vel` 41 vs 20) are the giveaway, and are exactly why the dashboard
   shows expected-vs-actual rather than just a number.
+- **The slow zone and the stop zone have SEPARATE arcs** (2026-08-29). Slow is
+  a 30 deg forward cone with lateral monitoring disabled at 0.55 m; stop keeps
+  90 deg forward / 60 deg lateral at 0.35 m. Do not collapse them back into one
+  arc pair: the cone is deliberately too narrow for the stop radius
+  (0.35*tan(15 deg) = 0.094 m, narrower than the robot), and applying it there
+  would gut stop coverage. `from_dict` refuses a slow arc wider than the stop
+  arc.
+- **`slow_zone_m`, `max_vx` and `slow_forward_arc_deg` are all coupled.** The
+  band must cover braking + filter travel (0.117 m at max_vx 0.25, band 0.200 m
+  = 1.71x at slow 0.55), AND the cone must still subtend the robot's ~0.13 m
+  half-extent at the slow radius (0.55*tan(15 deg) = 0.147 m). Shrinking the
+  radius without widening the cone eventually stops covering the robot's own
+  width. Both are pinned by tests in `tests/unit/test_safety_arc_split.py`.
+- **The arc split and the 0.55 radius are REASONED, NOT MEASURED** (2026-08-29).
+  Reviewed clean and test-covered, but no recorded run has been scored against
+  them — the operator declined a baseline capture, so there is no before/after.
+  Unknown: how often the old wide arc actually fired and at what bearings.
+  `scripts/record_run.sh` + the replay tier can still answer that later.
 - **rm_dashboard publishes NO topic.** It is a leaf: subscribe-only, plus
   /safety/kill, /safety/reset and parameter sets. Never give it a publisher —
   that is how it stays structurally incapable of being a second `/cmd_vel`
   source.
 - **`bench_down.sh` RESTARTS the vendor `Mcnamu_driver_X3`**, which then holds
   the base-board serial port. Always re-run `prep_robot.sh` after it
-  (2026-08-30).
+  (2026-08-29).
 
 ### Remote-command gotchas
 

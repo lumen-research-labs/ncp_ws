@@ -142,6 +142,60 @@ decision. Not yet validated on real hardware beyond the hardware tier in
 approach from directly behind each standoff's bearing to confirm the accepted
 blind sector behaves as expected in practice, not just in the scan math.
 
+## 2c. Slow-zone arc split and radius reduction (2026-08-29) — NOT YET VALIDATED ON HARDWARE
+
+**Change.** The slow and stop zones previously shared one arc pair. They no
+longer do:
+
+| zone | forward arc | lateral arc | radius |
+|---|---|---|---|
+| slow | **30 deg** (+-15) | **disabled** (0.0) | **0.55 m** (was 0.65) |
+| stop | 90 deg (unchanged) | 60 deg (unchanged) | 0.35 m (unchanged) |
+
+**Why.** Operator observation across several driven runs: returns from walls
+and furniture BESIDE the robot were scaling forward velocity down with a
+completely clear path ahead. Narrowing the single shared arc would have fixed
+that by also narrowing the STOP zone — buying comfort with protection. The
+split lets the slow zone become a narrow forward cone while stop-zone coverage
+is untouched.
+
+**Sizing, not picking.**
+
+* Cone: at the slow radius the half-cone must subtend the robot's half-extent
+  in the scan plane (~0.13 m, from the ~0.26 m measured chassis extent behind
+  `self_occlusion_zones_deg`). 0.55 * tan(15 deg) = 0.147 m. At the 0.35 m
+  STOP radius the same angle covers only 0.094 m — narrower than the robot,
+  which is precisely why the stop arc must stay at 90 deg.
+* Radius: braking 0.042 m + 3-scan filter travel 0.075 m = 0.117 m needed;
+  the 0.55/0.35 band is 0.200 m, a 1.71x margin. 0.50 was rejected at 1.29x —
+  the same thin margin that got 0.50 reverted once already.
+
+Both criteria are pinned by tests (`tests/unit/test_safety_arc_split.py`), so
+a later change to `max_vx`, the radius or the angle has to face them rather
+than silently eating the margin. The three are coupled.
+
+**Verified by review and by test, NOT by hardware.**
+
+* Reviewed by `rm-safety-reviewer`: no fail-open path. Confirmed by reading
+  the code that stop coverage and the latch derive only from the wide-arc
+  minimum; that the 2026-08-14 pre-latch-to-zero behaviour survives even for a
+  stop-zone obstacle OUTSIDE the narrow cone (`safety_logic.py`, the
+  `slow_scale(min_r if zone == "stop" else min_r_slow, ...)` ternary); that the
+  no-perception and scan-stale paths are untouched; and that
+  `/safety/status.min_range` still reports the wide-arc value.
+* 266 unit + replay tests pass, including the pre-existing pre-latch
+  regression test and 33 new tests for the split.
+* Misconfiguration is fatal: a slow arc wider than the stop arc raises at
+  config load rather than being clamped.
+
+**Outstanding.** This geometry is reasoned from the swept-path argument, not
+measured. No recorded run has been scored against it — the operator declined
+a baseline capture, so the before/after comparison the replay tier could have
+provided does not exist. What is NOT known: how often the old wide arc was
+actually triggering, at what bearings, and whether any of those triggers were
+doing useful work. **Sign-off row below stays open until a driven run is
+observed with the new geometry.**
+
 ## 3. Hardware tests — no policy, wheels off ground first
 
 | Case | Expected | Result | Date | Operator |

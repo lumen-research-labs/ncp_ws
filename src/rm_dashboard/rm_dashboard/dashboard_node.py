@@ -102,7 +102,7 @@ _EXPECTED_HZ: Dict[str, float] = {
     # 30 Hz, not the ~9 Hz recorded in interface.yaml: that figure was
     # measured when the VENDOR Mcnamu_driver_X3 published it. rm_base
     # replaced that driver and republishes /voltage on its own sensor
-    # tick (measured 30.0 Hz on bernard-1, 2026-08-30).
+    # tick (measured 30.0 Hz on bernard-1, 2026-08-29).
     "/voltage": 30.0,
 }
 

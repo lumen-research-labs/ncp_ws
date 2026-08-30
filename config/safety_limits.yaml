@@ -84,15 +84,74 @@ estop:
   # The three thresholds must stay ordered so the POLICY reacts before the
   # SAFETY layer has to:
   #     0.90 m  policy spins away         (upstream obstacle_dist)
-  #     0.65 m  safety starts scaling     (this)
+  #     0.55 m  safety starts scaling     (this)
   #     0.35 m  safety zeroes and latches (stop_zone_m)
   #
   # Unaffected by either move: the chassis standoffs at ~0.48-0.54 m sit
   # inside self_occlusion_zones_deg below and are dropped before the arc
   # check, so they cannot straddle any of these boundaries.
-  slow_zone_m: 0.65     # scale commanded velocity down proportionally
+  # 0.80 -> 0.50 -> 0.65 -> 0.55. The last move, 2026-08-29 (operator): the
+  # slow zone was still throttling too early once the arc was narrowed to a
+  # forward cone. Sized against the stopping sum rather than picked:
+  #     braking          v^2/(2*max_ax) = 0.0625/1.50      = 0.042 m
+  #     3-scan filter    max_vx * 3/scan_hz = 0.25 * 0.30  = 0.075 m
+  #                                                  total = 0.117 m
+  #     band at 0.55     0.55 - 0.35                       = 0.200 m  (1.71x)
+  # 0.50 was considered and rejected: its 0.150 m band is only 1.29x, which is
+  # the same thin margin that got 0.50 reverted once already on 2026-08-29.
+  #
+  # COUPLED TO slow_forward_arc_deg BELOW, not just to max_vx. The cone must
+  # still subtend the robot's width at THIS radius: 0.55 * tan(15 deg) =
+  # 0.147 m against a ~0.13 m half-extent in the scan plane (from the ~0.26 m
+  # measured chassis extent, see self_occlusion_zones_deg). Reducing this
+  # radius further REQUIRES widening the cone to compensate, or the slow zone
+  # stops covering the robot's own width.
+  slow_zone_m: 0.55     # scale commanded velocity down proportionally
   stop_zone_m: 0.35     # zero velocity and LATCH
-  forward_arc_deg: 90   # centered on +x
+  forward_arc_deg: 90   # centered on +x. THE STOP ZONE'S ARC, and the default
+                        # for the slow zone when the two keys below are unset.
+
+  # ------------------------------------------------------------------
+  # SLOW-ZONE ARCS — separate from the stop zone's, added 2026-08-29.
+  #
+  # WHY THEY EXIST: one arc pair used to serve both zones, so returns from
+  # walls and furniture BESIDE the robot scaled forward velocity down even
+  # with a completely clear path ahead. Narrowing the shared arc would have
+  # fixed that by also narrowing the STOP zone — trading a comfort problem
+  # for a real reduction in protection. Splitting them means the slow zone
+  # can be a narrow forward cone while the stop zone keeps full coverage.
+  #
+  # 30 deg total = +-15 deg. Chosen to match the SWEPT PATH at the slow
+  # radius: 0.65 * tan(15 deg) = 0.174 m of lateral coverage, i.e. a little
+  # over the robot's half-width. That is the right criterion for a slow zone
+  # — it should react to things the robot is about to drive INTO, not things
+  # it is driving PAST.
+  #
+  # DO NOT apply the same 30 deg to forward_arc_deg above. At the 0.35 m stop
+  # radius, +-15 deg covers only 0.35 * tan(15 deg) = 0.094 m either side —
+  # NARROWER THAN THE ROBOT. The stop zone must stay wide, and the from_dict
+  # validation enforces that these never exceed it.
+  #
+  # A cone is an approximation of the real shape, which is a rectangular
+  # corridor of the robot's width: a fixed angle is too narrow close in and
+  # too wide far out. It is good enough at one radius, and the slow zone has
+  # one radius. If this ever needs to be right across a range, replace the
+  # angular test with a lateral-offset test (|r*sin(theta)| < half_width).
+  #
+  # NOT YET VALIDATED AGAINST A RECORDED RUN. The intent came from an
+  # operator observation that the robot throttled unnecessarily; the replay
+  # tier can score this geometry against real scans once a run is captured
+  # (scripts/record_run.sh).
+  slow_forward_arc_deg: 30    # +-15 deg. Omit or null => same as forward_arc_deg.
+  slow_lateral_arc_deg: 0.0   # DISABLED. 0.0 is meaningful and is NOT null:
+                              # it turns lateral monitoring off for the SLOW
+                              # zone only. Lateral returns are exactly what
+                              # was causing the spurious throttling, and the
+                              # robot does not command lateral motion under
+                              # the policy. The STOP zone keeps its full
+                              # lateral_arc_deg below, so a lateral obstacle
+                              # can still stop the robot — it just no longer
+                              # slows it.
   lateral_arc_deg: 60   # each side. Retained after interface 2.0.0: the policy
                         # no longer commands lateral motion, but teleop can,
                         # and the robot can still be pushed or drift sideways
