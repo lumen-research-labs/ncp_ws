@@ -61,14 +61,30 @@ Failure mode:
     a goal change only re-targets a policy that must still be armed
     separately. Arming therefore always remains an explicit, separate act.
 
-    THE WAYPOINT CONTROL IS THE ONE ADDITION THAT COULD MOVE THE ROBOT, and it
-    still does not come from here. `/waypoint/goto` is a service call into
+    THE WAYPOINT CONTROL IS THE ONE ADDITION THAT CAN MOVE THE ROBOT, and it
+    changes what this page is. `/waypoint/goto` is a service call into
     rm_waypoint, which owns the publisher; that node publishes
     `/teleop/cmd_vel`, which rm_safety forwards only when `command_source` is
-    `teleop` AND the kill has been cleared. So sending a waypoint from a
-    browser requires two prior operator acts that this page cannot perform on
-    the operator's behalf, and the dashboard itself remains a leaf with no
-    publisher of any kind.
+    `teleop` AND the kill has been cleared.
+
+    AN EARLIER VERSION OF THIS DOCSTRING CLAIMED those were "two prior operator
+    acts that this page cannot perform on the operator's behalf". THAT WAS
+    FALSE, and it is corrected here rather than quietly deleted because a false
+    claim in safety documentation is worse than no claim. This page exposes
+    BOTH of them — `source` and `reset` are in `_CONTROLS` — so a browser can
+    set the source, clear the kill, and send a waypoint in three POSTs, with no
+    physical operator involvement at any point.
+
+    That is a deliberate operator decision (full control was chosen over
+    observe-and-kill), not an oversight. But be clear about what it means: the
+    server binds 0.0.0.0 with NO AUTHENTICATION, so on this network the
+    boundary protecting the robot is the network itself, not anything in this
+    node. On a lab network with no WAN uplink that is a reasonable trade. It
+    would not be on any other network, and `enable_controls:=false` is the
+    switch that takes it away.
+
+    What remains structurally true: the dashboard is still a leaf with NO
+    publisher of any kind, so it can never become a second `/cmd_vel` source.
 
     Every callback is wrapped: a malformed message degrades that one panel and
     never takes the node down. The HTTP server runs on daemon threads and is
@@ -859,6 +875,27 @@ class DashboardNode(rclpy.node.Node):
             return {"ok": False, "error": "waypoint needs numeric x and y"}
         if not (math.isfinite(wx) and math.isfinite(wy)):
             return {"ok": False, "error": "waypoint must be finite"}
+
+        # ONE pre-flight check, and only this one. command_source is a MODE,
+        # not a measurement: it changes only when someone deliberately changes
+        # it, so the dashboard's cached copy cannot be meaningfully stale in
+        # the way its pose snapshot can. Everything else is still left to
+        # rm_waypoint per the note above.
+        #
+        # Without this, a waypoint sent while the source is "policy" is
+        # ACCEPTED, the robot never moves because rm_safety is forwarding
+        # /policy/cmd_vel instead, and the attempt eventually times out with a
+        # stall/obstacle reason that blames the hardware for a mode error.
+        if self._command_source == "policy":
+            return {
+                "ok": False,
+                "error": (
+                    "refused: command_source is 'policy', so rm_safety is "
+                    "forwarding /policy/cmd_vel and would ignore the waypoint "
+                    "controller's /teleop/cmd_vel entirely. Switch the source "
+                    "to 'teleop' first (that force-kills, so re-arm after)."
+                ),
+            }
 
         request = SetWaypoint.Request()
         # The frame comes from the BROWSER, not from a default here. A
