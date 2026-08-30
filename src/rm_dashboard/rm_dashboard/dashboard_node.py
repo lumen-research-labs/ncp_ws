@@ -117,7 +117,7 @@ from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 
 from rm_interfaces.msg import BaseDebug, SafetyStatus, WaypointStatus
-from rm_interfaces.srv import SetWaypoint
+from rm_interfaces.srv import Jog, SetWaypoint
 from rm_dashboard.slam_health import (
     OCCUPIED_THRESHOLD, SlamHealth, pack_grid, summarize_map,
 )
@@ -198,7 +198,7 @@ _BATTERY_LOW_V = 10.5
 # neither is performed here. "waypoint_cancel" only ever stops.
 _CONTROLS = (
     "kill", "reset", "source", "goal", "waypoint", "waypoint_cancel",
-    "reset_odom",
+    "reset_odom", "jog",
 )
 
 
@@ -342,6 +342,7 @@ class DashboardNode(rclpy.node.Node):
 
         self._waypoint_goto = self.create_client(SetWaypoint, "/waypoint/goto")
         self._waypoint_cancel = self.create_client(Trigger, "/waypoint/cancel")
+        self._waypoint_jog = self.create_client(Jog, "/waypoint/jog")
 
         # READ BACK the active command source, rather than remembering what
         # this page last asked for. Those are different things: any node can
@@ -814,6 +815,8 @@ class DashboardNode(rclpy.node.Node):
             return self._reset_odom()
         if command == "waypoint":
             return self._send_waypoint(payload)
+        if command == "jog":
+            return self._send_jog(payload)
         if command == "waypoint_cancel":
             return self._call_trigger(self._waypoint_cancel, "/waypoint/cancel")
         return {"ok": False, "error": f"unhandled command {command!r}"}
@@ -851,6 +854,53 @@ class DashboardNode(rclpy.node.Node):
             return {"ok": False, "error": "/set_pose timed out"}
         self.get_logger().warn("dashboard: EKF pose reset to origin via /set_pose")
         return {"ok": True, "message": "odom reset to origin"}
+
+    def _send_jog(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Forward one manual jog. The browser re-sends while a key is held.
+
+        Deliberately NOT rate-limited or de-duplicated here. A jog is only
+        valid for its TTL, so the re-send IS the control signal: throttling it
+        would make the robot stutter, and caching it would defeat the deadman.
+        """
+        if not self._waypoint_jog.service_is_ready():
+            return {
+                "ok": False,
+                "error": "/waypoint/jog unavailable — rm_waypoint is not "
+                         "running (launch with with_waypoint:=true)",
+            }
+        try:
+            vx = float(payload.get("vx", 0.0))
+            wz = float(payload.get("wz", 0.0))
+            ttl = float(payload.get("ttl_s", 0.4))
+        except Exception:
+            return {"ok": False, "error": "jog needs numeric vx, wz, ttl_s"}
+        if not all(math.isfinite(v) for v in (vx, wz, ttl)):
+            return {"ok": False, "error": "jog values must be finite"}
+
+        # Same reasoning as the waypoint pre-flight: command_source is a MODE,
+        # so a cached copy cannot be stale in the way a pose can, and catching
+        # it here saves the operator pressing keys at a robot that structurally
+        # cannot respond.
+        if self._command_source == "policy":
+            return {
+                "ok": False,
+                "error": (
+                    "refused: command_source is 'policy', so rm_safety is "
+                    "forwarding /policy/cmd_vel and ignores the jog's "
+                    "/teleop/cmd_vel. Switch to 'teleop' first."
+                ),
+            }
+
+        request = Jog.Request()
+        request.vx = vx
+        request.wz = wz
+        request.ttl_s = ttl
+        future = self._waypoint_jog.call_async(request)
+        result = self._await(future, timeout=1.0)
+        if result is None:
+            return {"ok": False, "error": "/waypoint/jog timed out"}
+        return {"ok": bool(result.accepted), "message": result.message,
+                "error": None if result.accepted else result.message}
 
     def _send_waypoint(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Forward a waypoint to rm_waypoint, and relay its answer verbatim.

@@ -1,0 +1,34 @@
+# Manual jog: drive the robot directly for a SHORT, self-expiring interval.
+#
+# This is the "reposition it without picking it up" path. Carrying the robot
+# by hand breaks SLAM completely — slam_toolbox gates on odometry-reported
+# motion, so a lift-and-place reports zero movement and the map and pose stay
+# frozen at the old spot (the kidnapped-robot problem; mapping mode has no
+# relocalization). Driving instead keeps odometry, TF and the map consistent.
+#
+# A service rather than a topic, for the same reason as SetWaypoint: it keeps
+# rm_dashboard a pure leaf with no publisher of any kind, which is what makes
+# it structurally incapable of ever becoming a second /cmd_vel source.
+#
+# THE TTL IS THE DEADMAN AND IT IS NOT OPTIONAL. The caller is a browser on a
+# network. It can close its tab, sleep its laptop, lose WiFi, or simply stop
+# sending mid-key-press, and none of those produce a "stop" message. So a jog
+# does not mean "drive until told otherwise" -- it means "drive for at most
+# ttl_s more". The caller must KEEP RE-SENDING to keep moving; silence stops
+# the robot. That gives two independent layers: this TTL expiring (the node
+# goes silent), and then rm_safety's own command_timeout zeroing /cmd_vel.
+
+# Body-frame velocities. Clamped by the node to the waypoint controller's
+# configured limits, so a browser cannot ask for more than the operator
+# configured. Unlike a waypoint, REVERSE IS ALLOWED (negative vx): backing out
+# of a corner is exactly what repositioning needs, and there is a human
+# watching, which is not true of an autonomous waypoint drive.
+float64 vx
+float64 wz
+
+# How long this command stays valid, seconds. Bounded by the node.
+# Send roughly every ttl_s/2 while a key is held.
+float64 ttl_s
+---
+bool accepted
+string message

@@ -32,6 +32,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/BaseDebug.msg"
   "msg/WaypointStatus.msg"
   "srv/SetWaypoint.srv"
+  "srv/Jog.srv"
   DEPENDENCIES std_msgs builtin_interfaces geometry_msgs
 )
 

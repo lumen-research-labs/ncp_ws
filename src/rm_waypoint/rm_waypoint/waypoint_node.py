@@ -87,7 +87,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Trigger
 
 from rm_interfaces.msg import SafetyStatus, WaypointStatus
-from rm_interfaces.srv import SetWaypoint
+from rm_interfaces.srv import Jog, SetWaypoint
 from rm_waypoint import waypoint_controller as wc
 
 # THE ONLY TOPIC THIS NODE MAY PUBLISH A TWIST ON. A module constant, not a
@@ -96,6 +96,13 @@ from rm_waypoint import waypoint_controller as wc
 # invariant this entire workspace is built around. There is no operator need
 # it would serve.
 _CMD_TOPIC = "/teleop/cmd_vel"
+
+# Hard ceiling on a jog's time-to-live, seconds. The caller supplies the TTL,
+# but the caller is a browser and this is the deadman — so the node, not the
+# browser, decides the longest the robot may keep moving on one command. Half
+# a second is comfortably longer than a sane resend interval (~150 ms) and
+# short enough that a dropped connection stops the robot almost immediately.
+_JOG_MAX_TTL_S = 0.5
 _STATUS_TOPIC = "/waypoint/status"
 
 # The pose frames. base_footprint (not base_link) because that is what /odom's
@@ -163,6 +170,11 @@ class WaypointNode(rclpy.node.Node):
 
         # --- run state -----------------------------------------------------
         self._target: Optional[Tuple[float, float]] = None
+        # Manual jog: (vx, wz) and the monotonic deadline after which it stops
+        # being valid. None means no jog is in force. The deadline IS the
+        # deadman — see _on_jog and the Jog.srv comments.
+        self._jog: Optional[Tuple[float, float]] = None
+        self._jog_deadline: float = 0.0
         self._started_at: float = 0.0
         self._progress: Optional[wc.ProgressWatchdog] = None
         self._state: int = WaypointStatus.IDLE
@@ -206,6 +218,7 @@ class WaypointNode(rclpy.node.Node):
 
         self.create_service(SetWaypoint, "/waypoint/goto", self._on_goto)
         self.create_service(Trigger, "/waypoint/cancel", self._on_cancel)
+        self.create_service(Jog, "/waypoint/jog", self._on_jog)
 
         # Structural parameters only. Everything above is read once at
         # construction, so accepting a runtime set would leave a
@@ -344,6 +357,50 @@ class WaypointNode(rclpy.node.Node):
     # Services
     # ------------------------------------------------------------------
 
+    def _on_jog(self, request, response):
+        """Accept a manual jog: drive directly for at most `ttl_s` more.
+
+        A jog CANCELS any active waypoint. Manual input wins over an
+        autonomous drive without argument — the operator reaching for the keys
+        while the robot is driving itself is, in every case that matters, a
+        correction.
+
+        Accepted even while rm_safety is KILLED. That is not an oversight: the
+        layering is that this node asks and rm_safety decides, and duplicating
+        the kill check here would put a second, staler opinion in front of the
+        real one. The published Twist simply goes nowhere while killed, and
+        the status reports why so the operator is not left guessing.
+        """
+        vx = float(request.vx)
+        wz = float(request.wz)
+        ttl = float(request.ttl_s)
+
+        if not all(math.isfinite(v) for v in (vx, wz, ttl)):
+            response.accepted = False
+            response.message = "vx, wz and ttl_s must be finite"
+            return response
+        if ttl <= 0.0:
+            response.accepted = False
+            response.message = "ttl_s must be positive — a jog must expire"
+            return response
+
+        ttl = min(ttl, _JOG_MAX_TTL_S)
+        # Clamp to the SAME limits the waypoint controller uses, so the manual
+        # path cannot ask for more than the operator configured for the
+        # autonomous one. Reverse is permitted here and only here.
+        vx = max(-self._limits.max_vx, min(self._limits.max_vx, vx))
+        wz = max(-self._limits.max_wz, min(self._limits.max_wz, wz))
+
+        if self._target is not None:
+            self.get_logger().info("waypoint_node: jog received — cancelling waypoint")
+            self._target = None
+
+        self._jog = (vx, wz)
+        self._jog_deadline = time.monotonic() + ttl
+        response.accepted = True
+        response.message = f"jog ({vx:+.3f}, {wz:+.3f}) for {ttl:.2f}s"
+        return response
+
     def _on_goto(self, request, response):
         """Accept or refuse a waypoint, with a reason either way.
 
@@ -412,7 +469,8 @@ class WaypointNode(rclpy.node.Node):
 
     def _on_cancel(self, request, response):
         del request
-        was_active = self._target is not None
+        was_active = self._target is not None or self._jog is not None
+        self._jog = None
         self._finish(WaypointStatus.IDLE, "cancelled by operator")
         response.success = True
         response.message = (
@@ -444,6 +502,31 @@ class WaypointNode(rclpy.node.Node):
             self._finish(WaypointStatus.ABORTED, f"internal error: {exc!r}")
 
     def _tick_body(self) -> None:
+        # JOG FIRST. It is checked before the waypoint and before idle,
+        # because a jog is a live operator holding a key and nothing should
+        # come between that and the wheels except rm_safety.
+        if self._jog is not None:
+            if time.monotonic() >= self._jog_deadline:
+                # EXPIRED: go silent rather than publishing zeros. The gamepad
+                # shares this topic, and a stream of zeros from here would
+                # fight it. Silence lets rm_safety's command_timeout stop the
+                # robot, which is the layer that is supposed to.
+                self._jog = None
+                self._state = WaypointStatus.IDLE
+                self._reason = "jog expired"
+                self._last_cmd = (0.0, 0.0)
+                self._publish_status()
+                return
+            self._state = WaypointStatus.DRIVING
+            self._reason = (
+                "jog (killed — rm_safety is not forwarding)"
+                if self._safety_state == SafetyStatus.KILLED else "jog"
+            )
+            self._last_cmd = self._jog
+            self._publish_cmd(self._jog[0], self._jog[1])
+            self._publish_status()
+            return
+
         if self._target is None:
             # Idle: report, publish NO Twist. See the failure-mode note — the
             # gamepad shares this topic and must not be fought.
