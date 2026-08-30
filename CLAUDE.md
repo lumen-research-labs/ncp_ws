@@ -1291,6 +1291,52 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   Robot tier 344 tests. `pose_source:=odom` remains one launch argument away
   for an A/B against the same stack.
 
+- 2026-08-29 (session 7): **"THE GOAL DRIFTS WHILE THE ROBOT IS STILL" WAS A
+  DUPLICATE STACK, NOT SLAM.** Two complete stacks were running — including
+  **two `ekf_filter_node`s and two `slam_toolbox` instances writing the SAME
+  TF edges with different estimates**. `odom -> base_footprint` measured
+  **55 Hz against an EKF configured at 30**. The TF buffer returns whichever
+  arrived last, so the pose — and therefore `goal_local`, 2 of the 36 numbers
+  the network reads — jumped between two independent estimators. It reads
+  exactly like a SLAM fault.
+
+  **Measured, robot verified stationary (peak |vx| 0.0000 m/s), 90 s:**
+
+  | | two stacks | one stack |
+  |---|---|---|
+  | `odom->base_footprint` drift | 1.11 m / 14.8 deg | **0.0000 m / 0.07 deg** |
+  | `map->base_footprint` drift | 2.61 m | **0.0000 m** |
+  | `goal_local` range | **3.45 m x, 2.71 m y** | **0.0000 / 0.0037 m** |
+
+  SLAM was never the problem, and `pose_source:=odom` "working better" was the
+  same artefact seen from the other side.
+
+  **How it happened, three times in one day:** a bare `ros2 launch` handed to
+  the operator without a teardown in front of it. `pkill -f ncp.launch.py`
+  kills only the launch PARENT and orphans every node, so the next launch
+  duplicates them. **Two fixes so it cannot recur:**
+  * **`ncp.launch.py` now ABORTS if `safety_node` is already running.** Two of
+    those is two `/cmd_vel` publishers — the violation this workspace exists
+    to prevent — so it is both the worst duplicate and a reliable proxy for "a
+    stack is already up". A hard abort, not a warning: a warning scrolls past
+    in a launch printing hundreds of lines. If the check itself cannot run it
+    does NOT block the launch.
+  * **`stack_down.sh` had missed `scan_sanitizer_node` and `slam_toolbox`** —
+    both added to the stack earlier the same day and never added to the
+    teardown list, so both survived a teardown and the next launch produced
+    two scan_sanitizers. The very bug the script exists to prevent,
+    reintroduced by extending the stack. **Our nodes are now matched by
+    INSTALL PREFIX**, so a node added later is torn down automatically.
+
+  **METHOD LESSONS, both mine, both costly:**
+  * I printed "STATIONARY for 149 s" as a HEADING on a probe that never
+    checked stationarity. The robot had been driven. Every number under it was
+    wrong and I reasoned from them. **Verify the precondition inside the
+    measurement** — the final probe asserts peak |vx| and |wz| and says so.
+  * I read MAP EXTENT (6.35 x 12.70 m) as evidence of pose drift. It measures
+    what the lidar can SEE, not where the robot has been. Retracted in
+    session 6; do not repeat.
+
 ## 4. Current Goal
 
 **THE NCP DEBUG TEST HAS RUN END TO END ON HARDWARE (2026-08-29 s2).** One
@@ -1610,6 +1656,16 @@ Settled, do not re-open:
 - **slam_toolbox consumes `/scan_sanitized`, never the raw `/scan`.** ~31-39%
   of TG30 rays are a 0.0 no-return sentinel and a third-party consumer does
   not know that. Do not repoint it at `/scan` to "remove a hop".
+- **A DUPLICATE STACK LOOKS LIKE A SENSOR OR SLAM FAULT.** Two EKFs / two
+  slam_toolboxes write the same TF edges and the pose jumps between them, so
+  the navigation goal appears to drift or teleport while the robot sits still.
+  Check `ros2 node list | sort | uniq -d` FIRST whenever pose or goal
+  behaviour looks impossible. `ncp.launch.py` now refuses to start a second
+  stack, but check anyway.
+- **Any measurement of drift MUST verify the robot was actually stationary**,
+  inside the same probe. Asserting it in a print statement is how a driven run
+  got reported as a drift measurement (2026-08-29) and sent the diagnosis into
+  SLAM for an hour.
 - **rm_dashboard publishes NO topic.** It is a leaf: subscribe-only, plus
   /safety/kill, /safety/reset and parameter sets. Never give it a publisher —
   that is how it stays structurally incapable of being a second `/cmd_vel`
