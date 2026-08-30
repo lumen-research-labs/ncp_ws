@@ -154,7 +154,8 @@ def test_but_the_same_side_obstacle_inside_the_stop_zone_STILL_STOPS(
     limits, bearing
 ) -> None:
     """The paired half. Narrowing the slow cone must not have narrowed this."""
-    ranges = _scan_with(bearing, 0.30)  # inside 0.35 stop
+    # Derived from config, not hardcoded: stop_zone_m has moved twice.
+    ranges = _scan_with(bearing, limits.estop.stop_zone_m * 0.8)
     assert _zone(limits, ranges) == "stop"
 
 
@@ -242,9 +243,10 @@ def test_estop_zone_without_a_slow_minimum_is_the_old_single_arc_behaviour(
     limits,
 ) -> None:
     """The legacy call signature must not silently change meaning."""
-    assert estop_zone(0.50, limits) == "slow"
-    assert estop_zone(0.30, limits) == "stop"
-    assert estop_zone(1.00, limits) == "clear"
+    e = limits.estop
+    assert estop_zone((e.stop_zone_m + e.slow_zone_m) / 2, limits) == "slow"
+    assert estop_zone(e.stop_zone_m * 0.8, limits) == "stop"
+    assert estop_zone(e.slow_zone_m * 2.0, limits) == "clear"
 
 
 # ---------------------------------------------------------------------------

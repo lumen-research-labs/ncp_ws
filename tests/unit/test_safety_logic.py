@@ -150,7 +150,7 @@ class TestLimitsFromDict:
         # policy's new 0.9 m obstacle_dist, then back out to buy stopping
         # room when max_vx was raised to 0.25.
         assert real_limits.estop.slow_zone_m == pytest.approx(0.55)
-        assert real_limits.estop.stop_zone_m == pytest.approx(0.35)
+        assert real_limits.estop.stop_zone_m == pytest.approx(0.15)
         assert real_limits.estop.consecutive_scans_to_trigger == 3
 
     def test_stop_zone_is_inside_slow_zone(self, real_limits: Limits) -> None:
@@ -658,6 +658,7 @@ class TestEvaluate:
         inp = _make_inputs(
             real_limits,
             scan_ranges=close_scan,
+            scan_range_min=0.01,  # TG30's real floor
             scan_angle_min=-math.pi,
             scan_angle_increment=math.radians(1.0),
             consecutive_stop_count=0,
@@ -675,9 +676,11 @@ class TestEvaluate:
         n = 360
         close_scan = [5.0] * n
         idx = round((0.0 - (-math.pi)) / math.radians(1.0))
-        # 0.20 m: above scan_range_min (0.15) so not filtered, below
-        # stop_zone_m (0.35) so in the stop zone.
-        close_scan[idx] = 0.20
+        # Inside the stop zone, derived from config. scan_range_min is set to
+        # the TG30's real 0.01 floor below, not the fixture default of 0.15:
+        # stop_zone_m is now 0.15, so a 0.15 sensor floor would leave NO range
+        # that is both valid and inside the stop zone.
+        close_scan[idx] = real_limits.estop.stop_zone_m * 0.8
 
         trigger = real_limits.estop.consecutive_scans_to_trigger  # 3
 
@@ -688,6 +691,7 @@ class TestEvaluate:
             inp = _make_inputs(
                 real_limits,
                 scan_ranges=close_scan,
+                scan_range_min=0.01,  # TG30's real floor
                 scan_angle_min=-math.pi,
                 scan_angle_increment=math.radians(1.0),
                 consecutive_stop_count=count,
@@ -941,12 +945,14 @@ class TestEvaluate:
         n = 360
         close_scan = [5.0] * n
         idx = round((0.0 - (-math.pi)) / math.radians(1.0))
-        # 0.20 m — above scan_range_min (0.15), below stop_zone_m (0.35).
-        close_scan[idx] = 0.20
+        # Inside the stop zone, derived. See the note in
+        # test_consecutive_trigger_latches_stop about scan_range_min.
+        close_scan[idx] = real_limits.estop.stop_zone_m * 0.8
 
         inp = _make_inputs(
             real_limits,
             scan_ranges=close_scan,
+            scan_range_min=0.01,  # TG30's real floor
             scan_angle_min=-math.pi,
             scan_angle_increment=math.radians(1.0),
             estop_latched=True,      # already latched from a prior cycle
@@ -993,6 +999,7 @@ class TestEvaluate:
             real_limits,
             is_killed=True,
             scan_ranges=close_scan,
+            scan_range_min=0.01,  # TG30's real floor
             scan_angle_min=-math.pi,
             scan_angle_increment=math.radians(1.0),
         )
@@ -1182,7 +1189,9 @@ class TestSlowZoneDoesNotScaleYaw:
             real_limits,
             cmd_wz=1.2,
             last_wz=real_limits.velocity.max_wz,
-            scan_ranges=_slow_zone_scan(real_limits, 0.20),  # inside stop zone
+            scan_ranges=_slow_zone_scan(
+                real_limits, real_limits.estop.stop_zone_m * 0.8
+            ),  # inside stop zone, derived from config
             estop_latched=True,
         )
         d = evaluate(inputs, real_limits)
@@ -1196,7 +1205,10 @@ class TestSlowZoneDoesNotScaleYaw:
             real_limits,
             cmd_wz=99.0,
             last_wz=real_limits.velocity.max_wz,
-            scan_ranges=_slow_zone_scan(real_limits, 0.50),
+            scan_ranges=_slow_zone_scan(
+                real_limits,
+                (real_limits.estop.stop_zone_m + real_limits.estop.slow_zone_m) / 2,
+            ),
         )
         d = evaluate(inputs, real_limits)
         assert abs(d.out_wz) <= real_limits.velocity.max_wz + 1e-9

@@ -107,7 +107,14 @@ estop:
   # radius further REQUIRES widening the cone to compensate, or the slow zone
   # stops covering the robot's own width.
   slow_zone_m: 0.55     # scale commanded velocity down proportionally
-  stop_zone_m: 0.35     # zero velocity and LATCH
+  # 0.35 -> 0.15, operator decision 2026-08-29. Band is now 0.40 m against
+  # 0.117 m of stopping distance (3.4x), so the margin is not the constraint.
+  # WHAT IS: 0.15 m is measured from the LIDAR, and the chassis standoffs
+  # read 0.106-0.125 m (see self_occlusion_zones_deg). Those are masked, but
+  # the gap between the mask and this threshold is now ~2.5 cm — any chassis
+  # return that falls outside the masked sectors latches the e-stop
+  # immediately. That was the 2026-08-14 permanent-latch bug.
+  stop_zone_m: 0.15     # zero velocity and LATCH
   forward_arc_deg: 90   # centered on +x. THE STOP ZONE'S ARC, and the default
                         # for the slow zone when the two keys below are unset.
 
