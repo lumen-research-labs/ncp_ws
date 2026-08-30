@@ -4,9 +4,18 @@ handful of command endpoints. ROS-free.
 
 What it does:
     Serves `static/index.html` at `/`, a Server-Sent Events stream of state
-    snapshots at `/events`, a one-shot snapshot at `/api/state`, and POSTs to
-    `/api/<command>` which it forwards to a caller-supplied dispatch function.
-    Runs on `http.server.ThreadingHTTPServer` in a daemon thread.
+    snapshots at `/events`, a one-shot snapshot at `/api/state`, the SLAM
+    occupancy grid at `/api/map`, and POSTs to `/api/<command>` which it
+    forwards to a caller-supplied dispatch function. Runs on
+    `http.server.ThreadingHTTPServer` in a daemon thread.
+
+    THE MAP IS A SEPARATE ENDPOINT, not part of the snapshot, and that split
+    is deliberate. The snapshot goes out at 10 Hz; a SLAM occupancy grid is
+    hundreds of kilobytes and changes every couple of seconds. Putting it on
+    the stream would multiply the robot's outbound traffic by two orders of
+    magnitude to redraw a picture that had not changed. The browser polls this
+    on its own slow schedule and skips the fetch entirely when the sequence
+    number in the snapshot has not moved.
 
     STANDARD LIBRARY ONLY, and that is a hard requirement rather than a
     preference: bernard-1 has no internet (RobotLab has no WAN uplink), so
@@ -101,8 +110,14 @@ class DashboardServer:
         port: int = 8080,
         stream_hz: float = DEFAULT_STREAM_HZ,
         logger: Optional[Callable[[str], None]] = None,
+        map_fn: Optional[Callable[[], Dict[str, Any]]] = None,
     ) -> None:
         """
+        map_fn:
+            Returns the current occupancy-grid payload for GET /api/map.
+            Optional: omitted, the endpoint reports the map as unavailable
+            rather than 404ing, so a page written against a newer node still
+            renders correctly against an older one.
         snapshot_fn:
             Returns the current JSON-serializable state. Called on the
             broadcast thread at `stream_hz`.
@@ -116,6 +131,7 @@ class DashboardServer:
         """
         self._snapshot_fn = snapshot_fn
         self._dispatch_fn = dispatch_fn
+        self._map_fn = map_fn
         self._host = host
         self._port = port
         self._stream_period = 1.0 / stream_hz
@@ -241,6 +257,8 @@ def _make_handler(server: DashboardServer):
                 return self._serve_index()
             if path == "/api/state":
                 return self._send_json(server._snapshot_fn())
+            if path == "/api/map":
+                return self._serve_map()
             if path == "/events":
                 return self._serve_events()
             return self._send_json({"error": "not found"}, status=404)
@@ -254,6 +272,26 @@ def _make_handler(server: DashboardServer):
                     {"error": f"cannot read {index}: {exc!r}"}, status=500
                 )
             return self._send_bytes(body, "text/html; charset=utf-8")
+
+        def _serve_map(self):
+            """The occupancy grid, or an explicit statement that there is none.
+
+            A 200 carrying `available: false` rather than a 404: the browser
+            needs to distinguish "SLAM is not running" (a normal state worth
+            saying out loud) from "this dashboard is too old to have a map
+            endpoint", and a 404 conflates them.
+            """
+            if server._map_fn is None:
+                return self._send_json(
+                    {"available": False, "reason": "map endpoint not wired up"}
+                )
+            try:
+                return self._send_json(server._map_fn())
+            except Exception as exc:
+                server._log(f"dashboard: map render failed: {exc!r}")
+                return self._send_json(
+                    {"available": False, "reason": f"map render failed: {exc!r}"}
+                )
 
         def _serve_events(self):
             self.send_response(200)

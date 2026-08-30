@@ -103,6 +103,10 @@ ncp_ws/
 │   ├── rm_safety/      # ROBOT — sole publisher of /cmd_vel
 │   ├── rm_policy/      # ROBOT — split: observation_builder / policy_runner / policy_node
 │   ├── rm_bringup/     # ROBOT — launch files, params
+│   ├── rm_base/        # ROBOT — mecanum base driver, replaces Mcnamu_driver_X3
+│   ├── rm_dashboard/   # ROBOT — live web view. SUBSCRIBE-ONLY, publishes nothing
+│   ├── rm_waypoint/    # ROBOT — go-to-waypoint repositioning; publishes
+│   │                   #   /teleop/cmd_vel ONLY (an input to rm_safety)
 │   └── rm_tools/       # WORKSTATION only — bag analysis, export, schema check
 ├── scripts/            # deploy.sh, fetch_bags.sh, check_interface.py
 └── tests/
@@ -1237,6 +1241,102 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   scan matching is worthless. `scan_resampler` protects the POLICY path only —
   it is not in SLAM's path.
 
+- 2026-08-29 (session 6): **SLAM MONITORING IN THE DASHBOARD, and a
+  go-to-waypoint controller for repositioning.** Offline session — written,
+  unit-tested and render-tested against synthetic data; **NOT run on hardware,
+  NOT colcon-built** (ROS is containerised on this workstation). Operator asked
+  for both, and explicitly chose "no keyboard teleop" plus "a real waypoint
+  controller" over click-to-retarget.
+
+  **THE DASHBOARD IS STILL A LEAF — the invariant survives intact.** Keyboard
+  driving would have needed a Twist publisher inside rm_dashboard, which is
+  exactly what the settled rule forbids. Instead the publisher lives in a NEW
+  package `rm_waypoint`, and the dashboard reaches it by SERVICE
+  (`/waypoint/goto`, `/waypoint/cancel`). rm_dashboard still publishes no topic
+  of any kind.
+
+  **NEW PACKAGE `rm_waypoint`** — drives to an operator-chosen point, for
+  repositioning between policy runs. Not part of the NCP pipeline; nothing in
+  it reads this.
+  * **It publishes `/teleop/cmd_vel` and nothing else**, so it drives behind
+    the same clamps, arcs, acceleration limiter and kill as the gamepad. The
+    topic is a MODULE CONSTANT with an assert, not a parameter — no launch
+    typo can point it at `/cmd_vel`.
+  * **THREE independent things must be true before it can move the robot**, and
+    it grants none of them: an operator sends a waypoint, `command_source` is
+    `teleop`, and rm_safety has been armed. `with_waypoint` defaults FALSE in
+    `ncp.launch.py` for the same reason — it is the only autonomous motion path
+    here that is not the policy.
+  * **IDLE MEANS SILENT — it publishes nothing at all, not zeros.** The gamepad
+    shares that topic; a node helpfully publishing zeros forever would fight
+    the operator's stick all session. On every transition into a terminal state
+    it floods 5 zeros first, then goes quiet.
+  * `waypoint_controller.py` is pure and ROS-free. **P-only, deliberately:**
+    with `pose_source:=map` the pose STEPS at every loop closure and an
+    integrator would wind up on the step and drive it back out. **Command floor,
+    also deliberately:** the measured rotational dead-band (~0.107 rad/s lost to
+    scrub, 2026-08-29 s3) means a tapering P law ASYMPTOTES INTO THE DEAD-BAND
+    — it would sit commanding 0.04 rad/s forever while reporting it was nearly
+    there. Under `min_wz`/`min_vx` it commands exactly zero instead.
+  * **The progress watchdog IS the obstacle handling**, and is why the
+    controller needs no obstacle logic: when rm_safety's stop zone fires the
+    robot stops and the range stops falling. Without it the controller would
+    command full speed into a latched e-stop until the timeout. It equally
+    catches a stalled wheel and a frozen pose source. **It never retries** —
+    unattended retry into a failure nobody has looked at is how a robot grinds
+    into a wall.
+  * **It never reverses** (it turns to face instead), because rm_safety's
+    e-stop arcs are forward and lateral — **there is no rear arc**.
+  * `config/waypoint.yaml` is the authority and a MISSING KEY IS AN ERROR, not
+    a default — the `closed_loop.guards` shadowing bug one package over.
+    Limits sit deliberately UNDER the safety clamps (0.15 / 0.6 vs 0.25 / 0.8),
+    pinned by a test, so rm_safety is always the binding constraint.
+
+  **DASHBOARD — SLAM panel.** New `slam_health.py` (pure, tested) plus a map
+  view. The insight it is built on: **`map -> odom` IS the SLAM correction**,
+  and its behaviour over time is the whole story — MAGNITUDE is the odometry
+  error SLAM has undone (should GROW; flat zero while driving means scan
+  matching is contributing nothing), STEPS are loop closures (each one resets
+  the CfC's recurrent state), AGE says whether SLAM is alive. That last one is
+  the 2026-08-29 s5 silent-scan-rejection failure, which produced no crash and
+  no warning and surfaced layers away as a `pose_*` stop.
+  * Panel shows correction now/max/trend + sparkline, loop-closure count,
+    corrected pose vs odom pose, map coverage, and **`/scan_sanitized` zero
+    count — which must be 0**, since that is SLAM's actual input and the TG30's
+    0.0 sentinel reads to karto as a hit at the sensor.
+  * **`/map` is fetched on its OWN endpoint (`/api/map`), never on the SSE
+    stream** — a grid is hundreds of KB and changes every 2 s against a 10 Hz
+    stream. The browser refetches only when a `seq` in the snapshot moves.
+  * **Grid decimation takes the MOST OCCUPIED cell per block, never an
+    average.** A wall is 1-2 cells thick at 0.05 m, so averaging deletes walls
+    at any real factor — and a map that has lost its walls looks like a room
+    the robot can drive through. Pinned by a test.
+  * `/map` is subscribed RELIABLE + TRANSIENT_LOCAL. The stack's usual sensor
+    QoS would have silently received NOTHING (the 2026-08-27 s2 mismatch class).
+  * **Click the map to pick a waypoint — the click does NOT drive.** It only
+    fills the numbers; motion needs a separate DRIVE THERE press. The click↔
+    marker transform round-trips exactly (verified), so the robot goes where
+    the operator clicked.
+  * **`command_source` is now READ BACK** from safety_node via
+    `/safety_node/get_parameters`, not remembered from what the page last
+    asked for. The `<dd id="safesrc">` slot existed but was never populated —
+    it showed "—" in every session to date. The page now also states plainly,
+    BEFORE the button is pressed, why a waypoint would not move the robot
+    (killed / wrong source / dry run).
+
+  **`pose_source` resolution is now ONE function** (`_resolved_pose_source` in
+  ncp.launch.py) read by both policy_node and waypoint_node, so a waypoint is
+  always in the frame the policy is driving in. Two nodes disagreeing about
+  what frame "1.5, 0.0" names would be a silent error, and a MOBILE one — the
+  offset between them is the SLAM correction, which grows as you drive.
+
+  Workstation tier now **343 tests** (was 290). Verified offline: full suite
+  green; the page's whole render path exercised under a stub DOM against real
+  harness snapshots, including the no-map and empty-snapshot states, with all
+  46 element ids confirmed present. **`rm_interfaces` gained
+  `msg/WaypointStatus.msg` and `srv/SetWaypoint.srv`, so the robot needs a
+  colcon rebuild before any of this runs.**
+
 ## 4. Current Goal
 
 **THE NCP DEBUG TEST HAS RUN END TO END ON HARDWARE (2026-08-29 s2).** One
@@ -1542,9 +1642,29 @@ Settled, do not re-open:
   unchanged and still untrustworthy for anything reading it directly. Only
   `policy_node` with `pose_source:=map` benefits.
 - **rm_dashboard publishes NO topic.** It is a leaf: subscribe-only, plus
-  /safety/kill, /safety/reset and parameter sets. Never give it a publisher —
-  that is how it stays structurally incapable of being a second `/cmd_vel`
-  source.
+  /safety/kill, /safety/reset, parameter sets, and (2026-08-29 s6) the two
+  /waypoint services. Never give it a publisher — that is how it stays
+  structurally incapable of being a second `/cmd_vel` source. **This survived
+  the "let me drive it from the browser" request**: keyboard teleop would have
+  needed a Twist publisher here, so the publisher went into `rm_waypoint`
+  instead and the dashboard reaches it by service. If a future feature seems to
+  need a publisher in the dashboard, that is the pattern — a separate node owns
+  it, not this one.
+- **`rm_waypoint` publishes `/teleop/cmd_vel` and NOTHING else** (2026-08-29
+  s6). The topic is a module constant with an assert, not a parameter. It is an
+  INPUT to rm_safety, like the gamepad, so waypoint driving sits behind the
+  same clamps, arcs and kill. It idles SILENT (publishing nothing, not zeros)
+  so it does not fight the gamepad on that shared topic. `with_waypoint`
+  defaults FALSE. Do not "simplify" it into publishing /cmd_vel directly, and
+  do not give it obstacle logic — the progress watchdog covers the safety-stop
+  case, and a second opinion about obstacles could only disagree with the layer
+  that has authority.
+- **The waypoint control law is P-only with a command FLOOR, and both are
+  deliberate** (2026-08-29 s6). No integrator, because a SLAM pose steps at
+  every loop closure and an I term would wind up on the step. A floor under
+  `min_vx`/`min_wz` because this robot's measured rotational dead-band makes a
+  tapering P law asymptote into it — commanding 0.04 rad/s forever while
+  reporting it is nearly there. Do not "fix" either into a textbook PID.
 - **`bench_down.sh` RESTARTS the vendor `Mcnamu_driver_X3`**, which then holds
   the base-board serial port. Always re-run `prep_robot.sh` after it
   (2026-08-29).

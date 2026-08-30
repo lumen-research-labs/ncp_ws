@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rm_waypoint</name>
+  <version>0.0.0</version>
+  <description>
+    ROBOT. Go-to-waypoint controller for repositioning the robot between policy
+    runs. Publishes /teleop/cmd_vel — an INPUT to rm_safety, exactly like the
+    gamepad — so it drives behind the same clamps, arcs and kill as every other
+    source, and has no path to /cmd_vel. Idle until an operator sends a
+    waypoint over /waypoint/goto, and silent (publishing nothing at all) while
+    idle. Not part of the NCP pipeline; nothing in that pipeline reads it.
+  </description>
+  <maintainer email="devsp2003@gmail.com">Dev Patel</maintainer>
+  <license>Proprietary</license>
+
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>tf2_ros</depend>
+
+  <!-- rm_interfaces/msg/WaypointStatus and srv/SetWaypoint. -->
+  <depend>rm_interfaces</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

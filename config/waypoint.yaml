@@ -1,0 +1,104 @@
+# waypoint.yaml — limits and gains for the go-to-waypoint controller
+# (rm_waypoint/waypoint_node). THE AUTHORITY for every number that module uses.
+#
+# WHAT THIS IS FOR: repositioning the robot between runs without a gamepad —
+# "drive back to the start so I can run the policy again". It is an operator
+# convenience, not part of the policy pipeline, and nothing in the NCP path
+# reads it.
+#
+# WHERE IT SITS IN THE SAFETY ORDER: this controller publishes
+# /teleop/cmd_vel, which is an INPUT to rm_safety, exactly like the gamepad.
+# It therefore drives BEHIND the same clamps, the same slow/stop arcs, the
+# same kill and the same acceleration limiter as everything else. It has no
+# path to /cmd_vel and cannot become a second publisher of it.
+#
+# CONSEQUENTLY THE LIMITS HERE ARE NOT SAFETY LIMITS. safety_limits.yaml holds
+# those and is always the binding constraint. These are deliberately set BELOW
+# it so that this controller is never the thing at the limit: if a waypoint
+# run is being clamped by rm_safety, something here is wrong, and that should
+# be visible rather than normal.
+
+waypoint:
+
+  # ---- speed ceilings, deliberately under the safety clamps ----------------
+  # safety max_vx is 0.25 m/s and max_wz is 0.8 rad/s. Repositioning has no
+  # reason to be fast, and slower is more forgiving of the pose error this is
+  # steering on.
+  max_vx: 0.15          # m/s   — forward only; this controller never reverses
+  max_wz: 0.6           # rad/s — yaw
+
+  # Minimum command magnitudes. NOT a preference — a MEASURED property of this
+  # robot. There is a rotational dead-band: roughly the first 0.107 rad/s of a
+  # commanded spin is lost to mecanum roller scrub before the chassis turns at
+  # all (2026-08-29 session 3). Commanding 0.05 rad/s therefore does nothing
+  # but heat the motors, and a proportional law that tapers to zero would sit
+  # a few degrees off heading forever, converging on paper and stationary in
+  # fact. The same applies linearly: front-right needs a real push to break
+  # loose. So below these magnitudes the controller commands ZERO instead —
+  # either move properly or do not pretend to.
+  min_vx: 0.05          # m/s
+  min_wz: 0.35          # rad/s
+
+  # ---- gains --------------------------------------------------------------
+  # Pure proportional, and pure on purpose. An integrator against a SLAM pose
+  # that steps at every loop closure would wind up on the step and drive it
+  # straight back out again; the discontinuity that policy_node resets its
+  # recurrent state for is the same discontinuity that would poison an I term.
+  # A P law forgets instantly, which is the correct behaviour under a pose
+  # that can jump.
+  #
+  # NOTE WHAT kp_lin ACTUALLY BUYS at these numbers: 0.5 against a 0.15 m/s
+  # ceiling saturates beyond 0.30 m of range, so the robot cruises at max_vx
+  # and the proportional taper only exists over the last 30 cm. That is
+  # deliberate for a repositioning tool — there is no value in creeping the
+  # whole way — and the final stop is safe because deceleration to zero is a
+  # path rm_safety's acceleration limiter deliberately does not slow down.
+  # Lower kp_lin if a gentler, longer approach is ever wanted.
+  kp_lin: 0.5           # (m/s) per m of range
+  kp_yaw: 1.2           # (rad/s) per rad of heading error
+
+  # ---- geometry -----------------------------------------------------------
+  # Face the target before driving at it. Above this error the controller
+  # turns in place; below it, it drives and steers together. Set wide enough
+  # that ordinary steering does not trip back into a spin, which would give
+  # the stop-start crawl a tighter threshold produces.
+  turn_in_place_rad: 0.6     # ~34 deg
+
+  # Arrival. 0.15 m is honest about what the pose is worth: /odom over-reads
+  # linear distance by ~5% (measured), and the SLAM pose is corrected but not
+  # exact. A tolerance tighter than the pose error means the robot hunts
+  # around the point and never declares arrival.
+  arrive_tol_m: 0.15
+
+  # Refuse a waypoint further away than this. A misplaced click on a map, or a
+  # frame confusion, reads as a plausible number — 40 m is not obviously wrong
+  # in a text box, and this is the only thing standing between that and a
+  # robot driving across the building. Repositioning distances are metres.
+  max_range_m: 6.0
+
+  # ---- give-up conditions -------------------------------------------------
+  # Every one of these ends in a STOP and a latched idle with a reason. The
+  # controller never retries on its own: an operator who wants another attempt
+  # can press the button again, and unattended retry against an unknown
+  # failure is how a robot ends up grinding into a wall it cannot see.
+
+  # Hard ceiling on one waypoint run.
+  timeout_s: 90.0
+
+  # Progress watchdog. If the range has not closed by `progress_min_m` within
+  # `progress_window_s`, give up. THIS IS THE OBSTACLE CASE and it is why the
+  # controller needs no obstacle logic of its own: when rm_safety's stop zone
+  # zeroes the command, the robot stops moving and the range stops falling.
+  # Without this the controller would sit there commanding full speed into a
+  # latched e-stop indefinitely.
+  progress_window_s: 6.0
+  progress_min_m: 0.05
+
+  # Pose freshness. Same order as policy_node's odom timeout: past this the
+  # controller is steering on a stale idea of where it is.
+  pose_timeout_ms: 500
+
+  # ---- control rate -------------------------------------------------------
+  # Must be comfortably above rm_safety's command_timeout_ms (300 ms), or the
+  # safety layer will zero the command between ticks and the robot will judder.
+  rate_hz: 10.0

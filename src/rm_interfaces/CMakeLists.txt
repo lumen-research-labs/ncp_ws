@@ -16,12 +16,22 @@ find_package(geometry_msgs REQUIRED)
 # dependency of the control path.
 # Phase 4 will add msg/PolicyStatus.msg (not yet authored — add it here then).
 #
+# WaypointStatus is rm_waypoint's diagnostics topic (/waypoint/status) — also
+# never a runtime dependency of the control path.
+#
 # Kill (/safety/kill) and reset (/safety/reset) use std_srvs/srv/Trigger and
-# are NOT defined here — rm_interfaces ships no custom srv. The std_srvs
-# dependency belongs to rm_safety, which calls those services, not here.
+# are NOT defined here: a Trigger says everything those two need to say, and a
+# custom srv adding nothing would be a rebuild the robot has to do for no
+# reason. That std_srvs dependency belongs to rm_safety, which calls them.
+#
+# srv/SetWaypoint.srv IS custom, because it carries what a Trigger cannot: a
+# frame and a point going in, and a REFUSAL WITH A REASON coming back. See the
+# file for why the waypoint path is a service rather than a topic.
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/SafetyStatus.msg"
   "msg/BaseDebug.msg"
+  "msg/WaypointStatus.msg"
+  "srv/SetWaypoint.srv"
   DEPENDENCIES std_msgs builtin_interfaces geometry_msgs
 )
 
