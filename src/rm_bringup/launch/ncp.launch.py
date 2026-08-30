@@ -159,6 +159,7 @@ Usage (on the robot, after colcon build + source install/setup.bash):
 """
 
 import pathlib
+import subprocess
 
 from launch import LaunchDescription
 from launch.actions import (
@@ -246,6 +247,53 @@ _NCP_SCAN_TOPIC = "/ncp/scan"
 _POLICY_CMD_TOPIC = "/policy/cmd_vel"
 
 
+def _refuse_if_stack_already_running(context, *args, **kwargs):
+    """Abort the launch if this stack is ALREADY up.
+
+    A second `ros2 launch` on top of a running stack does not replace it, it
+    DUPLICATES it — and `pkill -f ncp.launch.py` kills only the launch parent,
+    leaving every node behind to be duplicated by the next attempt. That has
+    happened three times on 2026-08-29 alone, and the second occurrence had
+    two EKFs and two slam_toolbox instances writing the SAME TF edges with
+    different estimates. The visible symptom was the navigation goal jumping
+    around on the map while the robot sat still, which reads as a SLAM fault
+    and cost a long diagnostic detour.
+
+    Checking for safety_node specifically: two of those is two publishers on
+    /cmd_vel, the one violation this whole workspace is built to prevent, so
+    it is both the most dangerous duplicate and a reliable proxy for "a stack
+    is already running".
+
+    Deliberately a hard abort rather than a warning. A warning scrolls past in
+    a launch that prints hundreds of lines, and the failure it prevents is
+    silent and expensive to diagnose.
+    """
+    try:
+        found = subprocess.run(
+            ["pgrep", "-f", "[/]safety_node"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.split()
+    except Exception:
+        # If the check itself cannot run, do NOT block the launch — a broken
+        # guard must not become the thing that stops the robot coming up.
+        return []
+
+    if not found:
+        return []
+
+    raise RuntimeError(
+        f"REFUSING TO LAUNCH: safety_node is already running (PID(s) "
+        f"{' '.join(found)}).\n"
+        f"  Launching again would DUPLICATE the whole stack — two "
+        f"safety_nodes means two publishers on /cmd_vel, and two EKFs and two "
+        f"slam_toolboxes writing the same TF edges.\n"
+        f"  `pkill -f ncp.launch.py` does NOT fix this: it kills only the "
+        f"launch parent and orphans every node.\n"
+        f"  Stop the running stack first:\n"
+        f"      bash scripts/stack_down.sh && bash scripts/prep_robot.sh"
+    )
+
+
 def _upstream_process(context, *args, **kwargs):
     """Build the upstream node.py process, or nothing if it isn't selected.
 
@@ -312,6 +360,9 @@ def generate_launch_description() -> LaunchDescription:
     )
 
     return LaunchDescription([
+        # FIRST action: refuse to stack a second copy on a running one.
+        OpaqueFunction(function=_refuse_if_stack_already_running),
+
         DeclareLaunchArgument(
             "consumer", default_value="policy_node",
             description="'policy_node' (rm_policy, contract-checked, DEFAULT) "

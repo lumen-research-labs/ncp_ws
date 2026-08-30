@@ -46,24 +46,45 @@ sleep 1
 # 3. The children, in dependency order. Matched on the INSTALLED PATH
 #    (a leading slash) so a pattern can never match an editor, a log tail, or
 #    this script.
+# THIRD-PARTY nodes, which have to be named individually because they live
+# outside our install tree. Order matters (see above).
 ORDER=(
-  # command sources into rm_safety
-  policy_node
-  scan_bridge_node
-  dashboard_node
-  # the safety layer itself
-  safety_node
-  # the base driver (its own watchdog zeroes PWM once commands stop)
-  rm_base_node
   # the odom chain
   ekf_node
   base_node_X3
   imu_filter_madgwick
   robot_state_publisher
   joint_state_publisher
+  # localization
+  async_slam_toolbox_node
   # sensors last: nothing downstream is left to be confused by their absence
   ydlidar_ros2_driver_node
 )
+
+# OUR nodes are matched by INSTALL PREFIX rather than by name, so a node added
+# to the stack later is torn down automatically. Naming them individually is
+# what already failed once: scan_sanitizer_node and slam_toolbox were added to
+# the stack on 2026-08-29 and not added here, survived a teardown, and the
+# next launch produced TWO scan_sanitizers — the duplicate-stack bug this
+# script exists to prevent, reintroduced by extending the stack.
+#
+# Ordered the same way: command sources first while rm_safety still floods
+# zeros, then safety, then the base.
+OUR_NODES=(
+  policy_node
+  scan_bridge_node
+  scan_sanitizer_node
+  dashboard_node
+  safety_node
+  rm_base_node
+)
+OUR_PREFIX="/home/jetson/ncp_ws/install"
+for n in "${OUR_NODES[@]}"; do
+  if pgrep -f "[/]${n}" >/dev/null 2>&1; then
+    pkill -f "[/]${n}" 2>/dev/null
+    echo "   stopped ${n}"
+  fi
+done
 for n in "${ORDER[@]}"; do
   if pgrep -f "[/]${n}" >/dev/null 2>&1; then
     pkill -f "[/]${n}" 2>/dev/null
@@ -71,21 +92,31 @@ for n in "${ORDER[@]}"; do
   fi
 done
 
+# CATCH-ALL for anything of ours the list above missed. This is the line that
+# makes the script survive the stack growing: any process running out of our
+# colcon install tree is part of this stack by definition.
+if pgrep -f "${OUR_PREFIX}" >/dev/null 2>&1; then
+  echo "   stopping remaining ${OUR_PREFIX} processes"
+  pkill -f "${OUR_PREFIX}" 2>/dev/null
+fi
+
 sleep 3
 
 # 4. Anything that ignored SIGTERM gets SIGKILL. A node still holding a serial
 #    port is worse than an ungraceful exit -- the next bringup cannot start.
-for n in "${ORDER[@]}"; do
+for n in "${OUR_NODES[@]}" "${ORDER[@]}"; do
   if pgrep -f "[/]${n}" >/dev/null 2>&1; then
     echo "   ${n} ignored SIGTERM, sending SIGKILL"
     pkill -9 -f "[/]${n}" 2>/dev/null
   fi
 done
+pkill -9 -f "${OUR_PREFIX}" 2>/dev/null
 sleep 2
 
 # 5. Verify, and be honest about what is left.
 echo "== verify =="
-LEFT="$(pgrep -af "[/](policy_node|scan_bridge_node|dashboard_node|safety_node|rm_base_node|ekf_node|base_node_X3|imu_filter_madgwick|robot_state_publisher|joint_state_publisher|ydlidar_ros2_driver_node)" 2>/dev/null)"
+LEFT="$(pgrep -af "[/](policy_node|scan_bridge_node|scan_sanitizer_node|dashboard_node|safety_node|rm_base_node|ekf_node|base_node_X3|imu_filter_madgwick|robot_state_publisher|joint_state_publisher|async_slam_toolbox_node|ydlidar_ros2_driver_node)" 2>/dev/null)"
+LEFT="${LEFT}$(pgrep -af "${OUR_PREFIX}" 2>/dev/null)"
 if [[ -n "$LEFT" ]]; then
   echo "   !! STILL RUNNING:"
   echo "$LEFT" | sed 's/^/      /'
