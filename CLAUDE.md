@@ -1436,6 +1436,73 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   `msg/WaypointStatus.msg` and `srv/SetWaypoint.srv`, so the robot needs a
   colcon rebuild before any of this runs.**
 
+- 2026-08-29 (session 8): **Waypoints and keyboard drive, both to solve one
+  operator problem: repositioning the robot BY HAND breaks SLAM completely.**
+  slam_toolbox gates on ODOMETRY-reported motion (`minimum_travel_distance`
+  0.2 m), so a lift-and-place reports zero movement, no scan is processed, and
+  the map and pose stay frozen at the old spot. `mode: mapping` has NO
+  relocalization — this is the kidnapped-robot problem and no threshold tuning
+  helps, because zero reported motion never crosses any threshold. **Recovery
+  after a hand-move is a stack restart** (fresh map at the new position); the
+  fix is to DRIVE instead.
+
+  * **`with_waypoint:=true`** brings up the merged rm_waypoint. It drives
+    BLIND by design — no obstacle logic of its own, leaning entirely on
+    rm_safety's stop zone, which is now 0.15 m rather than the 0.35 m it was
+    written against. `arrive_tol_m` is also 0.15. Keep waypoints short and
+    watched.
+  * **NEW — manual jog (`/waypoint/jog`, `srv/Jog.srv`)**: WASD / arrows on
+    the dashboard, hold to drive. Owned by **rm_waypoint, not the dashboard**,
+    because that node already owns the only `/teleop/cmd_vel` publisher and
+    giving rm_dashboard a publisher would end the property that makes it
+    structurally unable to become a second `/cmd_vel` source. A test now pins
+    that rm_dashboard contains no `create_publisher` at all.
+  * **THE TTL IS THE DEADMAN.** A browser can close, sleep or lose WiFi
+    mid-keypress and none of those deliver a "stop". So a jog means "drive for
+    at most ttl_s more": the page re-sends every 150 ms against a 400 ms TTL,
+    the NODE caps any TTL at 0.5 s (the robot decides the maximum, not the
+    caller), and **releasing a key sends nothing** — the command just expires.
+    Blur and tab-hide also stop it, since a keyup landing in another window
+    would leave the page re-sending forever. On expiry the node goes SILENT,
+    not zeros: the gamepad shares that topic and zeros would fight it.
+    rm_safety's command_timeout is the second, independent layer.
+  * Jog is clamped to the waypoint controller's limits, but **reverse IS
+    allowed** (unlike an autonomous waypoint) — backing out of a corner is the
+    point and a human is watching. A jog CANCELS an active waypoint.
+
+  **Merged the parallel `worktree-dashboard-slam-waypoint` branch** (SLAM
+  health panel, waypoint controller, `/api/map` kept OFF the SSE stream).
+  Only 2 files conflicted, both additive. `rm-safety-reviewer` then found two
+  things worth keeping in mind:
+  * **The dashboard can now START the robot, not just stop it.** A docstring
+    claimed waypoints "require two prior operator acts that this page cannot
+    perform" — FALSE: `source` and `reset` are both exposed, so three POSTs
+    arm and drive it. Server binds 0.0.0.0 with NO AUTH. **Operator decision
+    2026-08-29: acceptable, the lab network is isolated and only the operator
+    can reach it.** `enable_controls:=false` is the switch if that changes.
+  * A waypoint sent while `command_source == "policy"` used to be accepted,
+    never move, then abort blaming a stall. Now refused up front.
+
+  **`reset_odom`** zeroes the EKF via `/set_pose`, and is **REFUSED in map
+  mode**: slam_toolbox computed `map->odom` against the current odom origin,
+  and it only recomputes after 0.2 m of travel — so zeroing while stationary
+  would leave the map pose silently WRONG. slam_toolbox in this build has NO
+  reset service, so the map itself cannot be cleared from the dashboard.
+
+  **Three of my own process failures, all costing a cycle each:**
+  * The launch wrapper lived in `/tmp`, which the Jetson clears on reboot — a
+    battery swap deleted it and two launches silently did nothing. Now
+    `scripts/run_stack.sh`, in the repo.
+  * That script had `set -u`, which ROS's `setup.bash` violates
+    (`AMENT_TRACE_SETUP_FILES` unbound) — sourcing aborted and the launch
+    never started. Errexit and pipefail stay; `-u` must not come back.
+  * `dashboard_node` died on a missing `SetPose` import. **The workstation
+    tier cannot catch this class of bug** — it never imports the ROS node
+    modules (no rclpy here), so an undefined name in one is invisible until
+    the node is launched on the robot.
+
+  Robot tier **408 tests**. Battery 12.1 V at swap.
+
 ## 4. Current Goal
 
 **THE NCP DEBUG TEST HAS RUN END TO END ON HARDWARE (2026-08-29 s2).** One
@@ -1516,6 +1583,26 @@ when the observation updates but has not been confirmed in real motion. The
 checkpoint is also only a 30/100 held-out BARN policy — judge the pipeline,
 not the policy.
 
+### Where this actually stands (end of 2026-08-29)
+
+**The plumbing is done and the trained policy runs on hardware.** What has NOT
+happened: the policy has never been evaluated as a policy. Every observation so
+far is about the pipeline. The checkpoint is a 30/100 held-out BARN run, so
+mediocre navigation is expected — judge the stack, not the policy.
+
+**The open behavioural question is the `wz` limit cycle.** Stationary, the
+policy oscillates its yaw every tick and rm_safety's acceleration limiter
+filters it to near-zero net rotation. Offline, feeding a MOVING goal resolves
+it. That has still not been confirmed with the wheels actually turning — it is
+the first thing to look at on the next driven run.
+
+**Nothing has been recorded.** `scripts/record_run.sh` exists and has never
+been used; the operator declined a baseline. Consequences: the 30 deg slow
+cone and the 0.15 m stop zone are REASONED, not measured, and the replay tier
+could score them against a real run but has nothing to score. If a session
+ever has ten spare minutes, a single recorded drive closes several open
+questions at once.
+
 ### Next session, in order
 
 Items 1, 2b, 3, 4 and 7 of the previous list are DONE. What remains:
@@ -1572,24 +1659,37 @@ Items 1, 2b, 3, 4 and 7 of the previous list are DONE. What remains:
 10. Check whether bernard-2 has the same firmware sign fault (if yes it is
    systemic).
 
-### Robot state at end of 2026-08-29 session
+### Robot state at end of 2026-08-29 session 8 (LATEST)
 
-bernard-1 up on its static IP, battery **11.3 V**, clock pushed from the
-workstation. Left **clean**: every stack node stopped, `/safety/kill` called
-before shutdown, both serial ports free, no vendor driver running. `~/ncp_ws`
-is at the deployed branch and colcon-built (6 packages); `~/NCP-on-Rosmaster`
-holds the verified checkpoint at `weights/actor.pt`.
+bernard-1 on its static IP `192.168.4.100`, **fresh battery 12.1 V**, clock
+pushed from the workstation. `~/ncp_ws` is at the deployed branch, colcon-built
+(8 packages), **408 tests pass on the robot**.
+
+Stack **STOPPED** at end of session via `scripts/stack_down.sh`, with
+`/safety/kill` called first and both serial ports verified free.
+
+Configuration as left:
+
+| | |
+|---|---|
+| checkpoint | `3c9bf0ee112b…` (m4 BARN run) |
+| pose_source | `map` (SLAM) |
+| stop zone | **0.15 m**, 90 deg forward arc |
+| slow zone | **0.55 m**, 30 deg cone, lateral disabled |
+| max_vx / max_wz | 0.25 m/s / 0.8 rad/s |
+| dashboard | full control, no auth — isolated network, operator decision |
 
 To bring it back up:
 
 ```
 ssh bernard-1
-cd ~/ncp_ws && bash scripts/prep_robot.sh          # must print "== ready =="
-ros2 launch rm_bringup ncp.launch.py               # trained policy is the default
+cd ~/ncp_ws
+bash scripts/stack_down.sh && bash scripts/prep_robot.sh   # must print "== ready =="
+bash scripts/run_stack.sh command_source:=teleop with_slam:=true with_waypoint:=true
 ```
-then open `http://192.168.4.100:8080/` from the workstation. Arm from the
-dashboard or with `ros2 service call /safety/reset std_srvs/srv/Trigger`.
-Add `dry_run:=true` for any run that must not move.
+then open `http://192.168.4.100:8080/`. Push the clock first if recording bags
+— it resets to May on every boot. `ncp.launch.py` refuses to start a second
+stack, but running `stack_down.sh` before every bringup is still the habit.
 
 ### Robot state at end of 2026-08-29 session 3
 
@@ -1765,6 +1865,20 @@ Settled, do not re-open:
   inside the same probe. Asserting it in a print statement is how a driven run
   got reported as a drift measurement (2026-08-29) and sent the diagnosis into
   SLAM for an hour.
+- **PICKING THE ROBOT UP BREAKS SLAM.** Odometry reports no motion, so
+  slam_toolbox processes no scan and the pose/map stay frozen where you lifted
+  it. `mode: mapping` has no relocalization; no threshold tuning helps.
+  Recovery is a stack restart. Reposition by DRIVING — jog (WASD on the
+  dashboard) or a waypoint.
+- **The jog's TTL is a deadman and the node owns the cap.** Releasing a key
+  sends NOTHING; the command expires. Never "simplify" this into a
+  start/stop pair — a browser that dies mid-press delivers no stop.
+- **`set -u` breaks ROS's setup.bash.** Any script that sources ROS must not
+  use it (`AMENT_TRACE_SETUP_FILES` is unbound); the launch silently never
+  starts.
+- **`/tmp` is cleared on every Jetson reboot.** Nothing operational lives
+  there — `scripts/run_stack.sh` exists because a battery swap deleted the
+  previous wrapper.
 - **rm_dashboard publishes NO topic.** It is a leaf: subscribe-only, plus
   /safety/kill, /safety/reset, parameter sets, and (2026-08-29 s6) the two
   /waypoint services. Never give it a publisher — that is how it stays
