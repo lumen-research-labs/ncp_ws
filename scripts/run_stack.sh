@@ -21,7 +21,11 @@
 # Failure mode: exec's ros2 launch, so the exit status is the launch's own.
 # ncp.launch.py refuses to start if a stack is already running, so re-running
 # this cannot duplicate one.
-set -euo pipefail
+# NOTE: `set -u` is deliberately ABSENT. ROS 2's setup.bash references unset
+# variables (AMENT_TRACE_SETUP_FILES among them), so `set -u` aborts sourcing
+# with "unbound variable" and the launch silently never starts — which is
+# exactly how this script failed on its first run. Errexit and pipefail stay.
+set -eo pipefail
 
 source /opt/ros/humble/setup.bash
 source /home/jetson/yahboomcar_ros2_ws/software/library_ws/install/setup.bash
