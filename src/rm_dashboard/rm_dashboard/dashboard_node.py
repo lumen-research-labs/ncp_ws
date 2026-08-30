@@ -111,6 +111,7 @@ from rcl_interfaces.srv import (
     GetParameters, SetParameters, SetParametersAtomically,
 )
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from robot_localization.srv import SetPose
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
