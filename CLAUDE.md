@@ -1237,6 +1237,60 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   scan matching is worthless. `scan_resampler` protects the POLICY path only —
   it is not in SLAM's path.
 
+- 2026-08-29 (session 6): **Two operator observations from the first real
+  driven runs, one diagnosed and fixed, one still open — and one of my own
+  diagnoses RETRACTED.**
+
+  **(a) "The robot drives towards the target but then overshoots it." FIXED,
+  and the cause is structural, not a wiring bug.** The trained policy has NO
+  stop-at-the-goal behaviour and could not have: BarnEnv TERMINATES the
+  episode at `goal_dist < SUCCESS_DIST` (0.4 m), so every trajectory the
+  network learned from was CUT at the moment of arrival. It was never once
+  observed sitting at a goal — stopping was the simulator's job. Nothing in
+  our stack supplied that termination (upstream's `node.py` computes the
+  reward for logging and keeps driving), so the robot drove straight past.
+  Overshooting is also **OFF-DISTRIBUTION**: once the goal is behind, the
+  frozen `xy/5 - 1` normalization drops below -1, to -2.0 dead astern, values
+  BARN never produced. So behaviour after an overshoot is not evidence about
+  the policy. `policy_node` now stops at `goal_reached_dist` (default
+  `ncp_policy.SUCCESS_DIST`) and **LATCHES** — unlatched, drift or a SLAM
+  correction could carry the goal back outside the threshold and re-engage the
+  policy, which is exactly the drive-past-turn-back oscillation. Arrival is
+  one-way, as in training. Re-targeting clears it.
+
+  **(b) RETRACTED — "SLAM's pose wandered ~10 m".** I inferred that from the
+  map being 6.35 x 12.70 m with its origin 10.5 m away. **That inference was
+  wrong.** Map extent measures what the LIDAR CAN SEE (max_laser_range 12 m
+  down a room), not where the robot has been. Measured properly afterwards,
+  stationary, over 50 samples across 20 s: **map-frame pose range 0.0000 m in
+  x and y, 0.0005 rad in yaw, zero steps over 5 cm.** SLAM is rock-stable at
+  rest. The operator's "the target moved a lot with SLAM" is therefore **NOT
+  explained** — it happened while DRIVING and the stationary test cannot
+  reach it. Do not treat map size as evidence of pose drift.
+
+  **(c) `scan_sanitizer_node` — new, and correct regardless of (b).**
+  slam_toolbox was reading the RAW `/scan`, in which 31.5% of rays are the
+  TG30's `0.0` no-return sentinel, with nothing of ours in between. Whether
+  its `min_laser_range` DISCARDS or CLAMPS a short reading is a DEPENDENCY'S
+  IMPLEMENTATION DETAIL, and we were betting the pose estimate on it. The new
+  node republishes `/scan` at full resolution with every invalid range (0.0,
+  negative, NaN, sub-`range_min`) rewritten to `+inf`; slam_toolbox now
+  consumes `/scan_sanitized`. Verified live: 2020 rays, **0 zeros, 663 inf**.
+  `range_max` is deliberately NOT clamped — a long reading is long, not
+  invalid, and clamping would invent an obstacle at the ceiling distance.
+  This is the protection `scan_resampler` already gives the POLICY path,
+  applied to a path we do not own. It is hardening, NOT a confirmed fix for
+  (b).
+
+  **A hypothesis worth testing, not a conclusion:** the overshoot may explain
+  both symptoms. Past the goal the policy is off-distribution and drives
+  erratically, which would also make the goal appear to move relative to the
+  robot. The goal-reached latch removes that regime entirely, so re-run before
+  concluding anything further about SLAM.
+
+  Robot tier 344 tests. `pose_source:=odom` remains one launch argument away
+  for an A/B against the same stack.
+
 ## 4. Current Goal
 
 **THE NCP DEBUG TEST HAS RUN END TO END ON HARDWARE (2026-08-29 s2).** One
@@ -1541,6 +1595,21 @@ Settled, do not re-open:
 - **SLAM corrects the pose; it does NOT fix the odometry.** `/odom` is
   unchanged and still untrustworthy for anything reading it directly. Only
   `policy_node` with `pose_source:=map` benefits.
+- **The trained policy DOES NOT STOP AT THE GOAL** — BarnEnv terminated the
+  episode on arrival, so the network never learned to. `policy_node`'s
+  goal-reached latch is what supplies that termination. Do not remove it, and
+  do not make it unlatched: drift carrying the goal back outside the threshold
+  would re-engage the policy and oscillate.
+- **Past the goal the policy is OFF-DISTRIBUTION** (`xy/5 - 1` goes below -1,
+  to -2.0 astern — values BARN never produced). Behaviour observed after an
+  overshoot says nothing about the policy.
+- **Map EXTENT is not evidence of pose drift.** It measures what the lidar can
+  see, not where the robot has been. A 12 m map from a stationary robot in a
+  room is normal. Measure pose stability directly (map->base_footprint over
+  time) instead — done 2026-08-29: 0.0000 m range over 20 s at rest.
+- **slam_toolbox consumes `/scan_sanitized`, never the raw `/scan`.** ~31-39%
+  of TG30 rays are a 0.0 no-return sentinel and a third-party consumer does
+  not know that. Do not repoint it at `/scan` to "remove a hop".
 - **rm_dashboard publishes NO topic.** It is a leaf: subscribe-only, plus
   /safety/kill, /safety/reset and parameter sets. Never give it a publisher —
   that is how it stays structurally incapable of being a second `/cmd_vel`
