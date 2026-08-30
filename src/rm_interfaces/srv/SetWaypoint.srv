@@ -1,0 +1,19 @@
+# Command the go-to-waypoint controller to drive to a point.
+#
+# A service rather than a topic ON PURPOSE. A waypoint is a discrete operator
+# decision that must be accepted or refused with a reason -- "the pose is not
+# available", "that is 40 m away", "that frame is not the one I am driving in".
+# A topic would let every one of those fail silently, and it would also give
+# rm_dashboard a publisher, which it must never have.
+
+# Frame the waypoint is expressed in: "map" or "odom". Must match the frame the
+# controller is driving in; a mismatch is REFUSED rather than converted,
+# because silently converting between a drifting frame and a corrected one
+# changes where the robot is being sent without saying so.
+string frame_id
+
+float64 x
+float64 y
+---
+bool accepted
+string message

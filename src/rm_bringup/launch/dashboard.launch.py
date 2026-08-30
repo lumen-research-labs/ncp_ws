@@ -33,14 +33,26 @@ Launch arguments:
                      plot no denser than the pixels available. Every statistic
                      (min range, dropout count) is computed on the full scan
                      before decimation, so nothing derived is affected.
+    map_max_cells    400 — longest side of the SLAM occupancy grid served to
+                     the browser. The grid is decimated by taking the MOST
+                     OCCUPIED cell of each block, never an average: a wall is
+                     one or two cells thick at 0.05 m resolution, and
+                     averaging deletes walls at any real decimation factor.
+                     The map is served on its own endpoint and fetched only
+                     when it changes, so it never rides the 10 Hz stream.
+    tf_poll_hz       5.0 — how often map -> odom (the SLAM correction) and
+                     map -> base_footprint (the corrected pose) are read.
 
 Failure mode:
     The node publishes NO topics, so it can never become a second /cmd_vel
-    publisher. Its only outbound effects are /safety/kill, /safety/reset and
-    parameter sets on safety_node/policy_node — none of which can start
-    motion on their own (a source change force-kills; arming stays a separate,
-    explicit act). If the port is already bound the node logs the error and
-    continues headless rather than dying.
+    publisher. Its only outbound effects are /safety/kill, /safety/reset,
+    parameter sets on safety_node/policy_node, and the two /waypoint services
+    — none of which can start motion on their own. A source change
+    force-kills; arming stays a separate, explicit act; and a waypoint reaches
+    the wheels only via rm_waypoint -> /teleop/cmd_vel -> rm_safety, which
+    requires the robot to be ARMED and the source to be TELEOP already. If the
+    port is already bound the node logs the error and continues headless
+    rather than dying.
 
 Usage:
     ros2 launch rm_bringup dashboard.launch.py
@@ -60,6 +72,8 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("enable_controls", default_value="true"),
         DeclareLaunchArgument("stream_hz", default_value="10.0"),
         DeclareLaunchArgument("scan_stride", default_value="6"),
+        DeclareLaunchArgument("map_max_cells", default_value="400"),
+        DeclareLaunchArgument("tf_poll_hz", default_value="5.0"),
         Node(
             package="rm_dashboard",
             executable="dashboard_node",
@@ -71,6 +85,8 @@ def generate_launch_description() -> LaunchDescription:
                 "stream_hz": LaunchConfiguration("stream_hz"),
                 "scan_stride": LaunchConfiguration("scan_stride"),
                 "enable_controls": LaunchConfiguration("enable_controls"),
+                "map_max_cells": LaunchConfiguration("map_max_cells"),
+                "tf_poll_hz": LaunchConfiguration("tf_poll_hz"),
             }],
         ),
     ])

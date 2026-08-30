@@ -99,6 +99,29 @@ tr:last-child td{border-bottom:0}
 .flag.sign{background:#42191a;color:var(--bad)}
 .flag.nofb{background:#242c36;color:var(--faint)}
 
+/* ---------- slam / map ---------- */
+.maprow{display:grid;gap:12px;grid-template-columns:minmax(300px,1.35fr) minmax(240px,1fr);
+  align-items:start}
+@media(max-width:900px){.maprow{grid-template-columns:1fr}}
+#mapcv{cursor:crosshair;background:#0a0e14;
+  /* Nearest-neighbour: this is an occupancy grid being magnified, and a
+     smoothed one invents free space between a wall's cells. */
+  image-rendering:pixelated;image-rendering:crisp-edges}
+.mapbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.badge{padding:2px 9px;border-radius:999px;font-size:11px;border:1px solid var(--line);
+  color:var(--dim)}
+.badge.live{border-color:var(--ok);color:var(--ok)}
+.badge.dead{border-color:var(--bad);color:var(--bad)}
+.badge.warn{border-color:var(--warn);color:var(--warn)}
+.wpstate{font-size:19px;font-weight:800;letter-spacing:.04em}
+.wpstate.IDLE{color:var(--faint)} .wpstate.TURNING,.wpstate.DRIVING{color:var(--accent)}
+.wpstate.ARRIVED{color:var(--ok)} .wpstate.ABORTED{color:var(--bad)}
+.spark{display:flex;align-items:flex-end;gap:1px;height:30px;background:#0a0e14;
+  border-radius:5px;padding:3px;margin-top:6px}
+.spark b{flex:1;min-width:1px;background:var(--accent2);border-radius:1px 1px 0 0}
+#drivebtn{background:#1d3a20;border-color:var(--ok);color:var(--ok);font-weight:700}
+#drivebtn:hover:not(:disabled){background:#265029}
+
 /* ---------- controls ---------- */
 .ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 button.act{background:var(--panel2);color:var(--fg);border:1px solid var(--line);
@@ -190,6 +213,80 @@ label.inline{color:var(--dim);font-size:12px}
       </div>
     </section>
   </div>
+
+  <!-- ============ slam + waypoint ============ -->
+  <section class="panel wide">
+    <h2>SLAM &amp; waypoint — click the map to choose where to drive</h2>
+    <div class="maprow">
+
+      <div>
+        <div class="mapbar">
+          <span class="badge" id="slambadge">slam —</span>
+          <span class="badge" id="posebadge">policy pose —</span>
+          <span class="badge" id="mapbadge">map —</span>
+        </div>
+        <canvas id="mapcv" width="900" height="620"></canvas>
+        <div class="legend">
+          <span><i style="background:#8b98a5"></i>free</span>
+          <span><i style="background:#e6edf3"></i>wall</span>
+          <span><i style="background:#161b22"></i>unknown</span>
+          <span><i style="background:var(--ok)"></i>robot (map frame)</span>
+          <span><i style="background:var(--goal)"></i>policy goal</span>
+          <span><i style="background:var(--accent2)"></i>waypoint</span>
+        </div>
+        <div class="note" id="mapnote"></div>
+      </div>
+
+      <div>
+        <h2 style="margin-top:0">SLAM health</h2>
+        <dl class="kv">
+          <dt>map → odom</dt><dd id="slamtf">—</dd>
+          <dt>correction now</dt><dd id="slamcorr">—</dd>
+          <dt>correction max</dt><dd id="slammax">—</dd>
+          <dt>trend (window)</dt><dd id="slamtrend">—</dd>
+          <dt>loop closures</dt><dd id="slamjumps">—</dd>
+          <dt>corrected pose</dt><dd id="slampose">—</dd>
+          <dt>odom pose</dt><dd id="odompose">—</dd>
+          <dt>map coverage</dt><dd id="mapcov">—</dd>
+          <dt>SLAM input (zeros)</dt><dd id="sanz">—</dd>
+        </dl>
+        <div class="spark" id="slamspark"></div>
+        <div class="note">
+          <code>map&nbsp;→&nbsp;odom</code> IS the correction: how far SLAM has
+          moved the odometry's idea of where the robot is. It should GROW as
+          you drive — /odom over-reads by ~5%. Staying at exactly zero while
+          driving means scan matching is contributing nothing. Each loop
+          closure steps the pose and resets the policy's recurrent state.
+          <b>SLAM input zeros must be 0</b>: the TG30's no-return sentinel is
+          0.0 and karto reads it as a hit at the sensor.
+        </div>
+
+        <h2 style="margin-top:16px">Waypoint</h2>
+        <div class="wpstate IDLE" id="wpstate">—</div>
+        <dl class="kv">
+          <dt>reason</dt><dd id="wpreason">—</dd>
+          <dt>target</dt><dd id="wptarget">—</dd>
+          <dt>range left</dt><dd id="wprange">—</dd>
+          <dt>heading err</dt><dd id="wpheading">—</dd>
+          <dt>asking</dt><dd id="wpcmd">—</dd>
+          <dt>elapsed</dt><dd id="wpelapsed">—</dd>
+        </dl>
+        <div class="ctl" style="margin-top:10px">
+          <label class="inline">x</label><input type="number" id="wx" step="0.1">
+          <label class="inline">y</label><input type="number" id="wy" step="0.1">
+          <button class="act" id="drivebtn">DRIVE THERE</button>
+          <button class="act danger" id="wpcancel">cancel</button>
+        </div>
+        <div class="note" id="wpnote">
+          Repositioning only — this is not the policy. It publishes
+          <code>/teleop/cmd_vel</code>, so it drives behind the same clamps,
+          arcs and kill as everything else, and it reaches the wheels only if
+          <b>command source is teleop</b> and the robot is <b>armed</b>.
+        </div>
+      </div>
+
+    </div>
+  </section>
 
   <!-- ============ observation ============ -->
   <section class="panel wide">
@@ -414,6 +511,15 @@ function renderSafety(snap){
   $("safemin").textContent = s
     ? (s.min_range===null ? "no perception" : num(s.min_range,3)+" m") : "—";
   $("safeclamp").textContent = s ? (s.clamping_active ? "ACTIVE" : "no") : "—";
+  // Read back from rm_safety, not remembered from what this page last asked
+  // for — see the node. "unknown" is an honest third state, not a default.
+  $("safesrc").textContent = snap.command_source || "unknown";
+  // Highlight the source that lets the POLICY drive, since that is the one
+  // where an unexpected value has consequences.
+  $("safesrc").style.color =
+    snap.command_source === "policy" ? "var(--accent)" : "";
+  for(const b of document.querySelectorAll("[data-src]"))
+    b.classList.toggle("on", snap.command_source === b.dataset.src);
 }
 
 /* ---------------- command table ---------------- */
@@ -503,6 +609,314 @@ function renderRates(snap){
     }).join("");
 }
 
+/* ---------------- slam map ----------------
+   The occupancy grid is fetched from /api/map, NOT carried on the event
+   stream: it is hundreds of kilobytes and changes every couple of seconds,
+   while the stream runs at 10 Hz. `seq` in the snapshot says when it is worth
+   re-fetching, so a static map costs nothing.                              */
+let mapData = null;      // decoded grid + its geometry
+let mapSeq = -1;         // last sequence we fetched
+let mapFetching = false;
+let mapImage = null;     // ImageData at grid resolution, rebuilt only on change
+let mapView = null;      // world <-> canvas transform, rebuilt every draw
+let waypointPick = null; // the point the operator clicked, before they commit
+const poseTrail = [];    // corrected-pose history, map frame
+const TRAIL_MAX = 600;
+
+const CELL_UNKNOWN = 0, CELL_FREE = 1, CELL_OCCUPIED = 2;
+
+async function fetchMap(seq){
+  if(mapFetching || seq === mapSeq) return;
+  mapFetching = true;
+  try{
+    const r = await fetch("/api/map");
+    const j = await r.json();
+    if(j && j.available && j.data){
+      mapData = j;
+      mapSeq = j.seq;
+      buildMapImage(j);
+    }
+  }catch(e){ /* transient; the next tick retries */ }
+  finally{ mapFetching = false; }
+}
+
+function buildMapImage(m){
+  // Decode base64 -> one byte per cell, then paint an ImageData once. Redoing
+  // this per frame would be a megapixel of work at 10 Hz for a picture that
+  // only changes when SLAM publishes.
+  const bin = atob(m.data);
+  const cv = document.createElement("canvas");
+  cv.width = m.width; cv.height = m.height;
+  const ctx = cv.getContext("2d");
+  const img = ctx.createImageData(m.width, m.height);
+  for(let i=0;i<bin.length;i++){
+    const v = bin.charCodeAt(i);
+    // ROS grids are row 0 = LOWEST y. Canvas row 0 is the TOP. Flip here, so
+    // everything downstream can treat the image as north-up and a click maps
+    // back through one transform rather than two.
+    const row = m.height - 1 - Math.floor(i / m.width);
+    const col = i % m.width;
+    const o = (row * m.width + col) * 4;
+    let r,g,b,a = 255;
+    if(v === CELL_OCCUPIED){ r=g=b=230; }
+    else if(v === CELL_FREE){ r=g=b=110; a=190; }
+    else { r=22; g=27; b=34; }
+    img.data[o]=r; img.data[o+1]=g; img.data[o+2]=b; img.data[o+3]=a;
+  }
+  ctx.putImageData(img,0,0);
+  mapImage = cv;
+}
+
+function renderMap(snap){
+  const cv = $("mapcv"), ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle = "#0a0e14"; ctx.fillRect(0,0,W,H);
+
+  const slam = (snap.slam||{});
+  const mp = slam.map_pose;
+
+  if(!mapData || !mapImage){
+    ctx.fillStyle = "#5a6673";
+    ctx.font = "14px system-ui,sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("no /map — slam_toolbox is not running", W/2, H/2);
+    ctx.textAlign = "start";
+    mapView = null;
+    return;
+  }
+
+  // Fit the grid into the canvas, preserving aspect. `mpp` is metres per
+  // ORIGINAL grid cell; a decimated cell covers `step` of them.
+  const cellM = mapData.resolution_m * mapData.step;
+  const scale = Math.min(W / mapData.width, H / mapData.height);
+  const dw = mapData.width * scale, dh = mapData.height * scale;
+  const ox = (W - dw)/2, oy = (H - dh)/2;
+
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(mapImage, ox, oy, dw, dh);
+
+  // World -> canvas. Written once, here, and used by every marker below AND
+  // inverted for click handling, so a marker can never disagree with where a
+  // click lands.
+  const originX = mapData.origin[0], originY = mapData.origin[1];
+  mapView = {
+    toCanvas(wx, wy){
+      const cxx = (wx - originX) / cellM;
+      const cyy = (wy - originY) / cellM;
+      return [ox + cxx * scale, oy + dh - cyy * scale];
+    },
+    toWorld(px, py){
+      return [
+        originX + ((px - ox) / scale) * cellM,
+        originY + ((oy + dh - py) / scale) * cellM,
+      ];
+    },
+  };
+
+  // 1 m grid, for a sense of scale
+  ctx.strokeStyle = "rgba(90,102,115,.22)"; ctx.lineWidth = 1;
+  const spanX = mapData.width * cellM, spanY = mapData.height * cellM;
+  for(let m = Math.ceil(originX); m < originX + spanX; m++){
+    const [px] = mapView.toCanvas(m, 0);
+    ctx.beginPath(); ctx.moveTo(px, oy); ctx.lineTo(px, oy+dh); ctx.stroke();
+  }
+  for(let m = Math.ceil(originY); m < originY + spanY; m++){
+    const [,py] = mapView.toCanvas(0, m);
+    ctx.beginPath(); ctx.moveTo(ox, py); ctx.lineTo(ox+dw, py); ctx.stroke();
+  }
+
+  // driven trail
+  if(poseTrail.length > 1){
+    ctx.strokeStyle = "rgba(63,185,80,.5)"; ctx.lineWidth = 2;
+    ctx.beginPath();
+    poseTrail.forEach(([wx,wy],i)=>{
+      const [px,py] = mapView.toCanvas(wx,wy);
+      i ? ctx.lineTo(px,py) : ctx.moveTo(px,py);
+    });
+    ctx.stroke();
+  }
+
+  // policy goal, in the map frame
+  const dbg = val(snap,"/ncp_debug");
+  if(dbg && dbg.goal_world_m && dbg.pose_source === "map"){
+    marker(ctx, mapView.toCanvas(dbg.goal_world_m[0], dbg.goal_world_m[1]),
+           "#f0883e", "goal");
+  }
+
+  // active waypoint (from the controller) and the uncommitted pick
+  const wp = val(snap,"/waypoint/status");
+  if(wp && wp.active){
+    const p = mapView.toCanvas(wp.target[0], wp.target[1]);
+    marker(ctx, p, "#bc8cff", "waypoint");
+    if(mp){
+      const r = mapView.toCanvas(mp.x, mp.y);
+      ctx.strokeStyle = "rgba(188,140,255,.65)"; ctx.lineWidth = 2;
+      ctx.setLineDash([6,5]);
+      ctx.beginPath(); ctx.moveTo(r[0],r[1]); ctx.lineTo(p[0],p[1]); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+  if(waypointPick){
+    const p = mapView.toCanvas(waypointPick[0], waypointPick[1]);
+    ctx.strokeStyle = "#bc8cff"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(p[0],p[1],9,0,7); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(p[0]-13,p[1]); ctx.lineTo(p[0]+13,p[1]);
+    ctx.moveTo(p[0],p[1]-13); ctx.lineTo(p[0],p[1]+13); ctx.stroke();
+  }
+
+  // the robot, corrected pose
+  if(mp){
+    const [px,py] = mapView.toCanvas(mp.x, mp.y);
+    ctx.save();
+    ctx.translate(px,py);
+    // Canvas y grows downward while world y grows up, so a world yaw becomes
+    // its negation on screen.
+    ctx.rotate(-mp.yaw);
+    ctx.fillStyle = "#3fb950";
+    ctx.beginPath(); ctx.moveTo(11,0); ctx.lineTo(-7,7); ctx.lineTo(-7,-7);
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function marker(ctx, [px,py], colour, label){
+  ctx.fillStyle = colour;
+  ctx.beginPath(); ctx.arc(px,py,6,0,7); ctx.fill();
+  ctx.font = "11px ui-monospace,monospace";
+  ctx.fillText(label, px+9, py+4);
+}
+
+$("mapcv").onclick = ev => {
+  if(!mapView){ toast("no map yet — is slam_toolbox running?", false); return; }
+  const rect = ev.target.getBoundingClientRect();
+  // The canvas is CSS-scaled to its column, so a click in page pixels must be
+  // converted back into backing-store pixels before it means anything.
+  const px = (ev.clientX - rect.left) * (ev.target.width / rect.width);
+  const py = (ev.clientY - rect.top) * (ev.target.height / rect.height);
+  const [wx,wy] = mapView.toWorld(px,py);
+  waypointPick = [wx,wy];
+  $("wx").value = wx.toFixed(2);
+  $("wy").value = wy.toFixed(2);
+  // Deliberately does NOT drive. A click only ARMS the numbers; the robot
+  // moves on a separate, explicit press of DRIVE THERE. A map that drives on
+  // click would turn a mis-click into motion.
+  toast(`waypoint picked (${wx.toFixed(2)}, ${wy.toFixed(2)}) — press DRIVE THERE`, true);
+};
+
+/* ---------------- slam + waypoint panels ---------------- */
+function renderSlam(snap){
+  const slam = snap.slam || {};
+  const c = slam.correction || {};
+  const mp = slam.map_pose;
+
+  const live = c.available && !c.stale;
+  $("slambadge").textContent =
+    c.available ? (c.stale ? "slam STALE" : "slam live") : "slam absent";
+  $("slambadge").className = "badge " + (live ? "live" : c.available ? "warn" : "dead");
+
+  const src = slam.policy_pose_source;
+  $("posebadge").textContent = "policy pose " + (src || "—");
+  // 'map' means the policy is consuming the correction; 'odom' with SLAM up
+  // is a legitimate watch-it-first state, but never one to be in by accident.
+  $("posebadge").className = "badge " + (src === "map" ? "live" : src ? "warn" : "");
+
+  const mapMeta = meta(snap,"/map"), mapV = mapMeta && mapMeta.value;
+  $("mapbadge").textContent = mapV
+    ? `map ${mapV.width}x${mapV.height} @ ${mapV.resolution_m} m` : "map —";
+  $("mapbadge").className = "badge " + (mapV ? (mapMeta.stale ? "warn":"live") : "dead");
+
+  $("slamtf").textContent = c.available
+    ? (c.stale ? `STALE ${num(c.age_s,1)}s` : `live ${num(c.age_s,2)}s ago`)
+    : (slam.tf_fault || "absent");
+  $("slamcorr").textContent = c.available
+    ? `${num(c.correction_m,3)} m · ${num(c.yaw,3)} rad` : "—";
+  $("slammax").textContent = c.available ? num(c.max_correction_m,3)+" m" : "—";
+  $("slamtrend").textContent = (c.trend_m===null||c.trend_m===undefined)
+    ? "—" : (c.trend_m>=0?"+":"")+num(c.trend_m,3)+" m";
+  $("slamjumps").textContent = c.available
+    ? c.jump_count + (c.jumps && c.jumps.length
+        ? ` (last ${num(c.jumps[c.jumps.length-1].step_m,2)} m)` : "")
+    : "—";
+  $("slampose").textContent = mp
+    ? `${num(mp.x,2)}, ${num(mp.y,2)} @ ${num(mp.yaw,2)}` : "no map→base";
+  const od = val(snap,"/odom");
+  $("odompose").textContent = od
+    ? `${num(od.x,2)}, ${num(od.y,2)} @ ${num(od.yaw,2)}` : "—";
+  $("mapcov").textContent = mapV
+    ? `${(mapV.known_fraction*100).toFixed(1)}% · ${num(mapV.known_area_m2,1)} m²`
+    : "—";
+
+  const san = val(snap,"/scan_sanitized");
+  const sanMeta = meta(snap,"/scan_sanitized");
+  if(!san){
+    $("sanz").textContent = "not publishing";
+    $("sanz").style.color = "var(--bad)";
+  } else {
+    $("sanz").textContent = `${san.zero_count} of ${san.n}`;
+    // Non-zero here means the sentinel is reaching karto as a hit at the
+    // sensor origin, which makes scan matching worthless.
+    $("sanz").style.color = san.zero_count > 0 ? "var(--bad)"
+                          : sanMeta.stale ? "var(--warn)" : "var(--ok)";
+  }
+
+  // correction sparkline
+  const s = (c.samples||[]);
+  const peak = Math.max(0.05, ...s);
+  $("slamspark").innerHTML = s.map(v=>
+    `<b style="height:${(v/peak*100).toFixed(1)}%" title="${v} m"></b>`).join("");
+
+  if(mp){
+    const last = poseTrail[poseTrail.length-1];
+    if(!last || Math.hypot(mp.x-last[0], mp.y-last[1]) > 0.05){
+      poseTrail.push([mp.x, mp.y]);
+      if(poseTrail.length > TRAIL_MAX) poseTrail.shift();
+    }
+  }
+
+  $("mapnote").textContent = mapV
+    ? `origin (${num(mapV.origin[0],2)}, ${num(mapV.origin[1],2)}) · `+
+      `${mapV.occupied_cells} occupied of ${mapV.known_cells} known · `+
+      `click sets a waypoint, it does not drive`
+    : "";
+}
+
+function renderWaypoint(snap){
+  const w = val(snap,"/waypoint/status");
+  const el = $("wpstate");
+  const name = w ? w.state_name : "—";
+  el.textContent = w ? name : "no waypoint node";
+  el.className = "wpstate " + (w ? name : "IDLE");
+  $("wpreason").textContent = w ? (w.reason || "—") : "—";
+  $("wptarget").textContent = w && w.active
+    ? `${num(w.target[0],2)}, ${num(w.target[1],2)} (${w.frame_id})` : "—";
+  $("wprange").textContent = w && w.active ? num(w.range_m,2)+" m" : "—";
+  $("wpheading").textContent = w && w.active
+    ? (w.heading_error_rad*180/Math.PI).toFixed(0)+"°" : "—";
+  $("wpcmd").textContent = w && w.active
+    ? `${num(w.commanded.vx,3)} , ${num(w.commanded.wz,3)}` : "—";
+  $("wpelapsed").textContent = w && w.active ? num(w.elapsed_s,0)+"s" : "—";
+
+  // Say plainly why a waypoint would not move the robot, BEFORE it is pressed.
+  const s = val(snap,"/safety/status");
+  const blockers = [];
+  if(w && w.dry_run) blockers.push("waypoint node is in DRY RUN");
+  if(s && s.state_name === "KILLED") blockers.push("rm_safety is KILLED — arm it");
+  if(snap.command_source && snap.command_source !== "teleop")
+    blockers.push(`command source is '${snap.command_source}', not teleop`);
+  $("wpnote").style.color = blockers.length ? "var(--warn)" : "";
+  if(blockers.length){
+    $("wpnote").textContent = "Will not move: " + blockers.join(" · ") +
+      ". The waypoint still gets accepted and reported.";
+  } else {
+    $("wpnote").innerHTML =
+      "Repositioning only — this is not the policy. It publishes " +
+      "<code>/teleop/cmd_vel</code>, so it drives behind the same clamps, " +
+      "arcs and kill as everything else, and it reaches the wheels only if " +
+      "<b>command source is teleop</b> and the robot is <b>armed</b>.";
+  }
+}
+
 /* ---------------- header ---------------- */
 function renderHeader(snap){
   const v = val(snap,"/voltage");
@@ -519,6 +933,12 @@ function renderHeader(snap){
   $("killbtn").disabled   = !en || !svc.kill;
   $("resetbtn").disabled  = !en || !svc.reset;
   $("setgoal").disabled   = !en || !svc.policy_params;
+  // Greyed out when rm_waypoint is not running, so the button is never a
+  // control that silently does nothing.
+  $("drivebtn").disabled  = !en || !svc.waypoint;
+  $("wpcancel").disabled  = !en || !svc.waypoint_cancel;
+  $("drivebtn").title = svc.waypoint ? ""
+    : "rm_waypoint is not running — launch with with_waypoint:=true";
   for(const b of document.querySelectorAll("[data-src]")) b.disabled = !en || !svc.safety_params;
 }
 
@@ -526,6 +946,13 @@ function render(snap){
   renderHeader(snap); renderChain(snap); renderScan(snap);
   renderSafety(snap); renderCmd(snap); renderObs(snap);
   renderWheels(snap); renderRates(snap);
+  renderSlam(snap); renderWaypoint(snap); renderMap(snap);
+
+  // Re-fetch the grid only when SLAM says it changed. `seq` increments once
+  // per /map message, so a static map costs one comparison per frame instead
+  // of a few hundred kilobytes.
+  const mv = val(snap,"/map");
+  if(mv && mv.seq !== undefined) fetchMap(mv.seq);
 }
 
 /* ---------------- commands ---------------- */
@@ -564,6 +991,26 @@ for(const b of document.querySelectorAll("[data-src]")){
   };
 }
 $("setgoal").onclick = () => post("goal",{x:+$("gx").value, y:+$("gy").value});
+
+// The waypoint frame follows the frame the MAP is in, which is the frame the
+// operator clicked in. Sent explicitly rather than defaulted, and refused by
+// rm_waypoint if it is not the frame that node is driving in — the two frames
+// differ by the SLAM correction, so a silent conversion would move the
+// destination without saying so.
+$("drivebtn").onclick = async () => {
+  const x = +$("wx").value, y = +$("wy").value;
+  if(!Number.isFinite(x) || !Number.isFinite(y)){
+    toast("waypoint needs two numbers", false); return;
+  }
+  const frame = (mapData && mapData.frame_id) || "map";
+  if(!confirm(`Drive to (${x.toFixed(2)}, ${y.toFixed(2)}) in '${frame}'?\n\n`+
+              `The robot will move if rm_safety is armed and command_source `+
+              `is 'teleop'. Keep the KILL button in reach.`)) return;
+  const r = await post("waypoint",{x, y, frame});
+  if(r && r.ok) waypointPick = null;
+};
+// Cancel never confirms: like KILL, a dialog in front of a stop is a hazard.
+$("wpcancel").onclick = () => post("waypoint_cancel");
 
 // Stale-connection watchdog: SSE can stay open while the robot has stopped
 // sending. Without this the page would keep showing the last frame as if live.

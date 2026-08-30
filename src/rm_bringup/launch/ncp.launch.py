@@ -107,7 +107,19 @@ Launch arguments:
                   only — it publishes no topic and cannot become a second
                   /cmd_vel publisher. dashboard_port and dashboard_controls
                   are passed through; dashboard_controls:=false serves a
-                  read-only page.
+                  read-only page. The page also shows SLAM health — the
+                  map -> odom correction, its jumps, and the map itself.
+
+    with_waypoint "false" (DEFAULT) — set true to start rm_waypoint, the
+                  go-to-waypoint controller used to reposition the robot
+                  between runs (click a point on the dashboard's map). Off by
+                  default because it is the only autonomous motion path here
+                  that is not the policy. It publishes /teleop/cmd_vel, an
+                  INPUT to rm_safety, so it drives behind the same clamps,
+                  arcs and kill as everything else, and it reaches the wheels
+                  only when command_source is 'teleop' AND the robot has been
+                  armed. Its pose_source follows this file's, so a waypoint is
+                  always in the frame the policy is driving in.
 
 Bringing the WHOLE stack up:
     This file now starts everything ROS-side, so it is the one command. It
@@ -293,6 +305,24 @@ def _refuse_if_stack_already_running(context, *args, **kwargs):
         f"      bash scripts/stack_down.sh && bash scripts/prep_robot.sh"
     )
 
+def _resolved_pose_source(pose_source, with_slam):
+    """The frame the stack drives in: an explicit `pose_source`, else follow SLAM.
+
+    ONE place decides, and both policy_node and waypoint_node read it. A
+    default sitting separately on each node could silently disagree with
+    whether slam_toolbox is actually running — and the two failure directions
+    are quite different. Asking for a map pose nothing publishes is a
+    fail-closed stop, loud and safe. Reading odom while SLAM runs is a SILENT
+    downgrade back onto the drifting pose SLAM was added to correct. Worse,
+    two nodes resolving it differently would put the policy's goal and an
+    operator's waypoint in different frames, separated by a correction that
+    grows with every metre driven.
+    """
+    return PythonExpression([
+        "'", pose_source, "' or ('map' if '", with_slam,
+        "'.lower() == 'true' else 'odom')",
+    ])
+
 
 def _upstream_process(context, *args, **kwargs):
     """Build the upstream node.py process, or nothing if it isn't selected.
@@ -352,6 +382,7 @@ def generate_launch_description() -> LaunchDescription:
     with_dashboard = LaunchConfiguration("with_dashboard")
     dashboard_port = LaunchConfiguration("dashboard_port")
     dashboard_controls = LaunchConfiguration("dashboard_controls")
+    with_waypoint = LaunchConfiguration("with_waypoint")
 
     # `upstream` is selected inside _upstream_process (an OpaqueFunction), so
     # only the policy_node branch needs a launch-time condition here.
@@ -470,7 +501,20 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             "dashboard_controls", default_value="true",
             description="false serves a read-only dashboard (no kill, arm, "
-                        "source or goal from the browser).",
+                        "source, goal or waypoint from the browser).",
+        ),
+        DeclareLaunchArgument(
+            "with_waypoint", default_value="false",
+            description="Start rm_waypoint, the go-to-waypoint controller for "
+                        "repositioning between runs. DEFAULT OFF: it is the "
+                        "only autonomous motion path here that is not the "
+                        "policy, and on a robot with no physical E-stop that "
+                        "should be asked for. It publishes /teleop/cmd_vel, so "
+                        "it still drives behind rm_safety's clamps and kill, "
+                        "and it reaches the wheels only when command_source is "
+                        "'teleop' AND the robot has been armed. Its pose_source "
+                        "follows this file's, so waypoints are in the same "
+                        "frame the policy is using.",
         ),
 
         # ---- hardware layer, bottom up -------------------------------------
@@ -526,6 +570,20 @@ def generate_launch_description() -> LaunchDescription:
         ),
 
         IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(str(_LAUNCH_DIR / "waypoint.launch.py")),
+            condition=IfCondition(with_waypoint),
+            launch_arguments={
+                # The SAME resolution policy_node uses below, from the same
+                # helper. A waypoint is therefore always expressed in the frame
+                # the policy is driving in. Two nodes disagreeing about what
+                # frame "1.5, 0.0" names would be a silent error, and a mobile
+                # one — the offset between odom and map is the SLAM correction,
+                # which grows as you drive.
+                "pose_source": _resolved_pose_source(pose_source, with_slam),
+            }.items(),
+        ),
+
+        IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(_LAUNCH_DIR / "dashboard.launch.py")),
             condition=IfCondition(with_dashboard),
             launch_arguments={
@@ -548,16 +606,7 @@ def generate_launch_description() -> LaunchDescription:
                 "odom_topic": "/odom",
                 "cmd_vel_topic": _POLICY_CMD_TOPIC,
                 "weights": weights,
-                # Empty pose_source means "follow with_slam". Written as one
-                # expression so there is a single place that decides, rather
-                # than a default here that can silently disagree with whether
-                # slam_toolbox is actually running — a policy_node asking for
-                # a map pose that nothing publishes is a fail-closed stop, and
-                # one reading odom while SLAM runs is a silent downgrade.
-                "pose_source": PythonExpression([
-                    "'", pose_source, "' or ('map' if '", with_slam,
-                    "'.lower() == 'true' else 'odom')",
-                ]),
+                "pose_source": _resolved_pose_source(pose_source, with_slam),
                 "interface_config_path": _DEFAULT_INTERFACE_PATH,
                 "safety_limits_path": _DEFAULT_LIMITS_PATH,
             }],
