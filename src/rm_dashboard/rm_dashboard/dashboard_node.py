@@ -99,7 +99,11 @@ _EXPECTED_HZ: Dict[str, float] = {
     "/safety/status": 10.0,
     "/base/debug": 20.0,
     "/ncp_debug": 5.0,
-    "/voltage": 9.0,
+    # 30 Hz, not the ~9 Hz recorded in interface.yaml: that figure was
+    # measured when the VENDOR Mcnamu_driver_X3 published it. rm_base
+    # replaced that driver and republishes /voltage on its own sensor
+    # tick (measured 30.0 Hz on bernard-1, 2026-08-30).
+    "/voltage": 30.0,
 }
 
 # How long a service call may take before the browser gets an error. Generous

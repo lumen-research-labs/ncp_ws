@@ -1047,6 +1047,135 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   `dry_run` throughout — and the stack was stopped cleanly before the operator
   ran the real tests.
 
+- 2026-08-30: **THE TRAINED POLICY RUNS THE PIPELINE ON HARDWARE, and there is
+  now a web dashboard.** Weights `actor.pt` (m4 BARN run, sha256 `3c9bf0ee112b…`)
+  landed upstream and the full stack ran with the NCP deciding actions:
+  `ncp(+1.19,-0.37) -> /policy/cmd_vel -> rm_safety -> /cmd_vel(+0.250,-0.100)`,
+  12 nodes, exactly **1 publisher on /cmd_vel**, all rates nominal (`/scan`
+  10.6, `/ncp/scan` 11.4, `/odom` 32.9, `/policy/cmd_vel` 5.007, `/cmd_vel`
+  20.0, `/base/debug` 20.0). Run was `dry_run:=true` throughout — **NOTHING
+  MOVED**; motion is still an operator task.
+
+  **THE BLOCKER WAS A STALE VENDOR PIN, and it failed in the right direction.**
+  `vendor/ncp_policy.py` was pinned at `0ad548c`, which predates the weights.
+  When the checkpoint landed (`a9af7af`) `NcpActor` CHANGED SHAPE: `head`
+  `nn.Linear(motor,2)` -> the SB3 stack `Linear-Tanh-Linear-Tanh-Linear`, plus
+  `obs_mean`/`obs_var` buffers carrying the checkpoint's VecNormalize stats
+  (applied in `act()`, clipped ±10). `actor.pt` is a state_dict for the NEW
+  shape. Because `PolicyRunner` calls `load_state_dict` at its default
+  `strict=True`, this was a **startup crash, never a wrong-numbers run** —
+  which is exactly why strict must stay. Re-vendored to `69785c8`; hash,
+  VENDOR.md and `interface.yaml`'s provenance line updated; upstream's two new
+  tests ported plus tests that load the real `actor.pt` and roll it 10
+  recurrent ticks. **Robot tier now 277 tests** (workstation 233 — no torch
+  there, so the checkpoint tests skip).
+
+  **THE FINDING — the policy locks into a PERIOD-2 LIMIT CYCLE in `wz` when
+  the robot is STATIONARY, and the safety layer filters it to ~zero yaw.**
+  Measured live: `/policy/cmd_vel` `wz` alternating `-0.359, +1.068, -0.353,
+  +1.062, …` every tick at 5 Hz, and `/cmd_vel` `wz` a ±0.15 wobble around
+  zero — the robot would drive straight and never turn. `max_wz` is 0.8, so a
+  clamp would have given +0.8; this is not a clamp. **Cause proven by A/B
+  offline against the live observation:** with `previous_action` fed back (what
+  `policy_node` does, and what upstream does) it locks to +1.03/-0.40
+  alternating; with that block held at zero it settles to a steady `wz ≈
+  -0.15`. It is the previous-action feedback, not our wiring — `policy_node`
+  is faithful to upstream here.
+  **AND IT LARGELY RESOLVES IN MOTION.** Re-run with the goal updated each tick
+  as a moving robot would update it, the policy holds a steady `wz ≈ +0.98` for
+  14 consecutive ticks, breaking down only intermittently as the goal passes
+  abeam. So the limit cycle is an artifact of a FROZEN observation, which is
+  precisely the condition of a dry-run bench test. **Do not judge the yaw
+  behaviour from a stationary run.** Caveat on that simulation: it stepped the
+  acceleration limiter once per POLICY tick (5 Hz) where rm_safety runs it at
+  20 Hz, so the real ramp is ~4x faster than it showed.
+  This is live data for the `clamped_action_note` OPEN QUESTION in
+  `interface.yaml` (feed back requested vs achieved). Feeding back the ACHIEVED
+  action also damps the cycle, but is off-distribution vs training. **Left as
+  upstream has it — the decision is the operator's and it is now informed.**
+
+  **CORRECTION to the authority-gap expectation.** `interface.yaml` predicted
+  the policy would run "almost entirely saturated". On a REAL TG30 scan it does
+  not: forward `v` comes out **0.23–0.42 m/s**, scaling sensibly with goal
+  distance (goal 1 m -> 0.23, 8 m -> 0.42), against `max_vx` 0.25 — mildly
+  clamped, not 8x saturated. `wz` on a real scan is ~0.1–0.2 vs a 0.8 clamp,
+  i.e. not clamped at all. **A METHOD NOTE THAT COST ME AN HOUR:** a synthetic
+  "all beams at 5.0 m" scan drives the policy far off-distribution and produces
+  alarming full-reverse/full-yaw output. That is the PROBE being wrong, not the
+  policy. **Always probe this checkpoint with a real scan** (there are fixtures
+  in `tests/fixtures/`; note `tg30_open_scan.yaml` is MULTI-DOCUMENT — use
+  `yaml.safe_load_all`).
+
+  **NEW PACKAGE `rm_dashboard`** — live web view of the whole chain at
+  `http://<robot>:8080/`, verified from the workstation. Shows the raw scan vs
+  the 32 policy beams on one polar plot, the 36-dim observation as a bar strip,
+  asked-vs-allowed velocity at every hop, safety state/reason/min_range,
+  per-wheel base telemetry with the flags, and **rate + jitter + staleness on
+  every topic** — the class of signal that has caused nearly every integration
+  failure on this project (the QoS mismatch, the doubled EKF, the dead FR
+  wheel) and that is invisible in the values alone.
+  * **Stdlib only** (`http.server` + SSE). Not a preference — bernard-1 has no
+    WAN uplink, so anything needing `pip install` cannot be deployed at all.
+    That rules out flask/rosbridge/websockets.
+  * **Served FROM THE ROBOT** so it needs only TCP. Workstation-side would put
+    the diagnostic behind DDS discovery, i.e. sharing a failure mode with the
+    thing it diagnoses.
+  * **Subscribes only — publishes NO topic, ever**, so it can never become a
+    second `/cmd_vel` publisher.
+  * The observation comes from `/ncp_debug` (policy_node now publishes the
+    vector, goal and pose there), NOT rebuilt in the dashboard — a second
+    implementation of the frozen contract would render a plausible vector that
+    is not the one the network consumed.
+
+  **Controls (operator chose full control), each unable to start motion alone:**
+  * **`command_source` is now genuinely runtime-settable, and EVERY CHANGE
+    FORCE-KILLS.** This closes next-session item 7, in the better direction:
+    it previously accepted `ros2 param set` and silently ignored it. Verified
+    live — switching to `policy` while killed kept it KILLED, and after an
+    explicit `/safety/reset` the policy's command really did reach `/cmd_vel`
+    (it never could before). Arming stays a separate act.
+  * **`goal_x`/`goal_y` are runtime-settable on `policy_node`**, re-fixing the
+    goal from the CURRENT pose (always, even to an unchanged value — a set is
+    an explicit "re-target now") and resetting the CfC recurrent state, since
+    the objective changing under a stateful network is exactly the
+    discontinuity `reset()` exists for. Verified: set (1.8, 0.4) -> `goal_local`
+    read back exactly (1.8, 0.4).
+  * Every OTHER parameter on both nodes is now **REJECTED** at runtime rather
+    than accepted-and-ignored, and the node's own rejection reason is surfaced
+    verbatim to the browser.
+
+  **Checkpoint provenance is now traceable end to end.** `PolicyRunner` hashes
+  the weights file; `policy_node` logs the full sha256 at startup and publishes
+  the first 12 chars on `/ncp_debug`; `scripts/deploy_upstream.sh` prints the
+  same hash after verifying it on both ends. All three agreed live
+  (`3c9bf0ee112b…`). A run with no checkpoint now logs a WARNING that it is
+  random weights.
+
+  **`scripts/deploy_upstream.sh` is NEW and is the only route the checkpoint
+  has onto bernard-1** (no internet, and the robot's `~/NCP-on-Rosmaster` is a
+  plain directory, not a git repo — so `deploy_to_robot.sh`'s push-to-deploy
+  does not apply to it). `tar | ssh tar -x` plus sha256 verification of
+  `policy.py`, `node.py` and `actor.pt` on both ends; it refuses to report
+  success on a mismatch, and warns if the vendored copy has drifted from what
+  it is shipping.
+
+  **`ncp.launch.py` defaults changed:** `consumer` is now `policy_node` (was
+  `upstream`) and `weights` now defaults to the real checkpoint. `weights:=''`
+  is the explicit opt-in to random weights — a run that silently exercises an
+  untrained network is no longer the default. `with_dashboard` (default true)
+  starts the dashboard.
+
+  **Doc fix:** `ncp.launch.py` and `interface.yaml` still quoted `max_vx` 0.15 /
+  `max_wz` 0.4; `safety_limits.yaml` has been 0.25 / 0.8 since the 2026-08-29
+  tuning. The gap is 8x / 3.9x, not 13x / 7.9x.
+
+  Robot: clock pushed from the workstation (was May 24 again). A leftover
+  `rm_base_node` from the previous session was holding ttyUSB1 and
+  `prep_robot.sh` correctly refused to declare ready until `bench_down.sh`
+  cleared it — note `bench_down.sh` then RESTARTS the vendor `Mcnamu_driver_X3`,
+  so `prep_robot.sh` must be re-run after it. Battery 11.3 V. Left clean: all
+  nodes stopped, both serial ports free, safety KILLED before shutdown.
+
 ## 4. Current Goal
 
 **THE NCP DEBUG TEST HAS RUN END TO END ON HARDWARE (2026-08-29 s2).** One
@@ -1112,10 +1241,20 @@ enough for rough distance. It is NOT a basis for a heading-hold controller or
 for trusting `policy_node`'s derived pose/goal. A wheels-up revolution count
 would separate slip from scale and settle it.
 
-**Still no trained checkpoint.** `mode:=ncp` and `policy_node` both run RANDOM
-weights; observed output was a near-constant (+0.03, -0.09). What has been
-proven is the PLUMBING, not a policy. `ACTION_HIGH` v = 2.0 m/s vs safety
-`max_vx` 0.15 — the ~13x clamp is deliberate; do not raise it.
+**THE TRAINED CHECKPOINT IS IN AND RUNNING (2026-08-30).** `actor.pt`, the m4
+BARN run, sha256 `3c9bf0ee112b…`, deployed to bernard-1 and exercised through
+the full stack with `policy_node` as the consumer. On a REAL scan it produces
+sensible commands — forward `v` 0.23–0.42 m/s scaling with goal distance,
+small `wz` — not the saturated output the authority-gap note predicted.
+`ACTION_HIGH` v = 2.0 m/s vs safety `max_vx` 0.25 is still an 8x ceiling; do
+not raise the clamp.
+
+**But the policy has NEVER DRIVEN THE WHEELS.** Every run so far has been
+`dry_run:=true` or safety-KILLED. The remaining unknown is behavioural, not
+structural: see the stationary limit cycle in §3 (2026-08-30), which resolves
+when the observation updates but has not been confirmed in real motion. The
+checkpoint is also only a 30/100 held-out BARN policy — judge the pipeline,
+not the policy.
 
 ### Next session, in order
 
@@ -1160,8 +1299,11 @@ Items 1, 2b, 3, 4 and 7 of the previous list are DONE. What remains:
    goal source that needs no odometry.
 6. Do NOT build a heading-hold drift controller until 4/5 give a trustworthy
    heading signal.
-7. Make `command_source` read-only on `safety_node` (read once at init, so
-   `ros2 param set` reports success and changes nothing).
+7. ~~Make `command_source` read-only on `safety_node`.~~ **DONE 2026-08-30**,
+   in the other direction: it is now genuinely runtime-settable and every
+   change FORCE-KILLS, so a switch can only ever stop the robot. Verified live.
+   Every other parameter on `safety_node` and `policy_node` is now rejected at
+   runtime rather than accepted-and-ignored.
 8. Hardware safety checklist (`safety_validation.md` §3); sign off its hardware
    rows and the 2026-08-28 yaw fix (Phase 2 gate). The 2026-08-29 floor runs
    exercised most of it — the e-stop arcs under real motion are the gap. Note
@@ -1169,6 +1311,25 @@ Items 1, 2b, 3, 4 and 7 of the previous list are DONE. What remains:
 9. Replace the front-right motor to remove the stiction workaround entirely.
 10. Check whether bernard-2 has the same firmware sign fault (if yes it is
    systemic).
+
+### Robot state at end of 2026-08-30 session
+
+bernard-1 up on its static IP, battery **11.3 V**, clock pushed from the
+workstation. Left **clean**: every stack node stopped, `/safety/kill` called
+before shutdown, both serial ports free, no vendor driver running. `~/ncp_ws`
+is at the deployed branch and colcon-built (6 packages); `~/NCP-on-Rosmaster`
+holds the verified checkpoint at `weights/actor.pt`.
+
+To bring it back up:
+
+```
+ssh bernard-1
+cd ~/ncp_ws && bash scripts/prep_robot.sh          # must print "== ready =="
+ros2 launch rm_bringup ncp.launch.py               # trained policy is the default
+```
+then open `http://192.168.4.100:8080/` from the workstation. Arm from the
+dashboard or with `ros2 service call /safety/reset std_srvs/srv/Trigger`.
+Add `dry_run:=true` for any run that must not move.
 
 ### Robot state at end of 2026-08-29 session 3
 
@@ -1267,6 +1428,27 @@ Settled, do not re-open:
   DECREASING `get_motor_encoder` count.
 - **The scan bridge publishes RELIABLE and subscribes BEST_EFFORT.** Asymmetric
   on purpose (2026-08-27 s2); matching them breaks upstream silently.
+- **`PolicyRunner.load_state_dict` stays STRICT.** The 2026-08-30 vendor-pin
+  mismatch was a startup crash precisely because of it. Under `strict=False`
+  the missing tensors would have been left at random init and the robot would
+  have run a half-trained network with no error anywhere.
+- **Probe this checkpoint with a REAL scan, never a synthetic one.** An
+  all-beams-at-max synthetic scan is far off-distribution and produces alarming
+  full-reverse/full-yaw output that says nothing about the policy (2026-08-30).
+  Fixtures are in `tests/fixtures/`; `tg30_open_scan.yaml` is MULTI-DOCUMENT.
+- **The policy limit-cycles in `wz` when the robot is STATIONARY** — a period-2
+  oscillation driven by the `previous_action` feedback, which rm_safety's
+  acceleration limiter filters to ~zero net yaw. It largely resolves once the
+  observation updates with motion (2026-08-30). Do not diagnose yaw behaviour
+  from a dry-run bench test, and do not "fix" the feedback convention — it is
+  faithful to upstream and the choice is the open `clamped_action_note`.
+- **rm_dashboard publishes NO topic.** It is a leaf: subscribe-only, plus
+  /safety/kill, /safety/reset and parameter sets. Never give it a publisher —
+  that is how it stays structurally incapable of being a second `/cmd_vel`
+  source.
+- **`bench_down.sh` RESTARTS the vendor `Mcnamu_driver_X3`**, which then holds
+  the base-board serial port. Always re-run `prep_robot.sh` after it
+  (2026-08-30).
 
 ### Remote-command gotchas
 
