@@ -74,7 +74,7 @@ import rclpy.node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
-from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.srv import SetParameters, SetParametersAtomically
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Float32, String
@@ -193,8 +193,15 @@ class DashboardNode(rclpy.node.Node):
         self._safety_params = self.create_client(
             SetParameters, "/safety_node/set_parameters"
         )
+        # ATOMIC for the goal. The plain SetParameters service applies each
+        # parameter separately, so setting goal_x and goal_y through it fires
+        # policy_node's on-set callback TWICE: once with the new x against the
+        # OLD y, then again with both. Observed on hardware 2026-08-29 — two
+        # "re-targeted" log lines per click, and two recurrent-state resets
+        # for one operator action. The final goal was correct, but a goal is a
+        # PAIR and applying half of one is not a state worth passing through.
         self._policy_params = self.create_client(
-            SetParameters, "/policy_node/set_parameters"
+            SetParametersAtomically, "/policy_node/set_parameters_atomically"
         )
 
         self._server = DashboardServer(
@@ -447,7 +454,11 @@ class DashboardNode(rclpy.node.Node):
     def _set_params(self, client, node_name: str, params) -> Dict[str, Any]:
         if not client.service_is_ready():
             return {"ok": False, "error": f"{node_name} parameter service unavailable"}
-        request = SetParameters.Request()
+        request = (
+            SetParametersAtomically.Request()
+            if client.srv_type is SetParametersAtomically
+            else SetParameters.Request()
+        )
         request.parameters = params
         future = client.call_async(request)
         result = self._await(future)
@@ -457,9 +468,13 @@ class DashboardNode(rclpy.node.Node):
         # reason verbatim is the point: a rejected set that reported success
         # is precisely the class of bug this project already hit once with
         # command_source, and the browser must never paper over it.
-        failures = [
-            r.reason for r in result.results if not r.successful
-        ]
+        # SetParameters returns a LIST of results, SetParametersAtomically a
+        # single one. Normalising here keeps the rejection-reason path — which
+        # is the safety-relevant part — identical for both.
+        results = (
+            result.results if hasattr(result, "results") else [result.result]
+        )
+        failures = [r.reason for r in results if not r.successful]
         if failures:
             return {"ok": False, "error": "; ".join(failures) or "rejected"}
         return {"ok": True, "message": f"{node_name} updated"}

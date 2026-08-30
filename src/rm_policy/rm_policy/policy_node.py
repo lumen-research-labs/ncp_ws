@@ -605,7 +605,9 @@ class PolicyNode(rclpy.node.Node):
             f"policy_node: re-targeted to offset "
             f"({self._goal_offset_x}, {self._goal_offset_y}) m from the current "
             f"pose — goal now ({self._goal_world_x:.3f}, "
-            f"{self._goal_world_y:.3f}) in odom; recurrent state reset."
+            f"{self._goal_world_y:.3f}) in "
+            f"{_MAP_FRAME if self._pose_source == _POSE_SOURCE_MAP else 'odom'}"
+            f"; recurrent state reset."
         )
         return SetParametersResult(successful=True)
 
