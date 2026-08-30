@@ -179,7 +179,10 @@ _BATTERY_LOW_V = 10.5
 # /teleop/cmd_vel and reach the wheels only if rm_safety is already armed and
 # already set to the teleop source. Both of those are separate acts, and
 # neither is performed here. "waypoint_cancel" only ever stops.
-_CONTROLS = ("kill", "reset", "source", "goal", "waypoint", "waypoint_cancel")
+_CONTROLS = (
+    "kill", "reset", "source", "goal", "waypoint", "waypoint_cancel",
+    "reset_odom",
+)
 
 
 class DashboardNode(rclpy.node.Node):
@@ -311,6 +314,15 @@ class DashboardNode(rclpy.node.Node):
         # normal case — the page reports the service as unavailable and greys
         # the button, rather than offering a control that silently does
         # nothing.
+        # robot_localization's EKF pose reset. Zeroing the EKF is only sound
+        # while the pose is being READ from /odom. In map mode slam_toolbox's
+        # map->odom correction was computed against the CURRENT odom origin, so
+        # moving that origin invalidates it — and slam_toolbox only recomputes
+        # after minimum_travel_distance (0.2 m) of travel, which never happens
+        # while the robot sits still. The map pose would be silently WRONG
+        # until the robot drove that far. _reset_odom refuses in map mode.
+        self._set_pose = self.create_client(SetPose, "/set_pose")
+
         self._waypoint_goto = self.create_client(SetWaypoint, "/waypoint/goto")
         self._waypoint_cancel = self.create_client(Trigger, "/waypoint/cancel")
 
@@ -767,15 +779,61 @@ class DashboardNode(rclpy.node.Node):
                 return {"ok": False, "error": "goal needs numeric x and y"}
             if not (math.isfinite(gx) and math.isfinite(gy)):
                 return {"ok": False, "error": "goal must be finite"}
-            return self._set_params(
+            result = self._set_params(
                 self._policy_params, "policy_node",
                 [_double_param("goal_x", gx), _double_param("goal_y", gy)],
             )
+            # Optional "clean slate": zero the EKF as part of re-targeting.
+            # Ordered AFTER the goal is fixed, not before. The goal is derived
+            # from the CURRENT pose, so redefining that pose first would place
+            # the goal using one frame and read it back in another.
+            if result.get("ok") and payload.get("reset_odom"):
+                odom = self._reset_odom()
+                result["odom_reset"] = odom.get("ok", False)
+                if not odom.get("ok"):
+                    result["odom_reset_error"] = odom.get("error")
+            return result
+        if command == "reset_odom":
+            return self._reset_odom()
         if command == "waypoint":
             return self._send_waypoint(payload)
         if command == "waypoint_cancel":
             return self._call_trigger(self._waypoint_cancel, "/waypoint/cancel")
         return {"ok": False, "error": f"unhandled command {command!r}"}
+
+    def _reset_odom(self) -> Dict[str, Any]:
+        """Zero the EKF pose. REFUSED in map mode — see the client comment."""
+        debug = self._store.snapshot().get("/ncp_debug", {}).get("value") or {}
+        if debug.get("pose_source") == "map":
+            return {
+                "ok": False,
+                "error": (
+                    "refused: pose_source is 'map'. Zeroing the EKF moves the "
+                    "odom origin that slam_toolbox's map->odom correction was "
+                    "computed against, and slam_toolbox only recomputes after "
+                    "0.2 m of travel — so the map pose would be silently wrong "
+                    "until the robot drove that far. Restart the stack for a "
+                    "fresh map, or run with pose_source:=odom."
+                ),
+            }
+        if not self._set_pose.service_is_ready():
+            return {"ok": False, "error": "/set_pose is not available"}
+
+        request = SetPose.Request()
+        request.pose.header.frame_id = "odom"
+        request.pose.header.stamp = self.get_clock().now().to_msg()
+        request.pose.pose.pose.orientation.w = 1.0
+        # Explicitly TIGHT covariance. The EKF treats this as a measurement,
+        # so a loose covariance would let it weight the reset against its own
+        # prior and drift straight back rather than accepting the new origin.
+        for i in range(6):
+            request.pose.pose.covariance[i * 6 + i] = 1e-9
+
+        future = self._set_pose.call_async(request)
+        if self._await(future) is None:
+            return {"ok": False, "error": "/set_pose timed out"}
+        self.get_logger().warn("dashboard: EKF pose reset to origin via /set_pose")
+        return {"ok": True, "message": "odom reset to origin"}
 
     def _send_waypoint(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Forward a waypoint to rm_waypoint, and relay its answer verbatim.
