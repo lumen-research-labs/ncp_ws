@@ -32,10 +32,13 @@ What it does NOT fix:
 
 Launch arguments:
     params_file  path to config/slam_toolbox.yaml.
-    scan_topic   raw /scan. NOT /ncp/scan — that is 32 beams over the forward
-                 180 deg, reduced for the policy. Scan matching wants every
-                 ray and the full 360 deg; feeding it the bridge output would
-                 discard ~98% of the returns and all of the rear arc.
+    scan_topic   /scan_sanitized by default — full resolution, with the
+                 TG30's 0.0 no-return sentinel rewritten to +inf by the
+                 scan_sanitizer node this file also starts. NOT the raw /scan:
+                 ~31-39% of rays are that sentinel and slam_toolbox does not
+                 know it means "nothing there". NOT /ncp/scan either — that is
+                 32 beams over the forward 180 deg, reduced for the policy;
+                 scan matching wants every ray and the full 360 deg.
 
 Failure mode:
     Additive and non-blocking. slam_toolbox publishes a transform; it does not
@@ -67,9 +70,29 @@ def generate_launch_description() -> LaunchDescription:
             description="Path to config/slam_toolbox.yaml.",
         ),
         DeclareLaunchArgument(
-            "scan_topic", default_value="/scan",
-            description="RAW scan. Never /ncp/scan — that is the reduced "
-                        "32-beam forward-180 policy input.",
+            "scan_topic", default_value="/scan_sanitized",
+            description="Sanitized full-resolution scan (the sanitizer node "
+                        "below produces it). NOT the raw /scan — see the "
+                        "sanitizer's docstring; ~31-39%% of TG30 rays are a "
+                        "0.0 no-return sentinel that slam_toolbox does not "
+                        "know about. NEVER /ncp/scan either: that is the "
+                        "reduced 32-beam forward-180 policy input.",
+        ),
+
+        # Full-resolution /scan with the 0.0 no-return sentinel rewritten to
+        # +inf. slam_toolbox reads the raw scan with nothing of ours in
+        # between, and whether its min_laser_range discards or clamps a short
+        # reading is an implementation detail of a dependency we would
+        # otherwise be betting the pose estimate on.
+        Node(
+            package="rm_policy",
+            executable="scan_sanitizer_node",
+            name="scan_sanitizer",
+            output="screen",
+            parameters=[{
+                "scan_topic": "/scan",
+                "output_topic": "/scan_sanitized",
+            }],
         ),
         Node(
             package="slam_toolbox",

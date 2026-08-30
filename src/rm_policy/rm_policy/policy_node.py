@@ -135,6 +135,7 @@ import tf2_ros
 from rm_policy.observation_builder import build_observation
 from rm_policy.policy_runner import PolicyRunner
 from rm_policy.pose_source import Pose2D, detect_pose_jump, pose_is_usable
+from rm_policy.vendor import ncp_policy
 
 # ---------------------------------------------------------------------------
 # Interface-contract version this node was written against. Loaded-and-checked
@@ -247,6 +248,7 @@ class PolicyNode(rclpy.node.Node):
         self.declare_parameter("interface_config_path", _DEFAULT_INTERFACE_CONFIG_PATH)
         self.declare_parameter("safety_limits_path", _DEFAULT_SAFETY_LIMITS_PATH)
         self.declare_parameter("pose_source", _POSE_SOURCE_ODOM)
+        self.declare_parameter("goal_reached_dist", ncp_policy.SUCCESS_DIST)
 
         scan_topic = self._get_str_param("scan_topic")
         odom_topic = self._get_str_param("odom_topic")
@@ -257,6 +259,7 @@ class PolicyNode(rclpy.node.Node):
         weights_path = self._get_str_param("weights")
         interface_config_path = self._get_str_param("interface_config_path")
         safety_limits_path = self._get_str_param("safety_limits_path")
+        self._goal_reached_dist = self._get_double_param("goal_reached_dist")
         self._pose_source = self._get_str_param("pose_source")
         if self._pose_source not in (_POSE_SOURCE_ODOM, _POSE_SOURCE_MAP):
             raise ValueError(
@@ -372,6 +375,10 @@ class PolicyNode(rclpy.node.Node):
         # reads — see pose_source.py for why a stateful network makes the
         # recurrent-state reset mandatory rather than tidy.
         self._prev_pose: Optional[Pose2D] = None
+
+        # Latched once the goal is reached. See the goal-reached block in the
+        # control loop for why this LATCHES rather than re-arming.
+        self._goal_reached: bool = False
 
         # ------------------------------------------------------------------
         # QoS — best-effort/volatile, matching rm_safety's sensor QoS.
@@ -600,6 +607,9 @@ class PolicyNode(rclpy.node.Node):
         )
         self._goal_world_x = self._robot_x + dx
         self._goal_world_y = self._robot_y + dy
+        # A new goal is a new episode: clear the arrival latch, or the robot
+        # would sit still having "already arrived" somewhere it no longer is.
+        self._goal_reached = False
         self._runner.reset()
         self.get_logger().info(
             f"policy_node: re-targeted to offset "
@@ -704,6 +714,7 @@ class PolicyNode(rclpy.node.Node):
             # "the goal is drifting" and "the goal is fixed in a corrected
             # frame" look identical on a plot until you know which mode ran.
             "pose_source": self._pose_source,
+            "goal_reached": self._goal_reached,
             "weights": self._runner.weights_path or None,
             # Short hash is enough to tell two checkpoints apart at a glance
             # while keeping this message small at 5 Hz; the full hash is in
@@ -851,6 +862,54 @@ class PolicyNode(rclpy.node.Node):
                 throttle_duration_sec=_WARN_THROTTLE_SEC,
             )
             self._publish_zero(reason="goal_undefined")
+            return
+
+        # ------------------------------------------------------------------
+        # GOAL REACHED -> stop. This is the deployment equivalent of the
+        # training episode ending, and without it the policy does not stop.
+        #
+        # BarnEnv TERMINATES an episode when goal_dist < SUCCESS_DIST (0.4 m)
+        # and pays SUCCESS_REWARD. So the trained network was never once
+        # observed in the state "sitting at the goal": every trajectory it
+        # learned from was cut at the moment of arrival. It has no
+        # stop-at-the-goal behaviour to exhibit, because stopping was the
+        # simulator's job, not the policy's.
+        #
+        # Nothing downstream supplies that termination — upstream's node.py
+        # computes the reward for logging and keeps driving, and so did this
+        # node until 2026-08-29. Observed on hardware: the robot drives to the
+        # goal and then straight past it.
+        #
+        # Overshooting is not merely untidy, it is OFF-DISTRIBUTION. Once the
+        # goal is behind the robot, goal_local goes negative and the frozen
+        # normalization (xy / 5.0 - 1.0) drops below -1 — down to -2.0 for a
+        # goal directly astern, a value BARN never produced because it spawned
+        # goals ahead and ended episodes on arrival (interface.yaml
+        # goal_local.normalization_warning). So an overshoot pushes the
+        # network into a regime it has no training for, and whatever it does
+        # there is not evidence about the policy.
+        #
+        # LATCHED, deliberately. An unlatched check would let odometry drift
+        # or a SLAM correction carry the goal back outside the threshold and
+        # re-engage the policy, producing exactly the drive-past-turn-back
+        # oscillation this is meant to end. Arrival is a one-way event, as it
+        # was in training. Re-targeting (goal_x/goal_y, or the dashboard
+        # button) clears it and starts a new episode.
+        # ------------------------------------------------------------------
+        goal_dist = math.hypot(
+            self._goal_world_x - self._robot_x,
+            self._goal_world_y - self._robot_y,
+        )
+        if not self._goal_reached and goal_dist < self._goal_reached_dist:
+            self._goal_reached = True
+            self.get_logger().info(
+                f"policy_node: GOAL REACHED at {goal_dist:.3f} m "
+                f"(< {self._goal_reached_dist} m) — holding zero. This is the "
+                f"episode ending, as it would in training. Re-target to start "
+                f"another."
+            )
+        if self._goal_reached:
+            self._publish_zero(reason="goal_reached")
             return
 
         # ------------------------------------------------------------------

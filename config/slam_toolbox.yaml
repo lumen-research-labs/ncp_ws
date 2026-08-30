@@ -59,10 +59,14 @@ slam_toolbox:
     # obstacle at the sensor origin, and ~39% of rays being phantom
     # zero-range hits would wreck scan matching completely.
     #
-    # min_laser_range is what discards them here. It is the same class of
-    # protection scan_resampler provides on the policy path, applied
-    # independently because slam_toolbox reads the RAW /scan and nothing in
-    # our pipeline sits between the driver and it.
+    # SUPERSEDED as the primary defence 2026-08-29: slam_toolbox now consumes
+    # /scan_sanitized, where rm_policy's scan_sanitizer_node has already
+    # rewritten every 0.0 to +inf. Relying on min_laser_range alone meant
+    # depending on whether karto DISCARDS or CLAMPS a short reading, which is
+    # a dependency's implementation detail to bet a pose estimate on.
+    # Measured with the raw scan: the map grew to 6.35 x 12.70 m with its
+    # origin 10.5 m away, in a room the robot had crossed ~2 m of.
+    # These bounds are kept as a second line of defence, not the first.
     min_laser_range: 0.15
     max_laser_range: 12.0
 
