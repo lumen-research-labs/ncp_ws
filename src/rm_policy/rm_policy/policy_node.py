@@ -373,11 +373,6 @@ class PolicyNode(rclpy.node.Node):
         # recurrent-state reset mandatory rather than tidy.
         self._prev_pose: Optional[Pose2D] = None
 
-        # Offset between the ROS clock TF transforms are stamped in and this
-        # node's monotonic clock, established on the first successful lookup.
-        # Only used in map mode.
-        self._tf_epoch_offset: Optional[float] = None
-
         # ------------------------------------------------------------------
         # QoS — best-effort/volatile, matching rm_safety's sensor QoS.
         # ------------------------------------------------------------------
@@ -518,23 +513,33 @@ class PolicyNode(rclpy.node.Node):
 
         t = tf.transform.translation
         q = tf.transform.rotation
-        # The transform carries a ROS stamp; convert to the monotonic clock
-        # this node measures ages against, by trusting the buffer's own
-        # freshness rather than mixing two clocks. The age is derived from
-        # how long ago we received it, tracked below.
-        stamp_s = tf.header.stamp.sec + tf.header.stamp.nanosec * 1e-9
-        if self._tf_epoch_offset is None:
-            # First successful lookup establishes the offset between the ROS
-            # clock the transform is stamped in and this node's monotonic
-            # clock. Mixing the two directly is what produces nonsense ages
-            # on a robot whose wall clock jumps months when it is corrected.
-            self._tf_epoch_offset = now - stamp_s
-        mono_stamp = stamp_s + self._tf_epoch_offset
 
+        # TWO CLOCKS, EACH USED CONSISTENTLY WITH ITSELF. This is the whole
+        # trick, and getting it wrong is not theoretical — an earlier revision
+        # tried to map the transform's ROS stamp onto this node's monotonic
+        # clock via an offset captured at the first lookup. If that first
+        # lookup happened to return an already-old transform, the offset was
+        # poisoned permanently and EVERY subsequent pose read as stamped in
+        # the future. Observed on hardware: `pose_future_stamp` every tick,
+        # forever, with a perfectly healthy SLAM underneath.
+        #
+        #   FRESHNESS  -> ROS stamp vs the ROS clock. Both wall time, so the
+        #                 difference is a real age even on a robot whose clock
+        #                 gets pushed by hand (bernard-1 has no NTP).
+        #   JUMP dt    -> monotonic, below. Never wall time: a hand-corrected
+        #                 clock would otherwise register as a pose teleport.
+        stamp_s = tf.header.stamp.sec + tf.header.stamp.nanosec * 1e-9
+        ros_now = self.get_clock().now().nanoseconds * 1e-9
+        age_s = ros_now - stamp_s
+        if age_s > self._pose_max_age_s:
+            return None, f"pose_stale:{age_s * 1000.0:.0f}ms"
+
+        # The Pose2D carries the MONOTONIC stamp, because the only thing that
+        # reads it is the jump detector's dt.
         return Pose2D(
             x=float(t.x), y=float(t.y),
             yaw=_yaw_from_quaternion(q.x, q.y, q.z, q.w),
-            stamp=mono_stamp,
+            stamp=now,
         ), None
 
     def _on_set_parameters(self, params) -> SetParametersResult:

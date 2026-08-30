@@ -218,6 +218,25 @@ _LIDAR_PARAMS = {
     "range_min": 0.01,
     "frequency": 10.0,
     "frame_id": "laser_link",
+    # REQUIRED BY slam_toolbox, measured 2026-08-29. Without it the TG30's ray
+    # count VARIES scan to scan — 9 distinct values (1967..1975) across 60
+    # consecutive scans. slam_toolbox's karto backend latches the first scan's
+    # count into its LaserRangeFinder and then REJECTS every scan that differs:
+    #     LaserRangeScan contains 1970 range readings, expected 1951
+    # printed once per scan, forever, with no map ever built and no map->odom
+    # transform ever published. It does not crash and it does not warn that it
+    # has stopped working, so it looks like SLAM merely failing to converge.
+    #
+    # With the flag: a constant 2020 rays, verified over 60 scans. NOTE this
+    # is a genuinely live parameter on this driver, UNLIKE invalid_range_is_inf
+    # which is inert here (see interface.yaml no_return_encoding) — the two
+    # look equally plausible in the driver's parameter list, so measure rather
+    # than assume when reaching for another one.
+    #
+    # Harmless to the policy path: scan_resampler handles any ray count, and
+    # the padding rays arrive as the same 0.0 no-return sentinel it already
+    # maps to range_max.
+    "fixed_resolution": True,
 }
 
 # The bridge's output. Both consumers read this, never the raw /scan.
