@@ -1442,6 +1442,16 @@ Settled, do not re-open:
   observation updates with motion (2026-08-30). Do not diagnose yaw behaviour
   from a dry-run bench test, and do not "fix" the feedback convention — it is
   faithful to upstream and the choice is the open `clamped_action_note`.
+- **`pkill -f ncp.launch.py` DOES NOT STOP THE STACK — use
+  `scripts/stack_down.sh`.** It kills the launch PARENT and leaves every node
+  running. The orphans survive the next `ros2 launch`, giving two full stacks:
+  two safety_nodes (TWO `/cmd_vel` PUBLISHERS), two EKFs fighting over the
+  `odom->base_footprint` TF, two rm_base_nodes on the base-board port, and two
+  lidar drivers racing for ttyUSB0 — which kills BOTH, so the symptom you
+  actually notice is **a stale `/scan`**, several layers from the cause.
+  Happened twice on 2026-08-30. Doubled rates on the dashboard (`/odom` 61 vs
+  30, `/cmd_vel` 41 vs 20) are the giveaway, and are exactly why the dashboard
+  shows expected-vs-actual rather than just a number.
 - **rm_dashboard publishes NO topic.** It is a leaf: subscribe-only, plus
   /safety/kill, /safety/reset and parameter sets. Never give it a publisher —
   that is how it stays structurally incapable of being a second `/cmd_vel`
