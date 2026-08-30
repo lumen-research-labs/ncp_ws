@@ -1665,8 +1665,19 @@ bernard-1 on its static IP `192.168.4.100`, **fresh battery 12.1 V**, clock
 pushed from the workstation. `~/ncp_ws` is at the deployed branch, colcon-built
 (8 packages), **408 tests pass on the robot**.
 
-Stack **STOPPED** at end of session via `scripts/stack_down.sh`, with
-`/safety/kill` called first and both serial ports verified free.
+**NOT STOPPED CLEANLY.** The robot went off the network before
+`scripts/stack_down.sh` could run — unreachable, 100% packet loss, so it was
+almost certainly powered down at the wall. The stack was left RUNNING and was
+killed by the power cut, not by a teardown.
+
+No hazard: rm_safety was KILLED and `/cmd_vel` was at zero throughout the
+session's last bringup, and nothing was ever armed after the final restart.
+But expect the usual post-power-cut state on the next boot — clock back to
+May, `rosmaster_main.py` autostart holding ttyUSB1, `/dev/rplidar` possibly
+pointing at the base board, `/tmp` cleared. `prep_robot.sh` handles the
+autostart; `run_stack.sh` now lives in the repo rather than `/tmp` precisely
+because of this. The last deploy DID land before the robot went away, so
+`~/ncp_ws` is current.
 
 Configuration as left:
 
