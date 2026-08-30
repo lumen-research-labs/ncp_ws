@@ -1176,6 +1176,67 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   so `prep_robot.sh` must be re-run after it. Battery 11.3 V. Left clean: all
   nodes stopped, both serial ports free, safety KILLED before shutdown.
 
+- 2026-08-29 (session 5): **SLAM WIRED IN — the goal is now fixed in a
+  corrected `map` frame instead of drifting odometry.** Operator decision after
+  confirming on driven runs that the goal drifts and that `/odom` is not to be
+  trusted. Running on bernard-1: `map -> base_footprint` resolving, `/map` at
+  2.0 Hz, `policy_node` `pose_source: map`, `fault: null`, goal fixed at
+  (2.500, 0.000) in the map frame, one `/cmd_vel` publisher. Robot tier 331
+  tests. NOT yet driven under it.
+
+  **Why:** `goal_local` is 2 of the 36 numbers the network reads and both were
+  derived from `/odom` — dead reckoning with a tape-fitted `counts_per_rev`,
+  slip baked in, ~5% linear over-read. `slam_toolbox` (async online, already
+  installed — no internet needed) publishes `map -> odom` on top of the
+  untouched EKF chain. **This does not repair the odometry**, it adds a
+  correcting frame above it; `/odom` remains untrustworthy for anything
+  reading it directly.
+
+  **`pose_source` ("odom" default | "map")** on `policy_node`, driven by
+  `ncp.launch.py`'s `with_slam` (default false). `pose_source:=odom` WITH
+  `with_slam:=true` runs SLAM while still driving on odometry — the safe way
+  to watch a map build before trusting it. Fail-closed: a missing,
+  unconnected, un-extrapolatable or stale transform publishes ZERO with reason
+  `pose_tf_unavailable:*` / `pose_stale:*`. It NEVER falls back to `/odom` —
+  a silent downgrade to the drifting pose is the exact failure this removes.
+
+  **THE HAZARD, and why a stateful policy makes it mandatory:** a corrected
+  pose is a DISCONTINUOUS pose. Every loop closure steps `goal_local`, and the
+  CfC carries recurrent state — untreated it keeps steering on a hidden
+  history built toward where the goal used to be. `rm_policy/pose_source.py`
+  detects a jump by **implied speed** (scales with dt rather than assuming a
+  tick rate) and **wraps yaw** (a heading crossing +-pi would otherwise read
+  as a 6.28 rad spin and reset the net every time the robot pointed south).
+  `policy_node` adopts the corrected pose and resets the recurrent state.
+
+  **TWO HARDWARE BUGS, both caught fail-closed (nothing moved):**
+  * **slam_toolbox was rejecting EVERY scan.** The TG30's ray count VARIES
+    scan to scan — measured **9 distinct values (1967..1975) across 60
+    consecutive scans**. karto latches the first count and refuses anything
+    else: `LaserRangeScan contains 1970 range readings, expected 1951`, once
+    per scan forever, **no map, no `map -> odom`, no crash and no warning that
+    it has stopped working**. It reads as SLAM failing to converge. Fixed with
+    the driver's **`fixed_resolution:=true`** -> a constant 2020 rays, verified
+    over 60 scans. **This flag IS live on this driver, unlike
+    `invalid_range_is_inf` which is inert here** — they look equally plausible
+    in the parameter list, so it was MEASURED, not assumed.
+  * **`pose_future_stamp` every tick.** `policy_node` mapped the transform's
+    ROS stamp onto its monotonic clock via an offset captured at the first
+    lookup; if that first lookup returned an already-old transform the offset
+    was poisoned permanently and every later pose read as stamped in the
+    FUTURE — the stalest possible pose passing as the freshest. The
+    future-stamp guard caught its own bug. Now **two clocks, each used
+    consistently with itself**: freshness compares ROS stamp vs ROS clock
+    (both wall, so the age is real even after a hand clock push), jump dt
+    stays monotonic (so a hand-corrected clock cannot read as a teleport).
+
+  **TG30 note for SLAM:** slam_toolbox reads the RAW `/scan` with nothing of
+  ours between it and the driver, so `min_laser_range: 0.15` in
+  `config/slam_toolbox.yaml` is what discards the 0.0 no-return sentinel
+  (~39% of rays). Untreated they are phantom hits at the sensor origin and
+  scan matching is worthless. `scan_resampler` protects the POLICY path only —
+  it is not in SLAM's path.
+
 ## 4. Current Goal
 
 **THE NCP DEBUG TEST HAS RUN END TO END ON HARDWARE (2026-08-29 s2).** One
@@ -1470,6 +1531,16 @@ Settled, do not re-open:
   them — the operator declined a baseline capture, so there is no before/after.
   Unknown: how often the old wide arc actually fired and at what bearings.
   `scripts/record_run.sh` + the replay tier can still answer that later.
+- **`fixed_resolution:=true` is REQUIRED on the lidar whenever slam_toolbox
+  runs.** Without it the TG30's ray count varies and karto silently rejects
+  every scan after the first. Do not remove it to "simplify" the lidar params.
+- **Never map a ROS stamp onto the monotonic clock via a captured offset.**
+  Use each clock consistently with itself: ROS stamp vs ROS clock for
+  freshness, monotonic for intervals. bernard-1 has no NTP and its clock is
+  pushed by hand, so the two disagree by months.
+- **SLAM corrects the pose; it does NOT fix the odometry.** `/odom` is
+  unchanged and still untrustworthy for anything reading it directly. Only
+  `policy_node` with `pose_source:=map` benefits.
 - **rm_dashboard publishes NO topic.** It is a leaf: subscribe-only, plus
   /safety/kill, /safety/reset and parameter sets. Never give it a publisher —
   that is how it stays structurally incapable of being a second `/cmd_vel`
