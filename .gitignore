@@ -24,3 +24,6 @@ __pycache__/
 .claude/settings.local.json
 # Subagent working memory — local scratch, churns, machine-specific
 .claude/agent-memory/
+
+# Claude Code worktrees — transient, never part of the repo
+.claude/worktrees/
