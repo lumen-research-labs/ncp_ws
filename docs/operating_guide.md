@@ -317,12 +317,21 @@ The slow zone brakes before the policy has a chance to demonstrate obstacle
 avoidance, which makes the policy impossible to evaluate. Both zones can be
 switched off at bring-up:
 
-```bash
-# pause BOTH zones — no proximity braking and no e-stop
-bash scripts/run_stack.sh slow_zone_enabled:=false stop_zone_enabled:=false
+**Since 2026-08-31 both zones default OFF in `ncp.launch.py`** (operator
+decision), so `run_stack.sh` with no zone arguments has no proximity
+protection. `config/safety_limits.yaml` still says `true`, so `bench_up.sh`,
+`safety.launch.py` on its own and base-only work all keep the full e-stop —
+only the full-stack policy launch opts out.
 
-# pause only the velocity scaling, KEEP the e-stop (the safer intermediate)
-bash scripts/run_stack.sh slow_zone_enabled:=false
+```bash
+# the DEFAULT: both zones off, no proximity braking and no e-stop
+bash scripts/run_stack.sh
+
+# keep the e-stop, pause only the velocity scaling (the safer intermediate)
+bash scripts/run_stack.sh stop_zone_enabled:=true
+
+# restore the full safety layer
+bash scripts/run_stack.sh slow_zone_enabled:=true stop_zone_enabled:=true
 ```
 
 > **With `stop_zone_enabled:=false` there is no obstacle protection at all.**

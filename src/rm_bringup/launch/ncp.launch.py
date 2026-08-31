@@ -462,19 +462,48 @@ def generate_launch_description() -> LaunchDescription:
                         "cannot drive) or 'policy'.",
         ),
         # LIDAR ZONE MASTER SWITCHES — passed through to safety.launch.py.
-        # Both default "true". Passing "false" REMOVES protection on a robot
-        # with no physical E-stop; see config/safety_limits.yaml.
+        #
+        # BOTH DEFAULT "false" IN THIS FILE, by operator decision 2026-08-31,
+        # so a full-stack policy run has NO PROXIMITY PROTECTION unless it is
+        # asked for. The reason is that both zones fired on the policy rather
+        # than on a hazard: a measured run latched stop_zone for 363 of 450
+        # samples and drove for 61, so what was being evaluated was the safety
+        # layer, not the network.
+        #
+        # THIS INVERTS a1b7652's "default ON from every direction" property,
+        # and does so DELIBERATELY AND ONLY HERE. config/safety_limits.yaml
+        # still says true, so bench_up.sh, safety.launch.py on its own,
+        # base-only work and velocity_accuracy.py all keep the full e-stop —
+        # this file is the single place that opts out, because this file is
+        # the one that means "an operator is running the policy right now".
+        # AND composition still holds: with the config at true, these two
+        # arguments are what decides, and setting either to "true" here
+        # restores that zone.
+        #
+        # WHAT REMAINS when both are false: every velocity clamp, the
+        # acceleration limiter, the policy vy check, all three staleness
+        # watchdogs, killed-on-startup, and /safety/kill — which is now the
+        # ONLY thing that stops the robot before an obstacle. The clamps bound
+        # SPEED, not PROXIMITY: nothing prevents driving into a wall at
+        # max_vx. min_range is still measured and published, and the reason
+        # string reads ok_estop_disabled continuously, so /safety/status, the
+        # dashboard and every bag carry the fact.
+        #
+        # NEVER run unattended in this configuration. There is no physical
+        # E-stop on this robot.
         DeclareLaunchArgument(
-            "slow_zone_enabled", default_value="true",
-            description="false disables proximity velocity SCALING. Use when "
-                        "the slow zone's braking prevents evaluating what the "
-                        "policy itself does. Clamps are unaffected.",
+            "slow_zone_enabled", default_value="false",
+            description="Proximity velocity SCALING. DEFAULT FALSE here: its "
+                        "braking prevented evaluating what the policy itself "
+                        "does. Clamps are unaffected. 'true' restores it.",
         ),
         DeclareLaunchArgument(
-            "stop_zone_enabled", default_value="true",
-            description="false disables the lidar E-STOP and latch entirely. "
-                        "NO obstacle protection remains; /safety/kill becomes "
-                        "the only stop. Operator-supervised use only.",
+            "stop_zone_enabled", default_value="false",
+            description="The lidar E-STOP and latch. DEFAULT FALSE here, by "
+                        "operator decision 2026-08-31: NO obstacle protection "
+                        "remains and /safety/kill becomes the only stop. "
+                        "Operator-supervised use ONLY, never unattended. "
+                        "'true' restores it.",
         ),
         DeclareLaunchArgument(
             "with_lidar", default_value="true",

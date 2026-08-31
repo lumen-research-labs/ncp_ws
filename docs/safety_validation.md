@@ -230,8 +230,11 @@ Those three are the gap.
 
 ### 3c. LIDAR ZONES CAN NOW BE SWITCHED OFF (2026-08-30) — NOT SIGNED OFF
 
-`estop.slow_zone_enabled` / `estop.stop_zone_enabled` (both default `true`)
-pause the lidar zones. Added at operator request and with operator approval:
+`estop.slow_zone_enabled` / `estop.stop_zone_enabled` pause the lidar zones.
+They default `true` in `config/safety_limits.yaml`, but **since 2026-08-31
+`ncp.launch.py` passes `false` for both by default** (operator decision), so
+a full-stack policy run has no proximity protection unless it is asked for.
+Every other entry point keeps the config default. Added at operator request and with operator approval:
 the slow zone's velocity scaling brakes before the trained policy can
 demonstrate obstacle avoidance, so the policy could not be evaluated with it
 active.

@@ -1557,6 +1557,12 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   not move, which is what made run C trustworthy where the 2026-08-29 s7 probe
   printed "STATIONARY" as a heading over driven data.
 
+  **Also 2026-08-31, operator decision: both lidar zones now default OFF in
+  `ncp.launch.py`.** Run A latched `stop_zone` for 363 of 450 samples and drove
+  for 61 — the safety layer, not the policy, was what the run measured. Scoped
+  to that one launch file; `safety_limits.yaml` stays `true` so every other
+  entry point keeps the full e-stop. See the settled-decisions list in §4.
+
   Also this session: the robot was **six commits behind** (`581dec9`) and the
   running stack predated all of them, including `a1b7652`'s rm_safety zone
   master switches. Deployed to `a1b7652`, colcon-built, clock pushed (the
@@ -1915,6 +1921,22 @@ Settled, do not re-open:
 - **SLAM corrects the pose; it does NOT fix the odometry.** `/odom` is
   unchanged and still untrustworthy for anything reading it directly. Only
   `policy_node` with `pose_source:=map` benefits.
+- **BOTH LIDAR ZONES DEFAULT OFF IN `ncp.launch.py`** (operator decision
+  2026-08-31). `slow_zone_enabled` and `stop_zone_enabled` are passed `false`,
+  so a full-stack policy run has **NO PROXIMITY PROTECTION** — `/safety/kill`
+  is the only thing that stops the robot before an obstacle, and the clamps
+  bound SPEED, not proximity. Reason: both zones were firing on the policy
+  rather than on a hazard (a measured run latched `stop_zone` for 363 of 450
+  samples and drove for 61), so the safety layer was what was being evaluated.
+  **This is scoped to that ONE file on purpose.** `config/safety_limits.yaml`
+  still says `true`, so `bench_up.sh`, `safety.launch.py` alone, base-only work
+  and `velocity_accuracy.py` all keep the full e-stop. It inverts a1b7652's
+  "default ON from every direction" property in exactly one place, the place
+  that means "an operator is running the policy right now". Everything else
+  survives: clamps, acceleration limiter, vy check, all three staleness
+  watchdogs, killed-on-startup, and `min_range` still measured and published
+  with reason `ok_estop_disabled` so bags carry the fact. **NEVER unattended.**
+
 - **`with_slam` DEFAULTS TRUE and the stack drives on `map`** (2026-08-31,
   measured). `/odom`'s YAW drifts ~0.6 deg/s with the robot STANDING STILL —
   ~54 deg over a 90 s run — and `goal_local` is the goal rotated into the body

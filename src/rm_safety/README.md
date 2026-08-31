@@ -144,8 +144,11 @@ last signed-off values (0.15 / 0.4); revert for anything unattended.
 
 ### The zones can be switched off — deliberately, and loudly
 
-`slow_zone_enabled` / `stop_zone_enabled` (both default **true**) pause the
-lidar zones without touching anything else. Added 2026-08-30 at operator
+`slow_zone_enabled` / `stop_zone_enabled` pause the lidar zones without
+touching anything else. Both default **true** in `config/safety_limits.yaml`,
+but `ncp.launch.py` passes **false** for both since 2026-08-31 (operator
+decision), so the full-stack policy launch is the one entry point that comes
+up without proximity protection. Added 2026-08-30 at operator
 request: the slow zone's braking made it impossible to see what the *policy*
 does about obstacles, because the layer beneath it always braked first.
 
