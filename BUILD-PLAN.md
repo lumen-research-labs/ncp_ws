@@ -248,10 +248,22 @@ coordinate_frames:
 >   arrives rotated into the body frame, whereas raw `/imu/data_raw` is in
 >   `imu_link`, which is rotated −180°/0°/−90° from `base_link`.
 >
-> Observation is therefore **41 dims**: 36 lidar + 3 base velocity + 2 previous
-> action. Note base velocity keeps `vy` even though the action space does not —
-> observed lateral velocity is a disturbance signal, and observation/action
-> symmetry is not a goal.
+> Observation was therefore **41 dims** in 2.0.0: 36 lidar + 3 base velocity +
+> 2 previous action.
+>
+> **SUPERSEDED AGAIN by interface 3.0.0 (2026-08-27).** The 41-dim layout was
+> never implemented. When the trained checkpoint arrived it *defined* the
+> contract, and the live observation is **36 dims: 32 lidar + 2 `goal_local` +
+> 2 previous action**. The `base_velocity` block is gone entirely; a goal
+> vector took its place. The lidar block is **32 bins over the forward 180°**,
+> sampled `nearest_valid_ray` rather than min-pooled, for training fidelity.
+>
+> Beware a number collision: **36 is the total width in 3.0.0 and was the lidar
+> bin count in 2.0.0.** Anything saying "36 bins" is pre-3.0.0.
+>
+> The two 2.0.0 decisions above (2-dim action, no IMU block) still hold. See
+> `docs/interface_contract.md` for the live contract and
+> `config/interface.yaml` for the authority.
 
 ### Tasks
 
