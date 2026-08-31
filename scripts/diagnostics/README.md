@@ -1,5 +1,10 @@
 # Base-board bench diagnostics
 
+**Bringing up a NEW robot? Follow [`docs/calibration.md`](../../docs/calibration.md)**,
+which puts these scripts in the order they must be run and states what each
+step must prove before the next one is safe. This file is the reference for
+the individual tools.
+
 Standalone Python scripts (no ROS, no colcon) that talk to the ROSMASTER X3
 control board directly via `Rosmaster_Lib`. Written 2026-08-28 to root-cause
 the velocity / clamp failure (see CLAUDE.md §3).

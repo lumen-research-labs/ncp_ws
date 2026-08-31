@@ -22,8 +22,10 @@ __pycache__/
 
 # Claude Code machine-local settings
 .claude/settings.local.json
-# Subagent working memory — local scratch, churns, machine-specific
-.claude/agent-memory/
+# Subagent working memory. NOT ignored: the rm-safety-reviewer patterns are
+# accumulated project knowledge about THIS codebase — which invariants hold by
+# construction, and what to re-check when a given area is edited. That belongs
+# with the code and is part of what a new maintainer inherits.
 
 # Claude Code worktrees — transient, never part of the repo
 .claude/worktrees/

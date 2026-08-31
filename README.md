@@ -19,12 +19,32 @@ with a frozen observation/action interface and full logging.
 | know the exact observation/action layout | [`docs/interface_contract.md`](docs/interface_contract.md) |
 | work on one package | `src/rm_*/README.md` |
 | see the phase plan and sign-off gates | [`BUILD-PLAN.md`](BUILD-PLAN.md) |
+| **bring the base up on a NEW robot** — the per-robot calibration procedure | [`docs/calibration.md`](docs/calibration.md) |
 | set up the dev workstation | [`docs/dev_env_setup.md`](docs/dev_env_setup.md) |
 | check the safety sign-off record | [`docs/safety_validation.md`](docs/safety_validation.md) |
 
 `BUILD-PLAN.md` is the authority on scope and phase gates.
 `config/interface.yaml` is the authority on the data contract.
 `config/safety_limits.yaml` is the authority on every safety number.
+
+**`CLAUDE.md` is the project brain** and the single most useful document here:
+an append-only log of every hardware session, and a "settled, do not re-open"
+list of decisions and traps. Nearly every non-obvious thing about this robot —
+the lidar that is not the lidar it is labelled as, the firmware that ignores
+commanded speed, the serial symlink that races across reboots — was learned the
+hard way and is written down there. Read it before debugging anything that
+looks impossible.
+
+### Inherited tooling in `.claude/`
+
+Checked in deliberately, so the knowledge is not stuck on one laptop:
+
+| path | what it is |
+|---|---|
+| `.claude/skills/robot-ssh/` | **Load before any SSH to a robot.** Both robots' addresses and keys, the serial-port traps, the two-cable lidar, the battery floor, `pkill -f` self-match, and why `ros2 multicast` proves nothing. |
+| `.claude/agents/` | Task-scoped subagent definitions: node writer, safety reviewer, test runner. |
+| `.claude/hooks/` | `/cmd_vel` ownership enforcement (blocking), interface-version bump reminder, build check. |
+| `.claude/agent-memory/rm-safety-reviewer/` | Accumulated review patterns — which safety invariants hold *by construction*, and what to re-check when a given area is edited. |
 
 ---
 
