@@ -115,6 +115,65 @@ class EstopLimits:
     # check in min_range_in_arcs(). See safety_limits.yaml estop.
     # self_occlusion_zones_deg for the measurement behind this.
     self_occlusion_zones_deg: Tuple[Tuple[float, float], ...] = ()
+    # ------------------------------------------------------------------
+    # ZONE MASTER SWITCHES (added 2026-08-30, operator-approved).
+    #
+    # Both default TRUE. A config that omits them gets the full e-stop,
+    # which is the only acceptable default: a safety feature that has to be
+    # remembered is one that will eventually be forgotten.
+    #
+    # WHAT DISABLING ACTUALLY REMOVES. These are the ONLY obstacle-based
+    # protection on this robot, and there is NO PHYSICAL E-STOP. With
+    # stop_zone_enabled false, nothing in this workspace will stop the robot
+    # before a collision — the velocity clamps bound SPEED, not PROXIMITY,
+    # so the robot will drive into a wall at max_vx rather than at 2 m/s.
+    # That is a smaller impact, not the absence of one.
+    #
+    # WHAT SURVIVES, deliberately, because none of it is zone geometry:
+    #   * every velocity clamp (max_vx / max_vy / max_wz)
+    #   * every acceleration limit
+    #   * the policy_vy violation check
+    #   * /safety/kill and the killed-on-startup default
+    #   * the command, scan and odom staleness watchdogs
+    # So the kill switch remains the operator's stop, and a dead lidar or a
+    # silent policy still stops the robot. Only "there is an object N metres
+    # ahead" stops mattering.
+    #
+    # Startup-only, and NOT settable via `ros2 param set` — see
+    # safety_node._on_set_parameters. Disabling the e-stop is a decision made
+    # when the stack is brought up, not one a browser can make mid-run.
+    slow_zone_enabled: bool = True
+    stop_zone_enabled: bool = True
+
+    @property
+    def any_zone_enabled(self) -> bool:
+        """True while at least one lidar zone is still acting on the scan.
+
+        Used to decide whether a scan with no valid returns is a fault. With
+        both zones off, nothing consumes the arc minimum, so "no returns in
+        the monitored arcs" is not evidence about anything and must not stop
+        the robot on its own. Message-age staleness is a separate check and
+        is never gated on this.
+        """
+        return self.slow_zone_enabled or self.stop_zone_enabled
+
+    @property
+    def zones_status_suffix(self) -> str:
+        """Reason-string marker naming exactly which zones are disabled.
+
+        Empty while the e-stop is whole. Non-empty strings are appended to
+        the nominal reason so that /safety/status — and therefore the
+        dashboard, and therefore every recorded bag — carries the fact
+        CONTINUOUSLY rather than only in a startup log line somebody has
+        already scrolled past.
+        """
+        if self.slow_zone_enabled and self.stop_zone_enabled:
+            return ""
+        if not self.slow_zone_enabled and not self.stop_zone_enabled:
+            return "_estop_disabled"
+        if not self.slow_zone_enabled:
+            return "_slow_zone_disabled"
+        return "_stop_zone_disabled"
 
     @property
     def effective_slow_forward_arc_deg(self) -> float:
@@ -232,6 +291,11 @@ class Limits:
                 ),
                 consecutive_scans_to_trigger=int(e["consecutive_scans_to_trigger"]),
                 latching=bool(e["latching"]),
+                # .get with a True default: a config predating these keys —
+                # every config written before 2026-08-30 — gets the full
+                # e-stop. Absence must never read as "disabled".
+                slow_zone_enabled=bool(e.get("slow_zone_enabled", True)),
+                stop_zone_enabled=bool(e.get("stop_zone_enabled", True)),
                 self_occlusion_zones_deg=tuple(
                     (float(lo), float(hi))
                     for lo, hi in e.get("self_occlusion_zones_deg", [])
@@ -692,14 +756,20 @@ def estop_zone(
     str:
         One of ``"clear"``, ``"slow"``, ``"stop"``.
     """
-    if min_range < limits.estop.stop_zone_m:
+    # A DISABLED ZONE IS NEVER ENTERED. Gating here rather than at each call
+    # site means every consumer of this function — the latch counter, the
+    # velocity scaling, the reason string — is switched off by one decision,
+    # with no second place to forget.
+    if limits.estop.stop_zone_enabled and min_range < limits.estop.stop_zone_m:
         return "stop"
-    # The slow test uses the SLOW arcs' minimum when one was supplied. An
-    # obstacle off to the side is then still fully covered by the stop test
-    # above (which used the wide arcs) but no longer throttles forward motion.
-    slow_r = min_range if min_range_slow is None else min_range_slow
-    if slow_r < limits.estop.slow_zone_m:
-        return "slow"
+    if limits.estop.slow_zone_enabled:
+        # The slow test uses the SLOW arcs' minimum when one was supplied. An
+        # obstacle off to the side is then still fully covered by the stop test
+        # above (which used the wide arcs) but no longer throttles forward
+        # motion.
+        slow_r = min_range if min_range_slow is None else min_range_slow
+        if slow_r < limits.estop.slow_zone_m:
+            return "slow"
     return "clear"
 
 
@@ -939,7 +1009,21 @@ def _evaluate_inner(inputs: EvalInputs, limits: Limits) -> Decision:
     # No valid returns anywhere in the monitored arcs (inf) means loss of
     # perception — whether the list is empty, all-NaN, all-out-of-range, or
     # all-behind-the-robot.  Treat as an e-stop condition.  Fail-closed.
-    no_perception = (min_r == math.inf)
+    #
+    # GATED ON THE ZONES (2026-08-30). "No returns in the monitored arcs" is a
+    # statement about the ARC GEOMETRY, and the arcs exist to feed the zones.
+    # With both zones disabled nothing consumes min_r, so an all-no-return
+    # scan is not evidence about anything — and on this hardware it is not
+    # even rare: the TG30 reports ~31-39% of rays as no-returns in a normal
+    # room, so an open space genuinely can leave the forward arc empty. Left
+    # ungated it would stop the robot for a reason the operator has just
+    # switched off, which reads as the disable not having worked.
+    #
+    # scan_stale itself is NOT gated and never will be. That is message AGE,
+    # not zone geometry: a dead lidar means policy_node is building its
+    # observation from a frozen scan, which is a fault regardless of what the
+    # e-stop is doing.
+    no_perception = (min_r == math.inf) and limits.estop.any_zone_enabled
 
     if scan_stale or no_perception:
         return _zero_decision(
@@ -998,6 +1082,20 @@ def _evaluate_inner(inputs: EvalInputs, limits: Limits) -> Decision:
             and new_count >= limits.estop.consecutive_scans_to_trigger
         )
         new_latched = inputs.estop_latched or triggered_this_cycle
+
+    # A DISABLED STOP ZONE CLEARS ANY LATCH IT LEFT BEHIND.
+    #
+    # `is_stop_zone` is already false while disabled, so nothing new can
+    # latch — but `inputs.estop_latched` carries forward, and the node also
+    # restores a latch across restarts. Without this, disabling the stop zone
+    # on a robot that had already latched would leave it stopped forever with
+    # reason "stop_zone" and no obstacle logic still running to release it:
+    # the operator sees the switch do nothing, which is the worst way for a
+    # safety toggle to fail. The latch is a stop-zone artefact and dies with
+    # the stop zone.
+    if not limits.estop.stop_zone_enabled:
+        new_latched = False
+        new_count = 0
 
     # ------------------------------------------------------------------
     # Precedence 3: STOP ZONE (latched)
@@ -1131,10 +1229,16 @@ def _evaluate_inner(inputs: EvalInputs, limits: Limits) -> Decision:
 
     # ------------------------------------------------------------------
     # Precedence 6: NOMINAL (OK)
+    #
+    # The reason carries the zone state, so a run with the e-stop switched off
+    # is self-describing on /safety/status, on the dashboard, and in any
+    # recorded bag — rather than being a property of a launch argument nobody
+    # wrote down. `zones_status_suffix` is "" while the e-stop is whole, so
+    # the nominal reason is still exactly "ok" in the normal case.
     # ------------------------------------------------------------------
     return Decision(
         state=State.OK,
-        reason="ok",
+        reason="ok" + limits.estop.zones_status_suffix,
         out_vx=vx,
         out_vy=vy,
         out_wz=wz,

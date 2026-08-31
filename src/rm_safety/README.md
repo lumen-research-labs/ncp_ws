@@ -142,6 +142,51 @@ raise the clamps to "let the policy through."** The safety layer is designed to
 be the binding constraint. Note the current values are themselves *above* the
 last signed-off values (0.15 / 0.4); revert for anything unattended.
 
+### The zones can be switched off — deliberately, and loudly
+
+`slow_zone_enabled` / `stop_zone_enabled` (both default **true**) pause the
+lidar zones without touching anything else. Added 2026-08-30 at operator
+request: the slow zone's braking made it impossible to see what the *policy*
+does about obstacles, because the layer beneath it always braked first.
+
+**With the stop zone off there is no obstacle protection on this robot at
+all.** The clamps bound speed, not proximity. `/safety/kill` becomes the only
+stop.
+
+Four properties make this something other than a hole in the safety layer:
+
+- **Default on, from every direction.** A config omitting the keys gets the
+  full e-stop; absence never reads as "disabled".
+- **AND composition.** The effective value is `YAML AND parameter`. Either can
+  disable, neither can re-enable what the other switched off — so whichever
+  file you read, the protection it claims is at most what is running.
+- **Startup-only.** A runtime `ros2 param set` is **rejected** with a reason.
+  Disabling the e-stop is a bring-up decision, not something the
+  unauthenticated dashboard on `0.0.0.0` gets to make mid-run.
+- **Self-describing.** The nominal `reason` becomes `ok_estop_disabled` (or
+  `ok_slow_zone_disabled` / `ok_stop_zone_disabled`), so `/safety/status`, the
+  dashboard and every recorded bag carry the fact continuously — not just a
+  startup log line someone scrolled past. The node also re-warns every 10 s.
+
+Everything else survives untouched: all velocity clamps, all acceleration
+limits, the `vy` violation check, kill and killed-on-startup, and all three
+staleness watchdogs. `min_range` is still computed and published, so the
+dashboard still shows proximity — the layer just does not act on it.
+
+Two behaviours that follow, both intentional:
+
+- **A disabled stop zone clears a latch it had already set.** Otherwise a
+  robot that latched before the switch would stay `STOPPED` forever with no
+  obstacle logic left running to release it, and the switch would appear to do
+  nothing.
+- **`no_perception` is gated on the zones; scan *staleness* is not.** "No
+  valid returns in the monitored arcs" is a statement about arc geometry, and
+  the arcs feed the zones — with both off, nothing consumes it, and on this
+  hardware an open room genuinely can leave the forward arc empty (~31–39% of
+  TG30 rays are no-returns). Message *age* is a different thing and is never
+  gated: a frozen scan means `policy_node` is building its observation from
+  stale data, which is a fault regardless.
+
 ### Deceleration bypasses the acceleration limiter
 
 A fail-closed path zeroing the command is allowed to violate `max_ax`. Braking

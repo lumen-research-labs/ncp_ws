@@ -228,6 +228,38 @@ the slow→stop zones under real motion, covering the lidar for a stale-scan
 e-stop, and killing the command publisher mid-motion to prove the watchdog.
 Those three are the gap.
 
+### 3c. LIDAR ZONES CAN NOW BE SWITCHED OFF (2026-08-30) — NOT SIGNED OFF
+
+`estop.slow_zone_enabled` / `estop.stop_zone_enabled` (both default `true`)
+pause the lidar zones. Added at operator request and with operator approval:
+the slow zone's velocity scaling brakes before the trained policy can
+demonstrate obstacle avoidance, so the policy could not be evaluated with it
+active.
+
+**A run with either switch `false` is OUTSIDE every tier recorded in this
+document.** The unit and replay tiers above were all scored with the zones
+active, and none of them says anything about a run without them. Nothing here
+should be read as a sign-off for that configuration.
+
+What a disabled stop zone actually removes: all obstacle-based protection.
+This robot has no physical E-stop, so `/safety/kill` becomes the only stop.
+The velocity clamps bound SPEED, not PROXIMITY.
+
+What is unaffected, and still covered by the tiers above: every velocity clamp,
+every acceleration limit, the policy `vy` check, kill and killed-on-startup,
+and all three staleness watchdogs. `min_range` is still measured and published.
+
+Conditions under which the override is acceptable, per the operator decision:
+
+* operator present, watching the robot, with `/safety/kill` typed and ready
+* never unattended, and never combined with a raised `max_vx`
+* the default (`true`) is restored by dropping the launch arguments
+
+Pinned by `tests/unit/test_safety_zone_switches.py` (26 tests) and
+`tests/unit/test_safety_node_zone_switches.py` (15 tests): defaults enabled,
+AND composition, everything that must survive, the latch release, the reason
+strings, and runtime rejection.
+
 ### 3b. LIMITS IN FORCE ARE ABOVE THE LAST SIGNED VALUES
 
 Raised 2026-08-29 at operator request to make the NCP debug test run at a

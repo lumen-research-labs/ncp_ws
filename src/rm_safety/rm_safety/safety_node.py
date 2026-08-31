@@ -96,6 +96,7 @@ Failure mode:
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import os
 import pathlib
@@ -145,6 +146,21 @@ _DEFAULT_LOOP_RATE_HZ: float = 20.0
 # an explicit operator opt-in.
 _DEFAULT_COMMAND_SOURCE: str = "teleop"
 
+# ---------------------------------------------------------------------------
+# LIDAR ZONE MASTER SWITCHES — both default ON, and the composition is AND.
+#
+# The effective setting is (YAML value) AND (parameter value), so BOTH must
+# say true for a zone to run and EITHER can switch it off. That direction is
+# chosen on purpose: turning the e-stop off should require writing "false"
+# somewhere explicit, while nothing anyone forgets to write can turn it off
+# by accident.
+#
+# How often the disabled state is re-announced while running. Loud enough
+# that it cannot be missed in a log, slow enough not to bury everything else.
+# ---------------------------------------------------------------------------
+_DEFAULT_ZONE_ENABLED: bool = True
+_ZONES_DISABLED_WARN_PERIOD_S: float = 10.0
+
 
 class SafetyNode(rclpy.node.Node):
     """ROS2 node: sole publisher of /cmd_vel; wraps safety_logic.evaluate()."""
@@ -158,6 +174,8 @@ class SafetyNode(rclpy.node.Node):
         self.declare_parameter("command_source", _DEFAULT_COMMAND_SOURCE)
         self.declare_parameter("safety_loop_rate_hz", _DEFAULT_LOOP_RATE_HZ)
         self.declare_parameter("safety_limits_path", _DEFAULT_LIMITS_PATH)
+        self.declare_parameter("slow_zone_enabled", _DEFAULT_ZONE_ENABLED)
+        self.declare_parameter("stop_zone_enabled", _DEFAULT_ZONE_ENABLED)
 
         self._command_source: str = (
             self.get_parameter("command_source").get_parameter_value().string_value
@@ -184,6 +202,17 @@ class SafetyNode(rclpy.node.Node):
         # in an unknown-limits state.
         # ------------------------------------------------------------------
         self._limits: Limits = self._load_limits(limits_path)
+
+        # ------------------------------------------------------------------
+        # Apply the zone master switches, and say so loudly.
+        #
+        # AND-composed with the YAML: both sources must say true for a zone to
+        # run. Neither can re-enable what the other switched off, so reading
+        # either one alone can never overstate how much protection is live.
+        # ------------------------------------------------------------------
+        self._limits = self._apply_zone_switches(self._limits)
+        self._zones_last_warned_s: float = 0.0
+        self._announce_zone_state()
 
         # ------------------------------------------------------------------
         # Validate loop rate vs. zero_publish_rate_hz guarantee
@@ -387,6 +416,91 @@ class SafetyNode(rclpy.node.Node):
                 f"safety_node: safety_limits.yaml is malformed: {exc}"
             ) from exc
 
+    def _apply_zone_switches(self, limits: Limits) -> Limits:
+        """AND the `*_zone_enabled` parameters into the loaded limits.
+
+        The YAML is the authority and the parameters are an override that can
+        only ever REMOVE protection, never add it back. Composing with AND
+        rather than letting the parameter win means a `safety_limits.yaml`
+        that disables a zone cannot be silently re-enabled by a launch file,
+        and vice versa — whichever file you happen to read, the protection it
+        claims is at most what is actually running.
+        """
+        slow = (
+            self.get_parameter("slow_zone_enabled").get_parameter_value().bool_value
+        )
+        stop = (
+            self.get_parameter("stop_zone_enabled").get_parameter_value().bool_value
+        )
+        return dataclasses.replace(
+            limits,
+            estop=dataclasses.replace(
+                limits.estop,
+                slow_zone_enabled=limits.estop.slow_zone_enabled and slow,
+                stop_zone_enabled=limits.estop.stop_zone_enabled and stop,
+            ),
+        )
+
+    def _announce_zone_state(self) -> None:
+        """Log the lidar-zone configuration at startup, loudly if degraded.
+
+        A disabled e-stop must never be something an operator has to infer
+        from a launch argument they did not type. This prints once at startup
+        and then on a slow repeat from the control loop, and the state is also
+        carried continuously in the /safety/status reason string so it reaches
+        the dashboard and every recorded bag.
+        """
+        es = self._limits.estop
+        if es.slow_zone_enabled and es.stop_zone_enabled:
+            self.get_logger().info(
+                f"safety_node: lidar e-stop ACTIVE — "
+                f"slow {es.slow_zone_m} m / stop {es.stop_zone_m} m."
+            )
+            return
+
+        disabled = []
+        if not es.slow_zone_enabled:
+            disabled.append("SLOW zone (velocity scaling)")
+        if not es.stop_zone_enabled:
+            disabled.append("STOP zone (e-stop + latch)")
+
+        self.get_logger().warn(
+            "=" * 72 + "\n"
+            "  LIDAR E-STOP PARTIALLY DISABLED — OPERATOR-APPROVED OVERRIDE\n"
+            f"  DISABLED: {'; '.join(disabled)}\n"
+            "  This robot has NO PHYSICAL E-STOP. With the STOP zone off,\n"
+            "  NOTHING in this stack will stop the robot before a collision.\n"
+            "  Velocity clamps bound SPEED, not PROXIMITY.\n"
+            "  STILL ACTIVE: velocity clamps, acceleration limits, /safety/kill,\n"
+            "  killed-on-startup, and the command/scan/odom staleness watchdogs.\n"
+            "  KEEP THE KILL COMMAND IN HAND AND WATCH THE ROBOT.\n"
+            + "=" * 72
+        )
+
+    def _warn_zones_disabled_periodically(self, now_s: float) -> None:
+        """Re-announce a disabled e-stop on a slow repeat while running.
+
+        Startup logs scroll away, and a stack that has been up for an hour is
+        exactly when someone forgets the e-stop is off. Throttled so it stays
+        readable next to everything else the loop emits.
+        """
+        if self._limits.estop.slow_zone_enabled and self._limits.estop.stop_zone_enabled:
+            return
+        if now_s - self._zones_last_warned_s < _ZONES_DISABLED_WARN_PERIOD_S:
+            return
+        self._zones_last_warned_s = now_s
+        es = self._limits.estop
+        off = []
+        if not es.slow_zone_enabled:
+            off.append("slow")
+        if not es.stop_zone_enabled:
+            off.append("stop")
+        self.get_logger().warn(
+            f"safety_node: lidar e-stop still DISABLED ({'+'.join(off)} zone) — "
+            f"no obstacle protection. min_range is being measured and reported "
+            f"but NOT acted on."
+        )
+
     def _read_kill_state(self) -> bool:
         """Read the persisted kill state from disk.  Fail-closed: any error → True."""
         try:
@@ -504,6 +618,23 @@ class SafetyNode(rclpy.node.Node):
         operator act in between.
         """
         for param in params:
+            if param.name in ("slow_zone_enabled", "stop_zone_enabled"):
+                # Called out separately from the generic rejection because
+                # this is the one an operator is most likely to reach for
+                # mid-run, and the reason they need is different: it is not
+                # "we happen to read this at startup", it is "the obstacle
+                # e-stop is not something a live parameter set — or an
+                # unauthenticated dashboard on 0.0.0.0 — gets to switch off".
+                return SetParametersResult(
+                    successful=False,
+                    reason=(
+                        f"{param.name!r} is NOT settable at runtime. Disabling "
+                        f"the lidar e-stop is a bring-up decision: set it in "
+                        f"config/safety_limits.yaml or pass it to the launch "
+                        f"file, and restart the stack. /safety/kill is the "
+                        f"runtime stop."
+                    ),
+                )
             if param.name != "command_source":
                 return SetParametersResult(
                     successful=False,
@@ -573,6 +704,11 @@ class SafetyNode(rclpy.node.Node):
 
     def _control_loop_inner(self) -> None:
         now = time.monotonic()
+
+        # Slow repeat of the disabled-e-stop warning. No-op while the e-stop
+        # is whole, so this costs one boolean check per tick in normal
+        # operation.
+        self._warn_zones_disabled_periodically(now)
 
         # ------------------------------------------------------------------
         # Compute dt since last tick

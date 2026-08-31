@@ -241,6 +241,48 @@ estop:
                                     # never latch a stop
   latching: true        # once stopped, stays stopped until /safety/reset
 
+  # ------------------------------------------------------------------------
+  # ZONE MASTER SWITCHES — both must stay `true` for the e-stop to be whole.
+  #
+  # Added 2026-08-30 at operator request: the slow zone's velocity scaling
+  # and the stop zone's latch were interfering with evaluating the trained
+  # policy, which cannot demonstrate obstacle avoidance if the layer beneath
+  # it brakes first. Approved by the operator as a deliberate, temporary
+  # override for supervised policy evaluation.
+  #
+  # READ THIS BEFORE SETTING EITHER TO false:
+  #
+  #   These are the ONLY obstacle-based protection on this robot, and there
+  #   is NO PHYSICAL E-STOP. With stop_zone_enabled false, NOTHING in this
+  #   stack stops the robot before a collision. The velocity clamps bound
+  #   SPEED, not PROXIMITY — the robot hits the wall at max_vx instead of at
+  #   2 m/s. That is a smaller impact, not the absence of one.
+  #
+  # What is NOT affected, and stays fully active either way:
+  #   * every velocity clamp (max_vx / max_vy / max_wz)
+  #   * every acceleration limit
+  #   * the policy vy violation check
+  #   * /safety/kill, and killed-on-startup
+  #   * the command / scan / odom staleness watchdogs
+  #
+  # So /safety/kill remains the operator's stop, and a dead lidar or a silent
+  # policy still stops the robot. Only "an object is N metres ahead" stops
+  # being acted on. min_range is still MEASURED and still published on
+  # /safety/status, so the dashboard shows proximity throughout — it simply
+  # does not brake on it.
+  #
+  # Composition: the effective setting is (this value) AND (the launch
+  # parameter of the same name). Both default true and either can disable;
+  # neither can re-enable what the other switched off. Startup-only — a
+  # `ros2 param set` is REJECTED, so no browser can switch the e-stop off
+  # mid-run.
+  #
+  # Turning them back on is the whole-stack default: revert these to true
+  # (or simply stop passing the launch arguments) and restart.
+  # ------------------------------------------------------------------------
+  slow_zone_enabled: true   # false -> no proximity velocity scaling
+  stop_zone_enabled: true   # false -> NO E-STOP AND NO LATCH. Read above.
+
 timeouts:
   command_timeout_ms: 300    # no command on the active input -> publish zero
   scan_timeout_ms: 500       # stale /scan -> treat as e-stop; safety cannot

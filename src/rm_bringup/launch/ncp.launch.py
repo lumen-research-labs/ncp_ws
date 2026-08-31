@@ -440,6 +440,21 @@ def generate_launch_description() -> LaunchDescription:
             description="rm_safety's active source: 'teleop' (default, policy "
                         "cannot drive) or 'policy'.",
         ),
+        # LIDAR ZONE MASTER SWITCHES — passed through to safety.launch.py.
+        # Both default "true". Passing "false" REMOVES protection on a robot
+        # with no physical E-stop; see config/safety_limits.yaml.
+        DeclareLaunchArgument(
+            "slow_zone_enabled", default_value="true",
+            description="false disables proximity velocity SCALING. Use when "
+                        "the slow zone's braking prevents evaluating what the "
+                        "policy itself does. Clamps are unaffected.",
+        ),
+        DeclareLaunchArgument(
+            "stop_zone_enabled", default_value="true",
+            description="false disables the lidar E-STOP and latch entirely. "
+                        "NO obstacle protection remains; /safety/kill becomes "
+                        "the only stop. Operator-supervised use only.",
+        ),
         DeclareLaunchArgument(
             "with_lidar", default_value="true",
             description="Start the YDLIDAR TG30 on its by-id CP2102 port.",
@@ -548,7 +563,11 @@ def generate_launch_description() -> LaunchDescription:
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(_LAUNCH_DIR / "safety.launch.py")),
             condition=IfCondition(with_safety),
-            launch_arguments={"command_source": command_source}.items(),
+            launch_arguments={
+                "command_source": command_source,
+                "slow_zone_enabled": LaunchConfiguration("slow_zone_enabled"),
+                "stop_zone_enabled": LaunchConfiguration("stop_zone_enabled"),
+            }.items(),
         ),
 
         Node(

@@ -72,6 +72,8 @@ def generate_launch_description() -> LaunchDescription:
     command_source = LaunchConfiguration("command_source")
     safety_loop_rate_hz = LaunchConfiguration("safety_loop_rate_hz")
     safety_limits_path = LaunchConfiguration("safety_limits_path")
+    slow_zone_enabled = LaunchConfiguration("slow_zone_enabled")
+    stop_zone_enabled = LaunchConfiguration("stop_zone_enabled")
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -91,6 +93,31 @@ def generate_launch_description() -> LaunchDescription:
             default_value=_DEFAULT_LIMITS_PATH,
             description="Absolute path to config/safety_limits.yaml.",
         ),
+        # --------------------------------------------------------------
+        # LIDAR ZONE MASTER SWITCHES. Both default "true"; passing "false"
+        # to either is an operator override that REMOVES protection.
+        #
+        # Composed with AND against the same keys in safety_limits.yaml, so
+        # neither source can re-enable what the other switched off, and the
+        # protection either file claims is at most what is running.
+        #
+        # There is NO PHYSICAL E-STOP on this robot. With stop_zone_enabled
+        # false, nothing in this stack stops it before a collision. See the
+        # long note in config/safety_limits.yaml before using these.
+        # --------------------------------------------------------------
+        DeclareLaunchArgument(
+            "slow_zone_enabled",
+            default_value="true",
+            description="false disables proximity velocity SCALING (slow "
+                        "zone). Clamps and acceleration limits are unaffected.",
+        ),
+        DeclareLaunchArgument(
+            "stop_zone_enabled",
+            default_value="true",
+            description="false disables the lidar E-STOP and its latch. NO "
+                        "obstacle protection remains. /safety/kill is then "
+                        "the only stop. Operator-supervised use only.",
+        ),
         Node(
             package="rm_safety",
             executable="safety_node",
@@ -100,6 +127,8 @@ def generate_launch_description() -> LaunchDescription:
                 "command_source": command_source,
                 "safety_loop_rate_hz": safety_loop_rate_hz,
                 "safety_limits_path": safety_limits_path,
+                "slow_zone_enabled": slow_zone_enabled,
+                "stop_zone_enabled": stop_zone_enabled,
             }],
             # rm_safety is the SOLE publisher of /cmd_vel. Do not add
             # remappings that would route another node onto /cmd_vel, and never

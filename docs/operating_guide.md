@@ -311,6 +311,55 @@ The gamepad and the waypoint controller publish `/teleop/cmd_vel`, which is an
 clamps, slow and stop arcs, acceleration limiter and kill as the policy. There
 is no path around the safety layer for anyone.
 
+### Pausing the lidar zones (operator override)
+
+The slow zone brakes before the policy has a chance to demonstrate obstacle
+avoidance, which makes the policy impossible to evaluate. Both zones can be
+switched off at bring-up:
+
+```bash
+# pause BOTH zones — no proximity braking and no e-stop
+bash scripts/run_stack.sh slow_zone_enabled:=false stop_zone_enabled:=false
+
+# pause only the velocity scaling, KEEP the e-stop (the safer intermediate)
+bash scripts/run_stack.sh slow_zone_enabled:=false
+```
+
+> **With `stop_zone_enabled:=false` there is no obstacle protection at all.**
+> The clamps bound *speed*, not *proximity* — the robot hits the wall at
+> `max_vx` instead of at 2 m/s. That is a smaller impact, not the absence of
+> one. **`/safety/kill` is your only stop. Keep it typed in its own terminal
+> and watch the robot.**
+
+**What still works**, and is untouched by these switches:
+
+| still active | still enforced |
+|---|---|
+| every velocity clamp (`max_vx` / `max_vy` / `max_wz`) | yes |
+| every acceleration limit | yes |
+| the policy `vy` violation check | yes |
+| `/safety/kill` and killed-on-startup | yes |
+| command / scan / odom staleness watchdogs | yes |
+
+`min_range` is still **measured and published**, so the dashboard shows
+proximity throughout — the layer simply does not brake on it.
+
+**How to tell it is off:** `/safety/status` `reason` reads `ok_estop_disabled`
+(or `ok_slow_zone_disabled` / `ok_stop_zone_disabled`) instead of `ok`, the
+dashboard shows that verbatim, and `safety_node` logs a warning at startup and
+again every 10 s.
+
+**Turning it back on is the default** — drop the launch arguments and restart.
+There is no way to re-enable it without a restart, and no way to *disable* it
+at runtime: `ros2 param set` on either switch is **rejected**, so an
+unauthenticated dashboard cannot switch the e-stop off mid-run.
+
+One interaction worth knowing: with **both** zones off, an all-no-return scan
+no longer stops the robot. That check asks "is anything visible in the
+monitored arcs", and the arcs exist to feed the zones. Scan *staleness* — a
+lidar that has stopped publishing — still stops the robot either way, because
+`policy_node` reads the same scan.
+
 ### Current limits
 
 | | value | note |
