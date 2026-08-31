@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-"""Validate a running system (or a bag) against config/interface.yaml.
+"""NOT IMPLEMENTED — a stub. Do not rely on this script.
+
+!!  THIS SCRIPT VALIDATES NOTHING.  !!
+
+It exits non-zero with a "not implemented" message. It is kept as a
+specification of the intended tool, not as a tool. The docstring below
+describes what it WOULD do; nothing under it has been built.
+
+Do not put it in a pre-session checklist, and do not read a passing exit
+status from it as evidence about the interface — there is no passing exit
+status. Checking the contract today means reading config/interface.yaml and
+docs/interface_contract.md, and confirming interface_version at policy_node
+startup (which DOES check, and refuses to start on a mismatch).
+
+--- intended behaviour, unbuilt ---
+
+Validate a running system (or a bag) against config/interface.yaml.
 
 Asserts that every topic declared in the interface contract exists, publishes
 the declared message type, and runs at or above the declared rate. Run this
@@ -15,9 +31,10 @@ Parameters:  --interface (path, default config/interface.yaml)
 Failure mode: exits non-zero with the list of violations. Never exits zero on a
              partial check; an unreachable topic is a failure, not a skip.
 
-STATUS: stub. Implemented in Phase 3 task 4, once the schema loader
-(rm_interfaces) exists and Phase 1 has established the measured rates that
-interface.yaml declares.
+STATUS: STILL A STUB as of 2026-08-30. It was scheduled for Phase 3 task 4,
+gated on the rm_interfaces schema loader and on Phase 1 measured rates being
+written into config/interface.yaml. Both of those happened; this did not.
+It exits 1, so it can never be mistaken for a passing check.
 """
 
 import sys

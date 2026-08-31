@@ -45,7 +45,7 @@ Create this structure. Packages prefixed `rm_` (ROSMASTER). Two build targets: t
 rosmaster_rl/
 ├── BUILD_PLAN.md                  # this file
 ├── README.md                      # quickstart: how to build, deploy, run
-├── docker/
+├── docker/                      # DROPPED 2026-08-30 — see note below
 │   ├── Dockerfile.jetson          # ROS2 Humble + TensorRT, pinned to on-robot L4T
 │   ├── docker-compose.yml         # mounts workspace, --network host, device passthrough
 │   └── README.md                  # how to build/run the container ON THE ROBOT
@@ -89,6 +89,16 @@ rosmaster_rl/
    - Set a shared `ROS_DOMAIN_ID` (pick a non-zero value, record it in `config/interface.yaml`) on both machines.
    - Verify: run a talker on the robot, `ros2 topic echo` from the workstation. If this fails, check that both are on the same subnet and that DDS multicast is not blocked before debugging anything else.
    - **Do not use X11 forwarding for RVIZ.** RVIZ2 runs on the workstation, subscribing over DDS.
+
+> **The container path was DROPPED (2026-08-30).** ROS2 Humble runs
+> **natively on the Jetson host**, and every hardware session from 2026-08-08
+> onward has run that way; the container was never adopted. `docker/` had sat
+> at `L4T_TAG=TODO_PHASE1` since Phase 1 and has been deleted, along with
+> `scripts/deploy.sh`, which wrapped `docker compose` and was never configured.
+> Code reaches the robot with `scripts/deploy_to_robot.sh` (this repo, pushed
+> over LAN SSH) and `scripts/deploy_upstream.sh` (the upstream checkout plus
+> the trained `actor.pt`) — GitHub is unreachable from both robots. Task 2
+> below is retained as a record of the original plan.
 
 2. **Build the Jetson container.** Write `docker/Dockerfile.jetson` pinned to the L4T/JetPack version actually present on the robot (check with `cat /etc/nv_tegra_release`). Include ROS2 Humble, TensorRT, ONNX Runtime. Build it **on the robot** — do not attempt to build or cross-compile TensorRT artifacts on the workstation.
 

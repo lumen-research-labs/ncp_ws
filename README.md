@@ -157,7 +157,9 @@ config/         interface.yaml (THE contract), safety_limits.yaml,
 docs/           architecture, operating_guide, interface_contract,
                 safety_validation, deployment, dev_env_setup
 src/            the eight rm_* packages (see the table above)
-scripts/        deploy, bringup/teardown, recording + diagnostics/
+scripts/        deploy_to_robot.sh, deploy_upstream.sh, prep_robot.sh,
+                run_stack.sh, stack_down.sh, bench_up/down.sh,
+                record_run.sh, fetch_bags.sh + diagnostics/
 tests/          unit (no ROS runtime) -> replay (fixtures) -> hardware (human only)
 ```
 
