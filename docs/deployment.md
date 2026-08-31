@@ -1,5 +1,31 @@
 # Deployment runbook — cold start to live RVIZ
 
+> ## ⚠ PARTLY SUPERSEDED — read this first
+>
+> **For the current procedure use
+> [`operating_guide.md`](operating_guide.md).** That is the maintained runbook.
+>
+> This document is kept for two things that are still valuable and live
+> nowhere else:
+>
+> - **§6 measured topic rates** and **§6b the measured TF tree** — both still
+>   accurate and still the reference.
+> - the **DDS / FastDDS troubleshooting history**, including why a passing
+>   `ros2 multicast receive` proves nothing and the `maxInitialPeersRange`
+>   trap.
+>
+> **What in here is stale, and must not be followed:**
+>
+> | section | why |
+> |---|---|
+> | §1 Access | Written for **bernard-2** at an address it no longer has, and an `~/.ssh/lumen` key that was never used. The working robot is **bernard-1** at `192.168.4.100`; keys are `~/.ssh/bernard-1` / `~/.ssh/bernard-2`. |
+> | §3 Container on the robot | **ROS2 Humble runs NATIVELY on the Jetson host.** The container path was never adopted for the robot. |
+> | §4 Deliver code | GitHub is unreachable from both robots. Use `scripts/deploy_to_robot.sh` and `scripts/deploy_upstream.sh` (§4b is the closest to correct). |
+> | §5 Sensor bringup | Predates the lidar identification. The unit is a **YDLIDAR TG30**, not an RPLIDAR A1, and needs `ydlidar_ros2_driver` at baud 512000 plus external motor power. Use `ncp.launch.py` / `bench_up.sh`. |
+>
+> The lidar identification, the base-firmware fault, and everything after are
+> recorded in `../CLAUDE.md` §3.
+
 Phase 1 deliverable. Fill in every `TODO(operator)` as it is established;
 this file is the thing someone follows at 9am with no context.
 
