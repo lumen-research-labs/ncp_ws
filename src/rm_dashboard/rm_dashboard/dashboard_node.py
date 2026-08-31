@@ -118,6 +118,7 @@ from std_srvs.srv import Trigger
 
 from rm_interfaces.msg import BaseDebug, SafetyStatus, WaypointStatus
 from rm_interfaces.srv import Jog, SetWaypoint
+from rm_dashboard.frames import world_to_body_offset
 from rm_dashboard.slam_health import (
     OCCUPIED_THRESHOLD, SlamHealth, pack_grid, summarize_map,
 )
@@ -197,8 +198,8 @@ _BATTERY_LOW_V = 10.5
 # already set to the teleop source. Both of those are separate acts, and
 # neither is performed here. "waypoint_cancel" only ever stops.
 _CONTROLS = (
-    "kill", "reset", "source", "goal", "waypoint", "waypoint_cancel",
-    "reset_odom", "jog",
+    "kill", "reset", "source", "goal", "goal_map", "waypoint",
+    "waypoint_cancel", "reset_odom", "jog",
 )
 
 
@@ -811,6 +812,8 @@ class DashboardNode(rclpy.node.Node):
                 if not odom.get("ok"):
                     result["odom_reset_error"] = odom.get("error")
             return result
+        if command == "goal_map":
+            return self._set_goal_from_world(payload)
         if command == "reset_odom":
             return self._reset_odom()
         if command == "waypoint":
@@ -820,6 +823,87 @@ class DashboardNode(rclpy.node.Node):
         if command == "waypoint_cancel":
             return self._call_trigger(self._waypoint_cancel, "/waypoint/cancel")
         return {"ok": False, "error": f"unhandled command {command!r}"}
+
+    def _set_goal_from_world(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Set the POLICY goal from a world point the operator clicked.
+
+        policy_node takes `goal_x`/`goal_y` as a ROBOT-FRAME OFFSET and re-fixes
+        the goal against its own current pose. A map click is a WORLD point, so
+        something has to do the conversion. It is done HERE, against the pose
+        policy_node itself published on /ncp_debug, so the offset is expressed
+        in exactly the frame policy_node will rotate it back out of. Converting
+        in the browser instead would use whatever pose that page last rendered,
+        which is a different sample.
+
+        REFUSED rather than converted on a frame mismatch, exactly as
+        rm_waypoint refuses one: the map and odom frames differ by the SLAM
+        correction, which GROWS as the robot drives, so quietly reinterpreting
+        a point from one as a point in the other moves the goal without saying
+        so.
+
+        There is a residual race — the robot may move between the /ncp_debug
+        sample and the parameter set, and policy_node re-fixes from ITS pose at
+        that instant, so the goal lands displaced by whatever the robot
+        travelled in between. At 5 Hz and stationary this is millimetres. It is
+        NOT silent: the response carries the pose used and the world goal that
+        was intended, and the map draws the goal policy_node actually adopted,
+        so the two can be compared on screen.
+        """
+        try:
+            wx = float(payload["x"])
+            wy = float(payload["y"])
+        except Exception:
+            return {"ok": False, "error": "goal_map needs numeric x and y"}
+        if not (math.isfinite(wx) and math.isfinite(wy)):
+            return {"ok": False, "error": "goal must be finite"}
+
+        debug = self._store.snapshot().get("/ncp_debug", {}).get("value") or {}
+        pose = debug.get("pose")
+        pose_source = debug.get("pose_source")
+        if not isinstance(pose, (list, tuple)) or len(pose) != 3:
+            return {
+                "ok": False,
+                "error": (
+                    "no pose on /ncp_debug yet — policy_node has not fixed a "
+                    "goal. It publishes a pose only once it has one; use the "
+                    "robot-frame offset box, or wait for the first fix."
+                ),
+            }
+        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in pose):
+            return {"ok": False, "error": "pose on /ncp_debug is not finite"}
+
+        expected_frame = _MAP_FRAME if pose_source == "map" else _ODOM_FRAME
+        frame = payload.get("frame", expected_frame)
+        if frame != expected_frame:
+            return {
+                "ok": False,
+                "error": (
+                    f"refused: point is in '{frame}' but policy_node is driving "
+                    f"in '{expected_frame}' (pose_source {pose_source!r}). Those "
+                    "frames differ by the SLAM correction, which grows as the "
+                    "robot drives — converting would move the goal silently."
+                ),
+            }
+
+        rx, ry, ryaw = float(pose[0]), float(pose[1]), float(pose[2])
+        # World -> body: the inverse of the rotation policy_node applies when
+        # it turns the offset back into a world point. In its own pure module
+        # so the round-trip can be pinned by a workstation test.
+        offset_x, offset_y = world_to_body_offset(wx, wy, rx, ry, ryaw)
+
+        result = self._set_params(
+            self._policy_params, "policy_node",
+            [_double_param("goal_x", offset_x), _double_param("goal_y", offset_y)],
+        )
+        if result.get("ok"):
+            result["message"] = (
+                f"policy goal set to ({wx:.2f}, {wy:.2f}) in {frame} "
+                f"— offset ({offset_x:.2f}, {offset_y:.2f}) from pose "
+                f"({rx:.2f}, {ry:.2f}, {math.degrees(ryaw):.0f} deg)"
+            )
+            result["goal_world"] = [round(wx, 3), round(wy, 3)]
+            result["pose_used"] = [round(rx, 3), round(ry, 3), round(ryaw, 4)]
+        return result
 
     def _reset_odom(self) -> Dict[str, Any]:
         """Zero the EKF pose. REFUSED in map mode — see the client comment."""

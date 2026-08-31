@@ -290,6 +290,15 @@ input[type=range]{accent-color:var(--accent)}
           <button class="act" id="drivebtn">DRIVE THERE</button>
           <button class="act danger" id="wpcancel">cancel</button>
         </div>
+        <!-- The SAME picked point, sent to the OTHER consumer. Two commit
+             buttons rather than a mode switch on the map: a mode the operator
+             has forgotten they are in sends a click somewhere they did not
+             mean, and there is no way to tell from the click itself. -->
+        <div class="ctl" style="margin-top:6px">
+          <button class="act" id="setgoalmap">SET AS POLICY GOAL</button>
+          <span class="note" style="margin:0">re-targets the NCP; does not
+          drive, and does not arm</span>
+        </div>
         <div class="note" id="wpnote">
           Repositioning only — this is not the policy. It publishes
           <code>/teleop/cmd_vel</code>, so it drives behind the same clamps,
@@ -546,6 +555,16 @@ function renderSafety(snap){
   const s = val(snap,"/safety/status");
   const el = $("safestate");
   const name = s ? s.state_name : "NONE";
+  // Re-arm edge: KILLED -> anything else. Only a real transition clears, so a
+  // stack that comes up already armed, or a run of identical frames, does not
+  // wipe the trail underneath the operator.
+  if(s){
+    if(prevSafetyState === "KILLED" && name !== "KILLED"){
+      poseTrail.length = 0;
+      toast("armed — map trail cleared for this run", true);
+    }
+    prevSafetyState = name;
+  }
   el.textContent = s ? name : "NO STATUS";
   el.className = "state " + name;
   $("safereason").textContent = s ? s.reason : "—";
@@ -663,6 +682,12 @@ let mapView = null;      // world <-> canvas transform, rebuilt every draw
 let waypointPick = null; // the point the operator clicked, before they commit
 const poseTrail = [];    // corrected-pose history, map frame
 const TRAIL_MAX = 600;
+// Last safety state seen, so the KILLED -> armed edge can be detected. The
+// trail is cleared on that edge: a run starts when the robot is armed, and a
+// trail carrying the previous run's path makes it impossible to see where THIS
+// run has been. Driven by the state READ BACK from rm_safety rather than by
+// the ARM button, so arming from the CLI or from another browser clears it too.
+let prevSafetyState = null;
 
 const CELL_UNKNOWN = 0, CELL_FREE = 1, CELL_OCCUPIED = 2;
 
@@ -842,7 +867,8 @@ $("mapcv").onclick = ev => {
   // Deliberately does NOT drive. A click only ARMS the numbers; the robot
   // moves on a separate, explicit press of DRIVE THERE. A map that drives on
   // click would turn a mis-click into motion.
-  toast(`waypoint picked (${wx.toFixed(2)}, ${wy.toFixed(2)}) — press DRIVE THERE`, true);
+  toast(`picked (${wx.toFixed(2)}, ${wy.toFixed(2)}) — press DRIVE THERE `+
+        `(waypoint) or SET AS POLICY GOAL`, true);
 };
 
 /* ---------------- slam + waypoint panels ---------------- */
@@ -918,7 +944,7 @@ function renderSlam(snap){
   $("mapnote").textContent = mapV
     ? `origin (${num(mapV.origin[0],2)}, ${num(mapV.origin[1],2)}) · `+
       `${mapV.occupied_cells} occupied of ${mapV.known_cells} known · `+
-      `click sets a waypoint, it does not drive`
+      `click picks a point; commit it as a waypoint or as the policy goal`
     : "";
 }
 
@@ -1056,6 +1082,23 @@ $("drivebtn").onclick = async () => {
   const r = await post("waypoint",{x, y, frame});
   if(r && r.ok) waypointPick = null;
 };
+// The policy goal is sent as a WORLD point with its frame, not as the
+// robot-frame offset the "re-target from here" box uses. dashboard_node does
+// the conversion against the pose policy_node itself published, so the offset
+// is expressed in the frame policy_node will rotate it back out of; converting
+// here would use whatever pose this page last rendered, a different sample.
+$("setgoalmap").onclick = async () => {
+  const x = +$("wx").value, y = +$("wy").value;
+  if(!Number.isFinite(x) || !Number.isFinite(y)){
+    toast("policy goal needs two numbers", false); return;
+  }
+  const frame = (mapData && mapData.frame_id) || "map";
+  if(!confirm(`Set the POLICY goal to (${x.toFixed(2)}, ${y.toFixed(2)}) in `+
+              `'${frame}'?\n\nThis re-targets the NCP and resets its `+
+              `recurrent state. It does not arm and it does not drive.`)) return;
+  await post("goal_map",{x, y, frame});
+};
+
 // Cancel never confirms: like KILL, a dialog in front of a stop is a hazard.
 $("wpcancel").onclick = () => post("waypoint_cancel");
 

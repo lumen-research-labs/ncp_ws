@@ -1563,6 +1563,31 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   to that one launch file; `safety_limits.yaml` stays `true` so every other
   entry point keeps the full e-stop. See the settled-decisions list in §4.
 
+  **Also 2026-08-31: the map can now commit a POLICY GOAL, and the trail
+  clears on re-arm.** (1) A map click still only ARMS numbers — it never
+  drives — but there are now TWO commit buttons for the one picked point:
+  DRIVE THERE (waypoint, unchanged) and SET AS POLICY GOAL. Two buttons rather
+  than a mode switch on the map: a mode the operator has forgotten they are in
+  sends a click to the wrong consumer and nothing about the click says which.
+  (2) `policy_node`'s `goal_x`/`goal_y` are a ROBOT-FRAME OFFSET, so the world
+  click has to be converted. **The conversion happens in `dashboard_node`,
+  against the pose `policy_node` itself published on `/ncp_debug`** — not in
+  the browser, which would use whatever pose that page last rendered, a
+  different sample. New pure module `rm_dashboard/frames.py`
+  (`world_to_body_offset`) holds it so the round trip can be pinned on the
+  workstation; a sign error there does not raise, it puts the goal mirrored or
+  rotated about the robot and reads as the policy misbehaving. Frame mismatch
+  is REFUSED, never converted, exactly as rm_waypoint refuses one. Residual
+  race acknowledged in the code: the robot may move between the `/ncp_debug`
+  sample and the parameter set, and `policy_node` re-fixes from ITS pose at
+  that instant — millimetres when stationary, and visible on screen because
+  the map already draws the goal `policy_node` actually adopted. (3) The map
+  trail clears on the **KILLED -> armed edge**, detected from the state read
+  back from rm_safety rather than from the ARM button, so arming from the CLI
+  or another browser clears it too. Only a real transition clears, so a run of
+  armed frames does not wipe the trail underneath the operator. Workstation
+  tier **446 tests** (was 405).
+
   Also this session: the robot was **six commits behind** (`581dec9`) and the
   running stack predated all of them, including `a1b7652`'s rm_safety zone
   master switches. Deployed to `a1b7652`, colcon-built, clock pushed (the
