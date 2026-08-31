@@ -93,14 +93,35 @@ Launch arguments:
                   "teleop", so two explicit acts are still required.
     calibration_path  path to config/base_calibration.yaml.
 
-    with_slam     "false" (default) starts slam_toolbox, which publishes
-                  map -> odom and corrects the odometry drift. Turning it on
-                  also switches pose_source to "map" unless overridden.
+    with_slam     "true" (DEFAULT) starts slam_toolbox, which publishes
+                  map -> odom and corrects the odometry drift, and switches
+                  pose_source to "map" with it. Default TRUE since
+                  2026-08-31: /odom's yaw drifts ~0.6 deg/s with the robot
+                  STANDING STILL (measured, 120 s stationary — see below),
+                  which rotates goal_local bodily around the robot. SLAM
+                  cancels it; without SLAM nothing does.
     pose_source   policy_node's pose: "odom" (dead reckoning, drifts) or
                   "map" (SLAM-corrected via TF). Empty (default) follows
-                  with_slam. Set explicitly to "odom" WITH with_slam:=true to
-                  run SLAM while still driving on odometry — the safe way to
-                  watch the map build before trusting it.
+                  with_slam, so the default stack drives on "map". Set
+                  explicitly to "odom" WITH with_slam:=true to run SLAM while
+                  still driving on odometry — the A/B, and the safe way to
+                  watch a map build before trusting it.
+
+                  WHY map IS THE DEFAULT, measured 2026-08-31 over three runs
+                  (scripts/diagnostics/pose_ab.py):
+                    * stationary, 120 s: map-frame pose held to 0.028 m in x
+                      and 0.032 m in y — SLAM is stable at rest.
+                    * over the same 120 s the correction ratcheted +71.4 deg
+                      of YAW, i.e. odom yaw drifts ~0.6 deg/s at rest. A 90 s
+                      run on pose_source:=odom accumulates ~54 deg of heading
+                      error, and goal_local is computed by rotating the goal
+                      into the body frame.
+                    * driven: odom path over-read map path by 4.5-7.7 %,
+                      consistent with the long-known linear over-read.
+                  THE COST is real: ~6 correction steps per 2 min at rest,
+                  each one resetting the CfC recurrent state. That is the
+                  cheaper failure — a reset is visible and bounded, a rotating
+                  goal is neither.
 
     with_dashboard    "true" (default) also starts rm_dashboard, the live web
                   view of every stage at http://<robot>:8080/. It subscribes
@@ -487,21 +508,23 @@ def generate_launch_description() -> LaunchDescription:
             description="Path to config/base_calibration.yaml.",
         ),
         DeclareLaunchArgument(
-            "with_slam", default_value="false",
+            "with_slam", default_value="true",
             description="Start slam_toolbox, which publishes map -> odom and "
-                        "corrects the odometry drift. Default FALSE: it is a "
-                        "new layer and the odom path is the one with hardware "
-                        "history behind it. Turning this on ALSO switches "
-                        "pose_source to 'map' unless you override it.",
+                        "corrects the odometry drift. Default TRUE since "
+                        "2026-08-31: /odom's yaw drifts ~0.6 deg/s with the "
+                        "robot standing still, so pose_source:=odom rotates "
+                        "goal_local around the robot as a run proceeds. This "
+                        "ALSO switches pose_source to 'map' unless overridden.",
         ),
         DeclareLaunchArgument(
             "pose_source", default_value="",
             description="policy_node's pose: 'odom' (dead reckoning) or 'map' "
                         "(SLAM-corrected, via TF). Empty (the default) means "
                         "'follow with_slam' — 'map' when SLAM is up, 'odom' "
-                        "when it is not. Set it explicitly to run SLAM while "
-                        "still driving on odom, which is the safe way to watch "
-                        "the map build before trusting it.",
+                        "when it is not, so the default stack drives on 'map'. "
+                        "Set it explicitly to 'odom' to run SLAM while still "
+                        "driving on odom, which is the A/B and the safe way to "
+                        "watch a map build before trusting it.",
         ),
         DeclareLaunchArgument(
             "with_dashboard", default_value="true",

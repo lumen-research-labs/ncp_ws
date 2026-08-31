@@ -1503,6 +1503,70 @@ NaN, exception) → publish zero velocity, never let the last command persist.
 
   Robot tier **408 tests**. Battery 12.1 V at swap.
 
+
+- 2026-08-31: **MEASURED WHY `pose_source:=map` MUST BE THE DEFAULT — `/odom`'s
+  YAW DRIFTS ~0.6 deg/s WITH THE ROBOT STANDING STILL.** Three runs on
+  bernard-1 with the new `scripts/diagnostics/pose_ab.py` (read-only, publishes
+  nothing). `with_slam` now defaults **true** in `ncp.launch.py`, so the
+  default stack drives on the SLAM-corrected pose.
+
+  | run | what | result |
+  |---|---|---|
+  | A `pose_source:=odom` | 1.12 m clean, then 71 s stop_zone latch, then a manual lift | odom path over-read map path **+7.7%** |
+  | B `pose_source:=map` | 2.73 m clean drive in 18 s (jog, no e-stop) | over-read **+4.5%** |
+  | C stationary, 120 s | peak \|vx\| 0.0011 m/s, verified INSIDE the probe | see below |
+
+  **Run C is the decisive one.** Map-frame pose held to **0.028 m in x and
+  0.032 m in y** over two minutes — SLAM is stable at rest, confirming the
+  2026-08-29 s6 finding. Over the same window the correction ratcheted
+  **+71.4 deg of YAW** monotonically, in 6 discrete steps at a strikingly
+  regular ~24 s period, while `map_yaw` sawtoothed 0.27 rad. That is odom yaw
+  drifting continuously and SLAM cancelling it. A 90 s run on
+  `pose_source:=odom` therefore accumulates **~54 deg of heading error**, and
+  `goal_local` — 2 of the 36 numbers the network reads — is computed by
+  rotating the goal into the body frame, so the goal swings bodily around the
+  robot. THE COST of map is real and was measured too: ~6 correction steps per
+  2 min at rest, each resetting the CfC recurrent state. That is the cheaper
+  failure — a reset is visible and bounded, a rotating goal is neither.
+  The ~24 s periodicity is unexplained; it looks like a cadence, not
+  opportunistic loop closure. Not chased, does not change the conclusion.
+
+  **The notes had `/odom` down for a ~5% LINEAR over-read only. The yaw rate
+  at rest was never quantified and is the stronger defect.** It is also a
+  fresh argument against the deferred heading-hold controller (§4 item 6):
+  there is no trustworthy heading in `/odom` even stationary.
+
+  **A METRIC I BUILT WAS WRONG AND I REPORTED ITS OUTPUT.** `pose_ab.py`'s
+  first version divided the TRANSLATION of `map -> odom` by distance driven
+  and called it "error per metre". That transform rotates about the **odom
+  origin**, so once the robot is metres away a pure yaw correction sweeps the
+  translation through metres with the robot motionless — run C reported
+  4.67 m of "correction" and **2595% error per metre** on a robot verified
+  stationary. The magnitude of `map -> odom` is NOT an odometry error in
+  metres. The script now reports map-frame pose EXTENT (the honest drift
+  measure at rest), the correction's YAW accumulated from wrapped per-sample
+  increments (a total past pi would otherwise fold back), and the
+  odom-path/map-path ratio for the linear error, with the contamination
+  written into the output itself.
+
+  **`pose_ab.py` design points that earned themselves:** it checks its
+  preconditions INSIDE the measurement — duplicate node names, `/cmd_vel`
+  publisher count, `map -> odom` resolving — and refuses to record otherwise,
+  after a 3 s settle so a healthy stack is not misread as absent during
+  discovery. It reports peak \|vx\|/\|wz\| and says outright when the robot did
+  not move, which is what made run C trustworthy where the 2026-08-29 s7 probe
+  printed "STATIONARY" as a heading over driven data.
+
+  Also this session: the robot was **six commits behind** (`581dec9`) and the
+  running stack predated all of them, including `a1b7652`'s rm_safety zone
+  master switches. Deployed to `a1b7652`, colcon-built, clock pushed (the
+  first build warned "clock skew detected — your build may be incomplete", so
+  it was rebuilt after; all stderr logs then empty). **Robot tier 449 tests**,
+  workstation 405. Run A also re-confirmed the lift trap: a manual reposition
+  mid-run froze SLAM and dumped the whole displacement into the correction on
+  the next drive, so the second half of A is contaminated — run B used the
+  dashboard jog instead and had no e-stop at all.
+
 ## 4. Current Goal
 
 **THE NCP DEBUG TEST HAS RUN END TO END ON HARDWARE (2026-08-29 s2).** One
@@ -1851,6 +1915,21 @@ Settled, do not re-open:
 - **SLAM corrects the pose; it does NOT fix the odometry.** `/odom` is
   unchanged and still untrustworthy for anything reading it directly. Only
   `policy_node` with `pose_source:=map` benefits.
+- **`with_slam` DEFAULTS TRUE and the stack drives on `map`** (2026-08-31,
+  measured). `/odom`'s YAW drifts ~0.6 deg/s with the robot STANDING STILL —
+  ~54 deg over a 90 s run — and `goal_local` is the goal rotated into the body
+  frame, so on `pose_source:=odom` the goal swings around the robot as the run
+  proceeds. The known ~5% figure is the LINEAR over-read and is the smaller
+  problem. Cost of map, also measured: ~6 correction steps per 2 min at rest,
+  each resetting the CfC state. `pose_source:=odom with_slam:=true` remains the
+  A/B and the way to watch a map build before trusting it.
+- **The MAGNITUDE of `map -> odom` is NOT an odometry error in metres.** It
+  rotates about the ODOM ORIGIN, so with the robot metres away a pure yaw
+  correction sweeps its translation through metres while nothing moves — a
+  probe of mine divided it by distance and reported 2595% "error per metre" on
+  a verified-stationary robot (2026-08-31). Measure drift as the MAP-FRAME POSE
+  EXTENT; measure the correction's yaw separately, summing wrapped per-sample
+  increments so a total past pi does not fold back. `pose_ab.py` does both.
 - **The trained policy DOES NOT STOP AT THE GOAL** — BarnEnv terminated the
   episode on arrival, so the network never learned to. `policy_node`'s
   goal-reached latch is what supplies that termination. Do not remove it, and

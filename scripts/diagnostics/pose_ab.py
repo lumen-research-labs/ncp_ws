@@ -147,6 +147,12 @@ _COLUMNS = [
 ]
 
 
+def _wrap_pi(a: float) -> float:
+    """Signed angle difference in (-pi, pi]. A raw subtraction across the wrap
+    reads as a ~6.28 rad spin — the same trap pose_source.py documents."""
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
 def _yaw_from_quat(q) -> float:
     """Yaw only — the stack is planar and two_d_mode is on in the EKF."""
     return math.atan2(
@@ -178,6 +184,13 @@ class PoseAB(rclpy.node.Node):
         # --- map pose -----------------------------------------------------
         self._map_prev: Optional[Tuple[float, float]] = None
         self._map_path_m = 0.0
+        # Extent of the map-frame pose, which is the ONLY honest drift measure
+        # for a stationary robot. See _CORRECTION_IS_ROTATION_CONTAMINATED.
+        self._map_min: Optional[list] = None
+        self._map_max: Optional[list] = None
+        self._corr_yaw_prev: Optional[float] = None
+        self._corr_yaw_total = 0.0
+        self._corr_yaw_seen = False
 
         # --- policy -------------------------------------------------------
         self._policy_wz = float("nan")
@@ -288,8 +301,24 @@ class PoseAB(rclpy.node.Node):
         if corr is not None:
             self._slam.update(corr[0], corr[1], corr[2], t_s)
 
+        if corr is not None:
+            # Summing WRAPPED increments, not last-minus-first: the correction
+            # ratchets monotonically on this robot and a total past pi would
+            # otherwise fold back on itself.
+            if self._corr_yaw_prev is not None:
+                self._corr_yaw_total += _wrap_pi(corr[2] - self._corr_yaw_prev)
+            self._corr_yaw_prev = corr[2]
+            self._corr_yaw_seen = True
+
         map_pose = self.lookup(_MAP_FRAME, _BASE_FRAME)
         if map_pose is not None:
+            if self._map_min is None:
+                self._map_min = list(map_pose)
+                self._map_max = list(map_pose)
+            else:
+                for i in range(3):
+                    self._map_min[i] = min(self._map_min[i], map_pose[i])
+                    self._map_max[i] = max(self._map_max[i], map_pose[i])
             if self._map_prev is not None:
                 self._map_path_m += math.hypot(
                     map_pose[0] - self._map_prev[0], map_pose[1] - self._map_prev[1]
@@ -390,16 +419,40 @@ class PoseAB(rclpy.node.Node):
         else:
             corr_now = snap["correction_m"]
             corr_max = snap["max_correction_m"]
-            lines.append(f"  correction now / max  {corr_now:.4f} m  /  {corr_max:.4f} m")
-            lines.append(f"  loop closures         {snap['jump_count']}")
-            if self._odom_path_m > 0.10:
-                lines.append(
-                    f"  ERROR PER METRE       {corr_max / self._odom_path_m * 100:.1f} %"
-                    "   <-- the headline number"
-                )
-            else:
-                lines.append("  ERROR PER METRE       n/a (drove < 0.10 m)")
-            lines.append(f"  map path length       {self._map_path_m:.3f} m")
+            lines.append(f"  correction |t| now/max {corr_now:.4f} m / {corr_max:.4f} m"
+                         "   (see note below)")
+            if self._corr_yaw_seen:
+                dyaw = self._corr_yaw_total
+                rate = math.degrees(dyaw) / elapsed_s if elapsed_s > 0 else 0.0
+                lines.append(f"  correction YAW drift  {math.degrees(dyaw):+.1f} deg over the "
+                             f"run  ({rate:+.2f} deg/s)")
+            lines.append(f"  correction steps      {snap['jump_count']}"
+                         "   (each one resets the CfC recurrent state)")
+            lines.append(f"  odom path / map path  {self._odom_path_m:.3f} m / "
+                         f"{self._map_path_m:.3f} m")
+            if self._map_path_m > 0.10:
+                lines.append(f"  odom linear over-read {(self._odom_path_m / self._map_path_m - 1.0) * 100:+.1f} %")
+            lines.append("")
+            lines.append("  NOTE: correction |t| is the translation of map -> odom, and it is")
+            lines.append("  ROTATION-CONTAMINATED — the correction rotates about the ODOM")
+            lines.append("  ORIGIN, so once the robot is metres away a pure yaw correction")
+            lines.append("  sweeps |t| through metres while the robot has not moved at all.")
+            lines.append("  Do NOT divide it by distance driven. The honest drift measure for")
+            lines.append("  a stationary robot is the map-frame pose extent below.")
+
+        lines.append("")
+        lines.append("  -- map-frame pose extent (the honest drift measure) ----")
+        if self._map_min is None:
+            lines.append("  *** map -> base_footprint never resolved.")
+        else:
+            dx = self._map_max[0] - self._map_min[0]
+            dy = self._map_max[1] - self._map_min[1]
+            dyaw = self._map_max[2] - self._map_min[2]
+            lines.append(f"  x / y / yaw range     {dx:.4f} m  {dy:.4f} m  {dyaw:.4f} rad")
+            if not moved:
+                lines.append("  Stationary, so this IS the drift. Tens of mm is SLAM working;")
+                lines.append("  a yaw range of tenths of a radian means odom yaw is drifting")
+                lines.append("  and SLAM is sawtoothing to cancel it.")
 
         lines.append("")
         lines.append("  -- policy yaw (the limit-cycle question) ---------------")

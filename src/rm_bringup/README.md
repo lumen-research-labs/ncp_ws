@@ -40,7 +40,7 @@
 | `dry_run` | **`false`** | Note this differs from `base.launch.py`'s own default of `true`: bringing up the full stack implies intent to drive. |
 | `control_mode` | `closed_loop` | The floor-validated path. |
 | `with_lidar` / `with_base` / `with_odom` | `true` | Turn off only if already running. |
-| `with_slam` | `false` | Also switches `pose_source` to `map` unless overridden. |
+| `with_slam` | `true` | Default TRUE since 2026-08-31 — `/odom` yaw drifts ~0.6 deg/s at rest. Also switches `pose_source` to `map` unless overridden. |
 | `pose_source` | follows `with_slam` | Set explicitly to `odom` **with** `with_slam:=true` to run SLAM while still driving on odometry — the safe way to watch a map build before trusting it. |
 | `with_dashboard` | `true` | `dashboard_controls:=false` serves a read-only page. |
 | `with_waypoint` | **`false`** | The only autonomous motion path here that is not the policy. |
