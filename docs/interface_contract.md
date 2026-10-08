@@ -11,7 +11,7 @@ Earlier versions: [3.0.0](interface_contract_3.0.0_superseded.md), the M4 checkp
 | 3.0.0 | 36 dims (32 lidar over 180° + 2 goal + 2 prev action) | 2 dims `[vx, wz]` | the M4 checkpoint |
 | **4.0.0** | **724 dims (720 lidar over 270° + 2 goal + 2 prev action)** | 2 dims `[vx, wz]` | **the M8-v2 checkpoint, trained on BARN's native sensor** |
 
-4.0.0 is dictated by the checkpoint, as 3.0.0 was. `policy_node` reads `interface_version` at startup and refuses to construct on a mismatch. It also refuses if the YAML's bin count or arc differs from the vendored module's `BEAMS` and `FOV_DEG`, and so does `scan_bridge_node`.
+4.0.0 is dictated by the checkpoint, as 3.0.0 was. `policy_node` and `scan_bridge_node` read the contract at startup and refuse to construct on a version mismatch, or if the lidar block differs from the vendored module's `BEAMS` and `FOV_DEG`.
 
 ## The checkpoint
 
@@ -34,7 +34,7 @@ Earlier versions: [3.0.0](interface_contract_3.0.0_superseded.md), the M4 checkp
 | `obs[720:722]` | goal `(x, y)` in the robot frame | 2 | `/odom` pose, or TF `map → base_footprint` |
 | `obs[722:724]` | previous action | 2 | internal node state |
 
-Assembly order and all arithmetic are upstream's own, `prepare_scan → local_goal → build_obs` in the vendored `vendor/ncp_policy.py`. `observation_builder.py` reduces the scan and validates, nothing more. The goal and previous-action blocks are unchanged from 3.0.0, including the `xy/5 − 1` normalization that leaves the policy out of distribution behind or beside the goal, the requested-action feedback, and the literal `3.14` yaw bound. See the 3.0.0 document, blocks 2 and 3.
+Assembly order and all arithmetic are upstream's own, `prepare_scan → local_goal → build_obs` in the vendored `vendor/ncp_policy.py`. `observation_builder.py` reduces the scan and validates, nothing more. The goal and previous-action blocks are unchanged from 3.0.0, including the `xy/5 − 1` normalization, the requested-action feedback and the literal `3.14` yaw bound. See the 3.0.0 document, blocks 2 and 3.
 
 ### Block 1, lidar, `obs[0:720]`
 
@@ -48,19 +48,11 @@ Assembly order and all arithmetic are upstream's own, `prepare_scan → local_go
 | normalization | `clip(r, 0, 5) → (r − 2.5) / 5 × 2` |
 | empty-bin policy | `fault` |
 
-Three facts about the real sensor shape this block.
-
-**The TG30 drops 28 to 39% of rays, and a 0.375° bin holds about 2 of them.** Strict per-bin sampling leaves 5.4 to 8.3% of bins with no real return on the recorded fixtures. Each reads "clear at 5 m" while a real return sits a fraction of a degree away, and simulation never produced that. A bin with no real return therefore borrows the real return nearest its centre within ±2 bins (reach 0.9375°), which leaves 1.2 to 1.4% of bins empty on the same fixtures. Rays inside the bin always win. The window is a fallback and never a smoothing.
-
-**The 270° arc sees the chassis.** The 180° arc stopped short of the standoffs. The wider arc includes them at 0.11 to 0.25 m. The training sensor's 0.1 m `min_range` put the Jackal chassis in a dead zone, so those directions read "clear" in simulation. The two zones above, the same sectors `safety_limits.yaml` masks for the e-stop, are blanked before sampling. Their rays count as members, contribute no range, and never feed the window.
-
-**No-return is `0.0`, not `inf`,** and the driver flag that should change that is inert. The mapping in `scan_resampler` is the only defence in the policy path. The measurements are in the 3.0.0 document.
-
-`rm_safety` computes its e-stop from the full-resolution scan, independently. Never wire this block into a safety path.
+The search window, the self-occlusion zones and the `0.0` no-return mapping are each measured decisions. [`lidar_sampling.md`](lidar_sampling.md) explains them. `rm_safety` computes its e-stop from the full-resolution scan, independently. Never wire this block into a safety path.
 
 ## Action, 2 dims, unchanged
 
-`[vx, wz]` in physical units from a linear head with clipping, v in [-1, 2] m/s and w in [-3.14, 3.14] rad/s. `pre_scaled: true`, `scaling.applies: false`. The authority gap against the safety clamps (0.25 m/s, 0.8 rad/s) is intentional, and the clamps are not raised to close it. The rationale and the `3.14` note are in the 3.0.0 document under "Action".
+`[vx, wz]` in physical units from a linear head with clipping, v in [-1, 2] m/s and w in [-3.14, 3.14] rad/s. `pre_scaled: true`, `scaling.applies: false`. The authority gap against the safety clamps (0.25 m/s, 0.8 rad/s) is intentional. Rationale: the 3.0.0 document, "Action".
 
 ## Control rate, 5 Hz, unchanged
 
