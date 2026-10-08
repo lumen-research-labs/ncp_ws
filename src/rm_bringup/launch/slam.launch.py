@@ -37,7 +37,7 @@ Launch arguments:
                  scan_sanitizer node this file also starts. NOT the raw /scan:
                  ~31-39% of rays are that sentinel and slam_toolbox does not
                  know it means "nothing there". NOT /ncp/scan either — that is
-                 32 beams over the forward 180 deg, reduced for the policy;
+                 720 beams over the forward 270 deg, reduced for the policy;
                  scan matching wants every ray and the full 360 deg.
 
 Failure mode:
@@ -76,7 +76,7 @@ def generate_launch_description() -> LaunchDescription:
                         "sanitizer's docstring; ~31-39%% of TG30 rays are a "
                         "0.0 no-return sentinel that slam_toolbox does not "
                         "know about. NEVER /ncp/scan either: that is the "
-                        "reduced 32-beam forward-180 policy input.",
+                        "reduced 720-beam forward-270 policy input.",
         ),
 
         # Full-resolution /scan with the 0.0 no-return sentinel rewritten to

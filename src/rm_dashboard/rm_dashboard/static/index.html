@@ -79,9 +79,10 @@ canvas{width:100%;height:auto;display:block;border-radius:8px;background:#0a0e14
 .kv dt{color:var(--dim)} .kv dd{margin:0;font-family:var(--mono);text-align:right}
 
 /* ---------- bars ---------- */
-.obs{display:flex;align-items:flex-end;gap:1px;height:78px;
+.obs{display:flex;align-items:flex-end;gap:0;height:78px;
   background:#0a0e14;border-radius:6px;padding:5px}
-.obs b{flex:1;min-width:2px;border-radius:1px 1px 0 0;font-weight:400}
+.obs b{flex:1;min-width:0;border-radius:1px 1px 0 0;font-weight:400}
+.obs b.aux{flex:0 0 10px;margin-left:2px}
 .obslabels{display:flex;font-size:10px;color:var(--faint);margin-top:5px}
 
 /* ---------- table ---------- */
@@ -184,11 +185,11 @@ input[type=range]{accent-color:var(--accent)}
 
   <!-- ============ scan ============ -->
   <section class="panel">
-    <h2>Lidar — full scan vs the 32 beams the policy sees</h2>
+    <h2>Lidar — full scan vs the beams the policy sees</h2>
     <div class="scanwrap"><canvas id="scan" width="760" height="760"></canvas></div>
     <div class="legend">
       <span><i style="background:#3a4653"></i>/scan (raw, decimated)</span>
-      <span><i style="background:var(--accent)"></i>/ncp/scan (32 beams)</span>
+      <span><i style="background:var(--accent)"></i>/ncp/scan (policy beams)</span>
       <span><i style="background:var(--bad)"></i>stop zone</span>
       <span><i style="background:var(--warn)"></i>slow zone</span>
       <span><i style="background:var(--goal)"></i>goal bearing</span>
@@ -312,7 +313,7 @@ input[type=range]{accent-color:var(--accent)}
 
   <!-- ============ observation ============ -->
   <section class="panel wide">
-    <h2>Observation — the 36 numbers the network actually consumed</h2>
+    <h2>Observation — the numbers the network actually consumed</h2>
     <div class="obs" id="obs"></div>
     <div class="obslabels">
       <span style="flex:32">0–31 lidar (−1 touching · +1 clear)</span>
@@ -505,7 +506,7 @@ function renderScan(snap){
       ctx.fillRect(x-1.1,y-1.1,2.2,2.2);
     });
   }
-  // the 32 beams
+  // the policy beams
   const ncp = val(snap,"/ncp/scan");
   if(ncp && ncp.ranges){
     ctx.strokeStyle = "rgba(88,166,255,.5)"; ctx.lineWidth = 1.6;
@@ -608,18 +609,22 @@ function renderObs(snap){
       : "No observation yet. policy_node publishes one only on a fault-free tick.";
     return;
   }
+  // Layout is [lidar(L), goal(2), prev action(2)] (config/interface.yaml);
+  // L follows the vector length so the page needs no contract constant.
+  const L = d.obs.length - 4;
   // Each value is in [-1,1]-ish; draw from a mid-line so sign is visible.
   el.innerHTML = d.obs.map((v,i)=>{
     const clamped = Math.max(-1.2, Math.min(1.2, v));
     const h = (clamped + 1.2) / 2.4 * 100;
-    const col = i<32 ? (v<-0.5 ? "var(--bad)" : v<0 ? "var(--warn)" : "var(--accent)")
-              : i<34 ? "var(--goal)" : "var(--accent2)";
-    return `<b style="height:${h.toFixed(1)}%;background:${col}" title="obs[${i}] = ${v}"></b>`;
+    const col = i<L ? (v<-0.5 ? "var(--bad)" : v<0 ? "var(--warn)" : "var(--accent)")
+              : i<L+2 ? "var(--goal)" : "var(--accent2)";
+    const cls = i<L ? "" : ' class="aux"';
+    return `<b${cls} style="height:${h.toFixed(1)}%;background:${col}" title="obs[${i}] = ${v}"></b>`;
   }).join("");
   $("obsnote").textContent =
-    `36 dims · lidar min ${num(Math.min(...d.obs.slice(0,32)),3)} · `+
-    `goal (${num(d.obs[32],3)}, ${num(d.obs[33],3)}) · `+
-    `prev action (${num(d.obs[34],3)}, ${num(d.obs[35],3)})`;
+    `${d.obs.length} dims · lidar min ${num(Math.min(...d.obs.slice(0,L)),3)} · `+
+    `goal (${num(d.obs[L],3)}, ${num(d.obs[L+1],3)}) · `+
+    `prev action (${num(d.obs[L+2],3)}, ${num(d.obs[L+3],3)})`;
 }
 
 /* ---------------- wheels ---------------- */

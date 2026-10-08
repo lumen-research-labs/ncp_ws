@@ -1600,6 +1600,22 @@ NaN, exception) → publish zero velocity, never let the last command persist.
 
 ## 4. Current Goal
 
+**INTERFACE 4.0.0 — THE FULL-SENSOR POLICY (2026-10-08, branch
+`feat/720-beam-contract`).** The observation is now 724 dims: 720 lidar beams
+over 270 deg (BARN's native UST-10LX layout) + 2 goal + 2 previous action, and
+the checkpoint is **M8-v2 snapshot `s1436792`** (sha256 `71cc50aeb734…`, 63%
+held-out, official BARN 0.219 — the project best), exported from the training
+box with max action diff vs SB3 of 0.0. What changed in code: the vendored
+`ncp_policy.py` (BEAMS/FOV_DEG only; architecture unchanged), a `±2-bin
+search window` and `self_occlusion_zones_deg` in `scan_resampler` (the TG30
+contributes ~2 rays per 0.375 deg bin with ~30% dropout, and the 270 deg arc
+now sees the chassis standoffs the 180 deg arc excluded), `lidar_contract.py`
+so `policy_node` and `scan_bridge_node` read the lidar block from
+`interface.yaml` in one place and refuse to start if it disagrees with the
+vendored constants. Safety, base, clamps and zones are untouched. Upstream
+`~/lumen/ncp` carries the matching change on `feat/720-beam-270fov` @
+`bc1099d`. Hardware status is in the §3 entry for 2026-10-08.
+
 **THE NCP DEBUG TEST HAS RUN END TO END ON HARDWARE (2026-08-29 s2).** One
 command brings up the whole stack, the policy drives the wheels through
 rm_safety, and the base tracks commanded speed on all four wheels to within 3%.
@@ -1812,7 +1828,7 @@ and deployed; workstation and robot verified byte-identical for every file
 touched. Results sheet is `~/ncp_ws/velocity_accuracy.csv` on the robot
 (pre-correction copy at `.csv.bak`).
 
-Offline work available any time: the 3.0.0 contract doc refresh, a clear-path
+Offline work available any time: a clear-path
 open-space bag (operator), `ros2 topic delay` latency capture.
 
 Settled, do not re-open:

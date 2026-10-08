@@ -15,16 +15,17 @@ observation, runs the network, and publishes a *candidate* command.
 |---|---|---|
 | `vendor/ncp_policy.py` | **vendored, byte-exact** | The CfC/AutoNCP network, copied unmodified from the checkpoint's source repo. Never edited. See `vendor/VENDOR.md`. |
 | `scan_resampler.py` | pure module | Reduces a ~2000-point 360° TG30 scan to a fixed-length forward-arc vector, in metres. |
-| `observation_builder.py` | pure module | Assembles the 36-element observation. Thin — all normalization is done by the vendored module. |
+| `observation_builder.py` | pure module | Assembles the 724-element observation. Thin — all normalization is done by the vendored module. |
 | `policy_runner.py` | pure module | Loads the checkpoint, owns the recurrent state, runs one inference tick. No ROS. |
 | `pose_source.py` | pure module | Validates a pose sample and detects discontinuities (SLAM loop closures). |
 | `policy_node.py` | ROS2 node | The control loop. The production path. |
-| `scan_bridge_node.py` | ROS2 node | `/scan` → `/ncp/scan`, 32 beams. Exists only so the *upstream* node can run unmodified. |
+| `lidar_contract.py` | pure module | Reads the lidar block of `config/interface.yaml` (bins, arc, range bounds, search window, self-occlusion zones) for both nodes. |
+| `scan_bridge_node.py` | ROS2 node | `/scan` → `/ncp/scan`, 720 beams. Exists only so the *upstream* node can run unmodified. |
 | `scan_sanitizer_node.py` | ROS2 node | `/scan` → `/scan_sanitized`, full resolution, `0.0` → `+inf`. For third-party consumers (slam_toolbox). |
 
 ---
 
-## The observation — interface 3.0.0, 36 dims
+## The observation — interface 4.0.0, 724 dims
 
 `config/interface.yaml` is the authority. `policy_node` reads
 `interface_version` at startup and **refuses to construct** on a mismatch,
@@ -33,9 +34,9 @@ error otherwise.
 
 | slice | block | source |
 |---|---|---|
-| `obs[0:32]` | lidar, 32 beams across the forward 180°, right→left | `/scan` |
-| `obs[32:34]` | goal `(x, y)` in the **robot** frame | `/odom` or TF `map→base_footprint` |
-| `obs[34:36]` | previous action | internal node state |
+| `obs[0:720]` | lidar, 720 beams across the forward 270°, right→left | `/scan` |
+| `obs[720:722]` | goal `(x, y)` in the **robot** frame | `/odom` or TF `map→base_footprint` |
+| `obs[722:724]` | previous action | internal node state |
 
 Every block is normalized by a formula frozen by the trained checkpoint. **No
 formula is reimplemented here.** An earlier revision duplicated the
@@ -46,16 +47,24 @@ the checkpoint outranks test-runner convenience. The cost is that
 
 ### Lidar: `nearest_valid_ray`, not min-pooling
 
-The policy was trained on `--beams 32 --fov 180` — exactly **one ray per beam
-direction**. The TG30 gives ~31 real rays per output bin. `scan_resampler`
-takes the single **real return nearest the bin's centre angle**, reconstructing
-what a clean 32-beam lidar would have reported.
+The policy was trained on `--beams 720 --fov 270` — exactly **one ray per beam
+direction**, with no dropout. The TG30 gives about 2 rays per 0.375° bin and
+drops 28–39% of them. `scan_resampler` takes the single **real return nearest
+the bin's centre angle**, reconstructing what a clean 720-beam lidar would have
+reported. A bin with no real return at all borrows the nearest real return
+within ±2 bins (`nearest_ray_search_window_bins` in `interface.yaml`); on the
+recorded fixtures that cuts empty bins from 5–8% to about 1.3%. Rays inside
+the bin always win, so the window is a fallback, never a smoothing.
 
-Min-pooling instead would report obstacles closer and wider than any 32-beam
-lidar would: measured against real TG30 scans it shifts the normalized
-observation by 0.03–0.19 mean on a [-1, 1] range, up to 1.05 in individual
-bins. That is a systematic distribution shift away from training, not a
-rounding detail.
+The 270° arc also sees the chassis standoffs, which the training sensor's
+0.1 m `min_range` hid. `self_occlusion_zones_deg` blanks those sectors before
+sampling, so they read "clear" as they did in simulation.
+
+Min-pooling instead would report obstacles closer and wider than the training
+sensor did: measured at 32 bins against real TG30 scans it shifts the
+normalized observation by 0.03–0.19 mean on a [-1, 1] range, up to 1.05 in
+individual bins. That is a systematic distribution shift away from training,
+not a rounding detail.
 
 **This is only affordable because this block feeds the POLICY ONLY.**
 `rm_safety` computes its e-stop independently from the full-resolution scan, so

@@ -28,7 +28,7 @@ What it does:
     policy_node) rather than being rebuilt here — see `_ncp_debug_cb`.
 
 Subscribes:  /scan            [sensor_msgs/LaserScan]
-Subscribes:  /ncp/scan        [sensor_msgs/LaserScan]   (bridge output, 32 beams)
+Subscribes:  /ncp/scan        [sensor_msgs/LaserScan]   (bridge output, the policy's beams)
 Subscribes:  /odom            [nav_msgs/Odometry]
 Subscribes:  /policy/cmd_vel  [geometry_msgs/Twist]     (policy request)
 Subscribes:  /teleop/cmd_vel  [geometry_msgs/Twist]     (gamepad request)

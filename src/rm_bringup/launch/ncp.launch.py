@@ -8,7 +8,7 @@ What it does:
 
         /scan (TG30, ~1982 pts, 360 deg)
               |
-              +-- rm_policy/scan_bridge_node --> /ncp/scan (32 beams, 180 deg)
+              +-- rm_policy/scan_bridge_node --> /ncp/scan (720 beams, 270 deg)
                         |
                         +-- consumer --> /policy/cmd_vel
                                               |
@@ -26,7 +26,7 @@ Launch arguments:
     consumer      "policy_node" (DEFAULT) or "upstream".
 
                   "policy_node" runs rm_policy/policy_node, the
-                  contract-checked (interface_version 3.0.0), fail-closed
+                  contract-checked (interface_version 4.0.0), fail-closed
                   production path with staleness watchdogs and a goal fixed
                   from the first /odom. This is the default because a trained
                   checkpoint now exists (2026-08-29) and this is the path that
@@ -55,7 +55,7 @@ Launch arguments:
                       0.90 m  policy spins away       (this)
                       0.50 m  safety scales velocity  (slow_zone_m)
                       0.35 m  safety zeroes + latches (stop_zone_m)
-                  Upstream's 1.5 is measured across the whole 180 deg arc
+                  Upstream's 1.5 is measured across the whole 270 deg arc
                   including the sides, so in a normal room something is nearly
                   always inside it and the robot spins continuously instead of
                   ever cruising.
@@ -440,7 +440,7 @@ def generate_launch_description() -> LaunchDescription:
             "obstacle_dist", default_value="0.9",
             description="Debug rule: spin away from anything closer than this "
                         "(metres). Upstream's own default is 1.5, which in a "
-                        "normal room keeps something inside the 180 deg arc "
+                        "normal room keeps something inside the 270 deg arc "
                         "almost always, so the robot spins continuously and "
                         "never cruises. 0.9 sits above safety's 0.50 m slow "
                         "zone, so the policy still turns away before the "
@@ -630,6 +630,7 @@ def generate_launch_description() -> LaunchDescription:
             parameters=[{
                 "scan_topic": "/scan",
                 "output_topic": _NCP_SCAN_TOPIC,
+                "interface_config_path": _DEFAULT_INTERFACE_PATH,
             }],
         ),
 
@@ -672,7 +673,7 @@ def generate_launch_description() -> LaunchDescription:
             parameters=[{
                 # RAW /scan, deliberately NOT the bridge output: policy_node
                 # resamples internally, and re-resampling an already-reduced
-                # 174.375 deg scan into a 180 deg arc faults every tick.
+                # 269.625 deg scan into a 270 deg arc faults every tick.
                 "scan_topic": "/scan",
                 "odom_topic": "/odom",
                 "cmd_vel_topic": _POLICY_CMD_TOPIC,

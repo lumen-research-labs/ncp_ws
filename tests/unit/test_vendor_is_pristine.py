@@ -33,17 +33,22 @@ _VENDORED = os.path.join(
 )
 
 # Recorded at vendoring time, from upstream commit
-# 69785c85a281f2e624db9548a7335d3fa76fe56e. This pins the copy even where no
+# bc1099d43831db3b228b2b7ea3baf4e267b9dc4c. This pins the copy even where no
 # upstream checkout exists, so the robot tier still catches local edits.
+#
+# RE-VENDORED 2026-10-08 (was 69785c8 / sha da3830aa...) for interface 4.0.0:
+# BEAMS 32 -> 720 and FOV_DEG 180 -> 270, the native BARN sensor layout the
+# M7/M8 runs trained on. The actor architecture is unchanged; only its input
+# width follows OBS_DIM (36 -> 724). weights/actor.pt is now the M8-v2
+# snapshot s1436792. A 3.0.0 checkpoint cannot load into this shape (strict
+# load_state_dict raises at startup), which is the intended behaviour.
 #
 # RE-VENDORED 2026-08-29 (was 0ad548c / sha 37c8cf2f...). The upstream actor
 # architecture CHANGED when the trained checkpoint landed: `head` went from
 # `nn.Linear(motor, 2)` to the SB3 stack `Linear-Tanh-Linear-Tanh-Linear`, and
 # `obs_mean`/`obs_var` buffers were added for the checkpoint's VecNormalize
-# statistics. weights/actor.pt is a state_dict for the NEW shape, so the old
-# copy could not load it (load_state_dict is strict -- it raised at node
-# startup rather than driving on a mismatch, which is the intended behaviour).
-_EXPECTED_SHA256 = "da3830aae93d92687f6ecd5020136055cde0c7a80fd759957136c83afeeb3b17"
+# statistics.
+_EXPECTED_SHA256 = "784df5f455109fd3363f276cf369d2804449da79016c1e9b4d7ad76e211c0d71"
 
 
 def _sha256(path: str) -> str:

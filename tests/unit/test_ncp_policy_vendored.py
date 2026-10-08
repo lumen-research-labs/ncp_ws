@@ -1,6 +1,6 @@
 """Tests for the VENDORED NCP policy module (rm_policy.vendor.ncp_policy).
 
-Copied from LumenLabs/NCP-on-Rosmaster @ 69785c8 (tests/test_rosmaster_policy.py)
+Copied from LumenLabs/NCP-on-Rosmaster @ bc1099d (tests/test_rosmaster_policy.py)
 and repointed at our vendored copy, per the operator decision of 2026-08-27 that
 all fixes live in ncp_ws and the upstream repo is not modified.
 
@@ -31,9 +31,10 @@ sys.path.insert(0, os.path.join(_REPO_ROOT, "src", "rm_policy"))
 from rm_policy.vendor import ncp_policy as policy  # noqa: E402
 
 
-# The X3 sensor's exact geometry: 32 beams across the front 180°, REP-103.
-X3_AMIN = -np.pi / 2
-X3_AINC = np.pi / (policy.BEAMS - 1)
+# The trained sensor layout: BEAMS beams across the front FOV_DEG, REP-103.
+X3_SPAN = np.deg2rad(policy.FOV_DEG)
+X3_AMIN = -X3_SPAN / 2
+X3_AINC = X3_SPAN / (policy.BEAMS - 1)
 
 
 def test_check_scan_accepts_x3_layout():
@@ -41,12 +42,12 @@ def test_check_scan_accepts_x3_layout():
 
 
 def test_check_scan_reports_beam_count_mismatch():
-    problems = policy.check_scan(720, X3_AMIN, np.pi / 719)
-    assert any("expected 32 beams, got 720" in p for p in problems)
+    problems = policy.check_scan(32, X3_AMIN, X3_SPAN / 31)
+    assert any("expected 720 beams, got 32" in p for p in problems)
 
 
 def test_check_scan_reports_fov_mismatch():
-    # 32 beams but spread over 360°
+    # the right beam count but spread over 360°
     problems = policy.check_scan(policy.BEAMS, -np.pi, 2 * np.pi / policy.BEAMS)
     assert any("span" in p for p in problems)
 
@@ -59,7 +60,7 @@ def test_check_scan_reports_off_center_scan():
 
 def test_check_scan_wraps_center_angle():
     # 0..2π-style convention pointing straight ahead (center wraps to 0)
-    problems = policy.check_scan(policy.BEAMS, 3 * np.pi / 2, X3_AINC)
+    problems = policy.check_scan(policy.BEAMS, 2 * np.pi - X3_SPAN / 2, X3_AINC)
     assert problems == []
 
 
@@ -98,7 +99,7 @@ def test_reactive_clear_cruises():
 
 @pytest.mark.parametrize(
     "blocked_side,expected_w_sign",
-    [(slice(0, 16), +1), (slice(16, 32), -1)],  # right blocked -> spin left, and vice versa
+    [(slice(0, policy.BEAMS // 2), +1), (slice(policy.BEAMS // 2, policy.BEAMS), -1)],  # right blocked -> spin left, and vice versa
 )
 def test_reactive_obstacle_spins_toward_open_side(blocked_side, expected_w_sign):
     scan = np.full(policy.BEAMS, 4.0)

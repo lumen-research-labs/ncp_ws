@@ -70,32 +70,32 @@ def _build(scan, **kw):
 
 # --- shape and block boundaries --------------------------------------------
 
-def test_returns_exactly_36_finite_values() -> None:
+def test_returns_exactly_obs_dim_finite_values() -> None:
     r = _build(_flat_scan())
     assert r.fault is None, r.fault
-    assert len(r.obs) == ncp_policy.OBS_DIM == 36
+    assert len(r.obs) == ncp_policy.OBS_DIM == 724
     assert all(math.isfinite(float(v)) for v in r.obs)
 
 
-def test_block_boundaries_are_32_2_2() -> None:
-    """Lidar 0:32, goal 32:34, previous action 34:36 -- order is load-bearing."""
+def test_block_boundaries_are_720_2_2() -> None:
+    """Lidar 0:720, goal 720:722, previous action 722:724 -- order is load-bearing."""
     r = _build(_flat_scan(value=2.5))
     obs = r.obs
     # 2.5 m is exactly the clip midpoint -> normalizes to 0.0
-    assert all(float(v) == pytest.approx(0.0, abs=1e-6) for v in obs[0:32])
+    assert all(float(v) == pytest.approx(0.0, abs=1e-6) for v in obs[0:720])
     # goal 2.5 m ahead -> (2.5/5 - 1, 0/5 - 1) = (-0.5, -1.0)
-    assert float(obs[32]) == pytest.approx(-0.5, abs=1e-6)
-    assert float(obs[33]) == pytest.approx(-1.0, abs=1e-6)
+    assert float(obs[720]) == pytest.approx(-0.5, abs=1e-6)
+    assert float(obs[721]) == pytest.approx(-1.0, abs=1e-6)
     # previous action (0,0) -> ((0-0.5)/1.5, 0/3.14) = (-0.3333, 0.0)
-    assert float(obs[34]) == pytest.approx(-1.0 / 3.0, abs=1e-6)
-    assert float(obs[35]) == pytest.approx(0.0, abs=1e-6)
+    assert float(obs[722]) == pytest.approx(-1.0 / 3.0, abs=1e-6)
+    assert float(obs[723]) == pytest.approx(0.0, abs=1e-6)
 
 
 def test_previous_action_zero_is_not_a_zero_vector() -> None:
     """A zero ACTION normalizes to a non-zero pair. Do not 'fix' this."""
     r = _build(_flat_scan())
-    assert float(r.obs[34]) != 0.0
-    assert float(r.obs[34]) == pytest.approx(-1.0 / 3.0, abs=1e-6)
+    assert float(r.obs[722]) != 0.0
+    assert float(r.obs[722]) == pytest.approx(-1.0 / 3.0, abs=1e-6)
 
 
 # --- delegation: we must match upstream's own pipeline exactly --------------
@@ -114,7 +114,7 @@ def test_matches_upstream_call_sequence_exactly() -> None:
 
     binned = scan_resampler.resample_forward_arc(
         scan["ranges"], scan["angle_min"], scan["angle_increment"],
-        n_bins=32, arc_deg=180.0, range_min=0.01, range_max=30.0,
+        n_bins=720, arc_deg=270.0, range_min=0.01, range_max=30.0,
         sampling=scan_resampler.SAMPLING_NEAREST_RAY,
     )
     expected = ncp_policy.build_obs(
@@ -135,7 +135,7 @@ def test_real_tg30_scan_never_reads_as_a_wall() -> None:
 
     r = _build(scan)
     assert r.fault is None, r.fault
-    lidar = [float(v) for v in r.obs[0:32]]
+    lidar = [float(v) for v in r.obs[0:720]]
     assert all(math.isfinite(v) for v in lidar)
     assert all(v > -1.0 + 1e-9 for v in lidar), (
         f"a no-return normalized to 'obstacle at zero distance': min={min(lidar)}"
@@ -146,7 +146,7 @@ def test_all_dropout_scan_reads_as_clear_not_as_a_wall() -> None:
     scan = _flat_scan(value=0.0)  # every ray a TG30 no-return
     r = _build(scan)
     assert r.fault is None, r.fault
-    assert all(float(v) == pytest.approx(1.0, abs=1e-6) for v in r.obs[0:32])
+    assert all(float(v) == pytest.approx(1.0, abs=1e-6) for v in r.obs[0:720])
 
 
 # --- goal normalization: documented out-of-range values are EXPECTED --------
@@ -165,8 +165,8 @@ def test_goal_normalization_including_out_of_range_values(
     """These are the checkpoint's formula, not a bug. Pinned so nobody 'fixes' it."""
     r = _build(_flat_scan(), goal_xy=goal, yaw=yaw)
     assert r.fault is None, r.fault
-    assert float(r.obs[32]) == pytest.approx(expect_x, abs=1e-5)
-    assert float(r.obs[33]) == pytest.approx(expect_y, abs=1e-5)
+    assert float(r.obs[720]) == pytest.approx(expect_x, abs=1e-5)
+    assert float(r.obs[721]) == pytest.approx(expect_y, abs=1e-5)
 
 
 # --- fail-closed paths ------------------------------------------------------

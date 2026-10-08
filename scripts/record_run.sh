@@ -28,7 +28,7 @@ OUT="${HOME}/ncp_ws/bags/${NAME}_${STAMP}"
 
 # The set is deliberate:
 #   /scan            the full-resolution truth the safety layer acts on
-#   /ncp/scan        the 32 beams, to confirm the resampler agrees
+#   /ncp/scan        the policy's beams, to confirm the resampler agrees
 #   /ncp_debug       the observation, action, goal and pose policy_node used
 #   /policy/cmd_vel  what was asked for
 #   /cmd_vel         what was allowed -- the pair is the whole clamp story

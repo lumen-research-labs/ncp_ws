@@ -35,8 +35,8 @@ from rm_policy import scan_resampler  # noqa: E402  (pure stdlib)
 # assertions below run on the numpy-less workstation tier; the guarded test
 # `test_literals_match_the_vendored_checkpoint_constants` proves they still
 # equal ncp_policy's values wherever the vendored module is importable.
-BEAMS = 32
-FOV_DEG = 180.0
+BEAMS = 720
+FOV_DEG = 270.0
 
 
 def _ncp_policy():
@@ -75,8 +75,8 @@ def test_bridge_geometry_is_centred_straight_ahead() -> None:
 
 
 def test_bridge_output_is_not_safe_to_re_resample() -> None:
-    """The bridge output spans 174.375 deg, so asking scan_resampler for a
-    full 180 deg arc from it FAULTS. This is why ncp.launch.py points
+    """The bridge output spans 269.625 deg, so asking scan_resampler for a
+    full 270 deg arc from it FAULTS. This is why ncp.launch.py points
     rm_policy's policy_node at the raw /scan and not at /ncp/scan."""
     angle_min, angle_increment = _bridge_geometry(BEAMS, FOV_DEG)
     result = scan_resampler.resample_forward_arc(
@@ -101,4 +101,14 @@ def test_raw_tg30_scan_reduces_to_exactly_the_trained_beam_count() -> None:
     assert result.fault is None
     assert len(result.bins) == BEAMS
     # No 0.0 survives: a no-return must never read as a zero-distance obstacle.
-    assert all(r == 2.5 for r in result.bins)
+    # At ~2 rays per 0.375 deg bin, a bin whose only ray is a dropout reads
+    # range_max under strict sampling; nothing in between is possible.
+    assert all(r in (2.5, 30.0) for r in result.bins)
+    # With the 4.0.0 search window every such bin finds a real neighbour.
+    windowed = scan_resampler.resample_forward_arc(
+        ranges, -math.pi, angle_increment,
+        n_bins=BEAMS, arc_deg=FOV_DEG,
+        range_min=0.01, range_max=30.0, search_window_bins=2,
+    )
+    assert windowed.fault is None
+    assert all(r == 2.5 for r in windowed.bins)

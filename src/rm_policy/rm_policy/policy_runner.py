@@ -4,7 +4,7 @@ policy_runner.py — Loads the trained NCP actor and runs one inference tick.
 What it does:
     Thin, ROS-free wrapper around `rm_policy.vendor.ncp_policy.NcpActor` (the
     CfC/AutoNCP network vendored from the trained checkpoint's source repo).
-    Consumes a plain 36-element observation vector (already built and
+    Consumes a plain `ncp_policy.OBS_DIM`-element observation vector (already built and
     normalized by `observation_builder`) and returns a plain `(v, w)` action
     tuple in physical units (m/s, rad/s) — the actor's own linear head + clip
     already produces pre-scaled units, so nothing here re-scales the output.
@@ -182,7 +182,7 @@ class PolicyRunner:
     def act(self, obs: Sequence[float]) -> InferenceResult:
         """Run one inference tick.
 
-        `obs` must be exactly `ncp_policy.OBS_DIM` (36) finite floats, in the
+        `obs` must be exactly `ncp_policy.OBS_DIM` (724) finite floats, in the
         exact order `config/interface.yaml` / `observation_builder` produce.
         This function does not reorder, pad, or truncate a mismatched vector
         — that would silently feed the network garbage that still looks like

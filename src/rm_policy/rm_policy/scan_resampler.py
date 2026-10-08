@@ -100,14 +100,15 @@ class ScanResampleResult:
 # Sampling modes. See `resample_forward_arc`.
 #
 # TRAINING FIDELITY (governing principle, operator 2026-08-27): the policy was
-# trained on `--beams 32 --fov 180`, i.e. exactly ONE ray per beam direction.
-# The TG30 delivers ~1000 rays across the same arc, so ~31 real rays fall in
-# every output bin and they must be reduced somehow. The two ways differ in a
+# trained on a simulated lidar with exactly ONE ray per beam direction (32 over
+# 180 deg for the M4 checkpoint, 720 over 270 deg since interface 4.0.0). The
+# TG30 delivers more rays than that across the same arc (~31 per bin at 32
+# bins, ~2 at 720), and they must be reduced somehow. The two ways differ in a
 # way that matters:
 #
 #   SAMPLING_NEAREST_RAY (default) — take the single REAL RETURN closest to the
 #       bin's CENTRE angle, discarding the rest. This reconstructs what a clean
-#       32-beam lidar pointed in that direction would have reported, so the
+#       one-ray-per-bin lidar pointed in that direction would have reported, so the
 #       observation distribution matches training. A thin obstacle between
 #       sampled rays is invisible to the POLICY — exactly as it was invisible
 #       in simulation.
@@ -124,11 +125,11 @@ class ScanResampleResult:
 #       If a bin contains no real return at all, it falls back to range_max:
 #       genuinely nothing was detected anywhere in that sector.
 #
-#   SAMPLING_MIN_POOL — take the nearest return anywhere in the bin's 5.625 deg
-#       cone. Strictly more conservative, and the right choice for a SAFETY
-#       input, but it reports obstacles as closer and wider than any 32-beam
-#       lidar would, which is a systematic shift away from what the network saw
-#       in training.
+#   SAMPLING_MIN_POOL — take the nearest return anywhere in the bin's cone.
+#       Strictly more conservative, and the right choice for a SAFETY input,
+#       but it reports obstacles as closer and wider than the training lidar
+#       would, which is a systematic shift away from what the network saw in
+#       training.
 #
 # We can afford the faithful option because this module feeds the POLICY only.
 # rm_safety independently computes its e-stop from the FULL-RESOLUTION scan

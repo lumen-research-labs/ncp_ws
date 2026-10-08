@@ -4,7 +4,7 @@
 |---|---|---|
 | [`architecture.md`](architecture.md) | **Start here.** How the system fits together, the data flow, and the reasoning behind every major design decision. | current |
 | [`operating_guide.md`](operating_guide.md) | **The runbook.** Connect, deploy, start the stack, arm the safety layer, run the policy, use the dashboard, shut down. | current |
-| [`interface_contract.md`](interface_contract.md) | The frozen observation/action contract in prose. `config/interface.yaml` is the machine-readable authority. | current (3.0.0) |
+| [`interface_contract.md`](interface_contract.md) | The frozen observation/action contract in prose. `config/interface.yaml` is the machine-readable authority. | current (4.0.0) |
 | [`calibration.md`](calibration.md) | **How to bring `rm_base` up on a NEW robot.** The per-robot measurement procedure, in order, wheels-up before wheels-down. The numbers in `config/base_calibration.yaml` are bernard-1's and do not transfer. | current |
 | [`safety_validation.md`](safety_validation.md) | The Phase 2 sign-off record: which test tiers have passed, what is still operator-only, and which limits are running above their signed values. | current |
 | [`dev_env_setup.md`](dev_env_setup.md) | Workstation ROS2 setup (containerised). | mostly current |

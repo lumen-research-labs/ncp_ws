@@ -26,7 +26,7 @@
 ```
 /scan (TG30, ~2000 pts, 360°)
       │
-      ├─ scan_bridge_node ──► /ncp/scan (32 beams, 180°)   [upstream consumer only]
+      ├─ scan_bridge_node ──► /ncp/scan (720 beams, 270°)  [upstream consumer only]
       │
       └─ consumer ──► /policy/cmd_vel ──► rm_safety ──► /cmd_vel ──► rm_base ──► wheels
 ```
@@ -55,7 +55,7 @@
 ```
 
 The policy must react *before* the safety layer has to. Upstream's 1.5 m is
-measured across the whole 180° arc **including the sides**, so in a normal room
+measured across the whole 270° arc **including the sides**, so in a normal room
 something is nearly always inside it and the robot spins continuously instead
 of ever cruising (measured: 380 spin samples to 49 cruise).
 
@@ -111,7 +111,7 @@ ros2 topic info /teleop/cmd_vel   # -> 1 publisher
 
 ~31–39% of TG30 rays are the `0.0` no-return sentinel, and slam_toolbox does
 not know that. Untreated they are phantom hits at the sensor origin and scan
-matching is worthless. It is also **not** `/ncp/scan` — that is 32 beams
+matching is worthless. It is also **not** `/ncp/scan` — that is 720 beams
 reduced for the policy; scan matching wants every ray and the full 360°.
 
 SLAM is additive: it publishes `map → odom` *above* the untouched EKF chain. It

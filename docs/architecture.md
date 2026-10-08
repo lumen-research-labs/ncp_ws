@@ -104,7 +104,7 @@ YDLIDAR TG30  ──►  /scan  (~2000 pts, 360°, 10.1 Hz)
 /scan_sanitized       │                           ▲
       │               ▼                           │
       ▼          observation                      │
- slam_toolbox     36 dims                         │
+ slam_toolbox     724 dims                        │
       │               │                           │
       ▼               ▼                           │
   map → odom      NcpActor (CfC)                  │

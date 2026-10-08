@@ -17,10 +17,11 @@ What it does:
          goal does not exist and this node MUST NOT drive — no default goal
          vector is ever substituted (interface.yaml `goal_local.failure_mode`
          is explicit that a plausible-looking goal is worse than no goal).
-      3. Calls `rm_policy.observation_builder` to assemble the 36-element
-         observation (32 lidar + 2 dynamic robot-frame goal + 2 previous
-         action). This node does not build or normalize the vector itself —
-         see the ASSUMED API note below.
+      3. Calls `rm_policy.observation_builder` to assemble the 724-element
+         observation (720 lidar + 2 dynamic robot-frame goal + 2 previous
+         action), with the lidar geometry, search window and self-occlusion
+         zones read from config/interface.yaml at startup. This node does
+         not build or normalize the vector itself.
       4. Calls `rm_policy.policy_runner.PolicyRunner.act()` to get `(v, w)`
          in PRE-SCALED PHYSICAL UNITS (m/s, rad/s). The trained actor's
          linear head + clip already produced final units — this node must
@@ -132,6 +133,7 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
 import tf2_ros
+from rm_policy.lidar_contract import lidar_contract_from
 from rm_policy.observation_builder import build_observation
 from rm_policy.policy_runner import PolicyRunner
 from rm_policy.pose_source import Pose2D, detect_pose_jump, pose_is_usable
@@ -144,7 +146,7 @@ from rm_policy.vendor import ncp_policy
 # this code assumes and the layout the checkpoint/contract actually specifies
 # have silently diverged, which otherwise produces no runtime error.
 # ---------------------------------------------------------------------------
-_EXPECTED_INTERFACE_VERSION: str = "3.0.0"
+_EXPECTED_INTERFACE_VERSION: str = "4.0.0"
 
 # ---------------------------------------------------------------------------
 # Default config paths — only valid in a standard colcon workspace layout
@@ -187,11 +189,12 @@ _DEFAULT_GOAL_Y_M: float = 0.0
 # applied). Matches policy_runner.PolicyRunner's own default.
 _DEFAULT_WEIGHTS_PATH: str = ""
 
-# Where the goal block sits in the 36-dim observation, and the constant its
-# normalization divides by. Both are fixed by the trained checkpoint
-# (config/interface.yaml observation.layout: 32 lidar, then goal_local, then
-# previous_action; `normalization: "xy / 5.0 - 1.0"`). Used ONLY to invert the
-# normalization for the debug stream — never to build the vector.
+# Where the goal block sits in the observation (right after the lidar block,
+# so at ncp_policy.BEAMS), and the constant its normalization divides by. Both
+# are fixed by the trained checkpoint (config/interface.yaml
+# observation.layout: lidar, then goal_local, then previous_action;
+# `normalization: "xy / 5.0 - 1.0"`). Used ONLY to invert the normalization
+# for the debug stream — never to build the vector.
 # Pose sources. "odom" reads the pose straight from /odom (the pre-SLAM
 # behaviour and still the default). "map" looks up map -> base_footprint via
 # TF, which is what slam_toolbox corrects. See pose_source.py.
@@ -204,7 +207,7 @@ _POSE_SOURCE_MAP: str = "map"
 _MAP_FRAME: str = "map"
 _BASE_FRAME: str = "base_footprint"
 
-_GOAL_SLICE_START: int = 32
+_GOAL_SLICE_START: int = ncp_policy.BEAMS
 _GOAL_NORM_SCALE_M: float = 5.0
 
 # Throttle period (seconds) for repeated warning logs so a sustained fault
@@ -302,6 +305,22 @@ class PolicyNode(rclpy.node.Node):
                 f"policy_node: interface.yaml missing/invalid "
                 f"control.rate_hz: {exc}"
             ) from exc
+
+        # The lidar block: bin count, arc, range bounds, search window and
+        # self-occlusion zones. The bin count and arc must equal what the
+        # vendored checkpoint module was built with, or the contract and the
+        # network disagree about the vector and nothing would error at runtime.
+        try:
+            self._lidar = lidar_contract_from(interface_cfg)
+        except ValueError as exc:
+            raise RuntimeError(f"policy_node: {exc}") from exc
+        if (self._lidar.n_beams, self._lidar.arc_deg) != (ncp_policy.BEAMS, ncp_policy.FOV_DEG):
+            raise RuntimeError(
+                f"policy_node: interface.yaml lidar block declares "
+                f"{self._lidar.n_beams} beams over {self._lidar.arc_deg} deg, but the "
+                f"vendored checkpoint module is built for {ncp_policy.BEAMS} beams "
+                f"over {ncp_policy.FOV_DEG} deg. Refusing to start."
+            )
 
         # ------------------------------------------------------------------
         # Load config/safety_limits.yaml — ONLY for the scan/odom staleness
@@ -924,6 +943,12 @@ class PolicyNode(rclpy.node.Node):
             yaw=self._robot_yaw,
             goal_xy=(self._goal_world_x, self._goal_world_y),
             previous_action=(self._prev_action_v, self._prev_action_w),
+            n_beams=self._lidar.n_beams,
+            arc_deg=self._lidar.arc_deg,
+            range_min=self._lidar.range_min_m,
+            range_max=self._lidar.range_max_m,
+            search_window_bins=self._lidar.search_window_bins,
+            mask_zones_deg=self._lidar.mask_zones_deg,
         )
 
         if obs_result.fault is not None or obs_result.obs is None:

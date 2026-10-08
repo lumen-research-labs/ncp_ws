@@ -128,7 +128,7 @@ couplings are pinned by `tests/unit/test_safety_arc_split.py`.
 
 ### The lateral clamps stay, even though the policy has no lateral action
 
-Interface 3.0.0 has a 2-dim action `[vx, wz]` — no strafe. But `max_vy` and the
+Interface 4.0.0 has a 2-dim action `[vx, wz]` — no strafe. But `max_vy` and the
 lateral e-stop arcs remain, because **`/teleop/cmd_vel` is also an input** and
 an operator may legitimately strafe while repositioning. A non-zero `linear.y`
 arriving on `/policy/cmd_vel` is treated as a **bug, not a command**: zeroed and

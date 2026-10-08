@@ -203,7 +203,7 @@ does **not** depend on DDS reaching the workstation.
 | panel | what to look at |
 |---|---|
 | **Scan** | raw `/scan` overlaid with the 32 policy beams, on one polar plot |
-| **Observation** | the actual 36-dim vector the network consumed, as a bar strip |
+| **Observation** | the actual 724-dim vector the network consumed, as a bar strip |
 | **Velocity chain** | asked-vs-allowed at every hop: policy → safety → base |
 | **Safety** | state, `reason`, `min_range`, `clamping_active` |
 | **Base** | per-wheel target/measured speed, PWM, and the `feedback_valid` / `saturated` / `stalled` / `sign_fault` flags |

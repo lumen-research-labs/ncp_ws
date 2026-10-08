@@ -1,21 +1,22 @@
 """
-observation_builder.py — assemble the trained NCP's 36-dim observation.
+observation_builder.py — assemble the trained NCP's observation vector.
 
 What it does:
     Turns one raw LaserScan plus the robot's pose and last action into the
-    exact 36-element vector the trained checkpoint expects, per
-    `config/interface.yaml` interface_version 3.0.0:
+    exact vector the trained checkpoint expects (`ncp_policy.OBS_DIM`, 724 in
+    interface 4.0.0), per `config/interface.yaml`:
 
-        obs[0:32]   lidar, 32 beams across the forward 180 deg, right -> left
-        obs[32:34]  goal (x, y) in the ROBOT frame
-        obs[34:36]  previous action
+        obs[0:720]    lidar, 720 beams across the forward 270 deg, right -> left
+        obs[720:722]  goal (x, y) in the ROBOT frame
+        obs[722:724]  previous action
 
     It is deliberately THIN. All normalization arithmetic is performed by the
     VENDORED, BYTE-EXACT upstream module `vendor.ncp_policy`, called in
     upstream's own order (prepare_scan -> local_goal -> build_obs), exactly as
     `NCP-on-Rosmaster/rosmaster/node.py` does. This module contributes only
     two things upstream has no equivalent for: reducing a ~2000-point 360 deg
-    TG30 scan to the 32 forward beams the network was trained on, and
+    TG30 scan to the 720 forward beams the network was trained on (with the
+    search window and self-occlusion zones from interface.yaml), and
     fail-closed validation.
 
     NO FORMULA IS REIMPLEMENTED HERE. An earlier revision reimplemented the
@@ -58,8 +59,8 @@ from rm_policy.vendor import ncp_policy
 
 # Lidar reduction parameters. Defaults mirror config/interface.yaml's
 # observation.layout[lidar_ranges]; the node passes them explicitly.
-DEFAULT_N_BEAMS = ncp_policy.BEAMS          # 32, from the checkpoint itself
-DEFAULT_ARC_DEG = ncp_policy.FOV_DEG        # 180.0, from the checkpoint itself
+DEFAULT_N_BEAMS = ncp_policy.BEAMS          # 720, from the checkpoint itself
+DEFAULT_ARC_DEG = ncp_policy.FOV_DEG        # 270.0, from the checkpoint itself
 DEFAULT_RANGE_MIN_M = 0.01                  # TG30 spec floor
 DEFAULT_RANGE_MAX_M = 30.0                  # TG30 spec reach; NOT the training
                                             # clip (5.0) — see interface.yaml
@@ -87,8 +88,15 @@ def build_observation(
     arc_deg: float = DEFAULT_ARC_DEG,
     range_min: float = DEFAULT_RANGE_MIN_M,
     range_max: float = DEFAULT_RANGE_MAX_M,
+    search_window_bins: int = 0,
+    mask_zones_deg: Sequence[Sequence[float]] = (),
 ) -> ObservationResult:
-    """Build the 36-dim observation, or return a fault.
+    """Build the observation vector, or return a fault.
+
+    `search_window_bins` and `mask_zones_deg` are passed straight to
+    `scan_resampler.resample_forward_arc`; the node sources them from
+    config/interface.yaml (`nearest_ray_search_window_bins`,
+    `self_occlusion_zones_deg`). Both default to off.
 
     `pose_xy`/`yaw` are the robot's current pose in the odom frame; `goal_xy`
     is the static goal in that same frame. `previous_action` is the (v, w)
@@ -100,6 +108,7 @@ def build_observation(
             ranges, angle_min, angle_increment, pose_xy, yaw, goal_xy,
             previous_action, n_beams=n_beams, arc_deg=arc_deg,
             range_min=range_min, range_max=range_max,
+            search_window_bins=search_window_bins, mask_zones_deg=mask_zones_deg,
         )
     except Exception:
         return ObservationResult(obs=None, fault="internal_error")
@@ -107,7 +116,7 @@ def build_observation(
 
 def _build_observation_inner(
     ranges, angle_min, angle_increment, pose_xy, yaw, goal_xy, previous_action,
-    *, n_beams, arc_deg, range_min, range_max,
+    *, n_beams, arc_deg, range_min, range_max, search_window_bins, mask_zones_deg,
 ) -> ObservationResult:
     # --- 1. Reduce the raw scan to the trained beam layout. OUR code, and the
     # only place the TG30's 0.0-no-return sentinel is handled: the resampler
@@ -118,6 +127,8 @@ def _build_observation_inner(
         n_bins=n_beams, arc_deg=arc_deg,
         range_min=range_min, range_max=range_max,
         sampling=scan_resampler.SAMPLING_NEAREST_RAY,
+        search_window_bins=search_window_bins,
+        mask_zones_deg=mask_zones_deg,
     )
     if scan_result.fault is not None:
         return ObservationResult(obs=None, fault=f"lidar:{scan_result.fault}")

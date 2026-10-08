@@ -103,7 +103,7 @@ YDLIDAR TG30 ──► /scan ──┬──► policy_node ──► /policy/cm
 | `ROS_DOMAIN_ID` | **28** (both machines) |
 | Lidar | YDLIDAR **TG30** (TOF), 360°, ~10.1 Hz. Encodes no-returns as `0.0`, not `inf`. |
 | Robots | `bernard-1` at `192.168.4.100` (the working unit) · `bernard-2` at `bernard-2.local` |
-| Interface version | **3.0.0** — 36-dim observation, 2-dim action `[vx, wz]` |
+| Interface version | **4.0.0** — 724-dim observation (720 lidar beams over 270°), 2-dim action `[vx, wz]` |
 
 `bernard-1` has **no internet** and its clock resets ~3 months behind on every
 boot. Everything reaches it from the workstation over LAN.

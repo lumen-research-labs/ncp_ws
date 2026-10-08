@@ -69,7 +69,7 @@ diagnostic must not share a failure mode with the thing it diagnoses.**
 
 ### The observation comes from `/ncp_debug`, not rebuilt here
 
-`policy_node` publishes the actual 36-dim vector it consumed. A second
+`policy_node` publishes the actual 724-dim vector it consumed. A second
 implementation of the frozen contract would render a *plausible* vector that is
 not the one the network read.
 
