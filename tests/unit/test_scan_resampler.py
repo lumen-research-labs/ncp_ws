@@ -659,3 +659,179 @@ def test_bin_with_only_dropouts_falls_back_to_range_max() -> None:
     assert result.fault is None
     assert all(b == pytest.approx(RANGE_MAX_M) for b in result.bins)
     assert all(math.isfinite(b) for b in result.bins), "must never be inf"
+
+
+# ---------------------------------------------------------------------------
+# Interface 4.0.0: nearest-ray search window and self-occlusion mask zones
+# ---------------------------------------------------------------------------
+
+# The 4.0.0 lidar block (config/interface.yaml): 720 bins over 270 deg, ~2
+# TG30 rays per bin, and the chassis standoff sectors the training sensor
+# could not see.
+BEAMS_720 = 720
+ARC_270 = 270.0
+ZONES_DEG = [[92.0, 123.0], [-135.0, -97.0]]
+
+
+def _edge_to_edge_scan(n_bins: int, per_bin: int, arc_deg: float, value: float):
+    """A forward-arc-only scan whose first and last rays sit exactly on the
+    arc edges (the convention the module's coverage check expects), with
+    `per_bin` rays landing in every bin for these small sizes."""
+    n_points = n_bins * per_bin
+    arc = math.radians(arc_deg)
+    return [value] * n_points, -arc / 2.0, arc / (n_points - 1)
+
+
+def _nearest(ranges, angle_min, inc, n_bins, arc_deg, **kw):
+    return resample_forward_arc(
+        ranges, angle_min, inc, n_bins=n_bins, arc_deg=arc_deg,
+        range_min=RANGE_MIN_M, range_max=RANGE_MAX_M,
+        sampling=SAMPLING_NEAREST_RAY, **kw,
+    )
+
+
+def test_window_fallback_borrows_the_angularly_nearest_real_return() -> None:
+    """An all-dropout bin takes the neighbour ray nearest its CENTRE, which is
+    not the same as the nearest obstacle: nearest by angle, never a min."""
+    ranges, amin, inc = _edge_to_edge_scan(6, 2, 180.0, 2.0)
+    ranges[4] = ranges[5] = 0.0      # bin 2: both rays dropouts
+    ranges[3] = 1.0                   # bin 1's upper ray, 0.86 bins from centre
+    ranges[6] = 3.0                   # bin 3's lower ray, 0.77 bins from centre
+    strict = _nearest(ranges, amin, inc, 6, 180.0, search_window_bins=0)
+    window = _nearest(ranges, amin, inc, 6, 180.0, search_window_bins=1)
+    assert strict.fault is None and window.fault is None
+    assert strict.bins[2] == pytest.approx(RANGE_MAX_M)
+    assert window.bins[2] == pytest.approx(3.0), window.bins
+
+
+def test_window_reach_is_window_plus_half_a_bin() -> None:
+    """Reach is (window + 0.5) bins from the centre: a ray 1.86 bins away is
+    out of reach for window 1 and in reach for window 2."""
+    ranges, amin, inc = _edge_to_edge_scan(6, 2, 180.0, 2.0)
+    for i in range(2, 8):             # bins 1, 2, 3 all dropouts
+        ranges[i] = 0.0
+    one = _nearest(ranges, amin, inc, 6, 180.0, search_window_bins=1)
+    two = _nearest(ranges, amin, inc, 6, 180.0, search_window_bins=2)
+    assert one.bins[2] == pytest.approx(RANGE_MAX_M)
+    assert two.bins[2] == pytest.approx(2.0)
+
+
+def test_window_never_overrides_a_bin_that_has_its_own_real_return() -> None:
+    """Rays inside the bin always win; the window is a fallback only."""
+    for scan in _all_fixture_scans():
+        strict = _nearest(scan["ranges"], scan["angle_min"], scan["angle_increment"],
+                          BEAMS_720, ARC_270, search_window_bins=0)
+        window = _nearest(scan["ranges"], scan["angle_min"], scan["angle_increment"],
+                          BEAMS_720, ARC_270, search_window_bins=2)
+        assert strict.fault is None and window.fault is None
+        for s, w in zip(strict.bins, window.bins):
+            if s != RANGE_MAX_M:
+                assert w == s
+
+
+def test_window_is_ignored_in_min_pool_mode() -> None:
+    ranges, amin, inc = _edge_to_edge_scan(6, 2, 180.0, 2.0)
+    ranges[4] = ranges[5] = 0.0
+    result = resample_forward_arc(
+        ranges, amin, inc, n_bins=6, arc_deg=180.0,
+        range_min=RANGE_MIN_M, range_max=RANGE_MAX_M,
+        sampling=SAMPLING_MIN_POOL, search_window_bins=2,
+    )
+    assert result.fault is None
+    assert result.bins[2] == pytest.approx(RANGE_MAX_M)
+
+
+def test_window_may_borrow_a_real_ray_from_just_outside_the_arc() -> None:
+    """An edge bin can use a ray beyond the arc edge; the TG30 covers 360 deg
+    so those rays exist. Here bins 0-1 (angles -90..-86 deg) are dropouts and
+    the only nearby real return sits at -90.5 deg."""
+    n_points = 720                     # 0.5 deg rays over the full circle
+    inc = 2.0 * math.pi / n_points
+    ranges = [2.0] * n_points
+    for i in range(180, 188):          # -90.0 .. -86.5 deg
+        ranges[i] = 0.0
+    ranges[179] = 1.5                  # -90.5 deg, outside the 180 deg arc
+    strict = _nearest(ranges, -math.pi, inc, 90, 180.0, search_window_bins=0)
+    window = _nearest(ranges, -math.pi, inc, 90, 180.0, search_window_bins=1)
+    assert strict.bins[0] == pytest.approx(RANGE_MAX_M)
+    assert window.bins[0] == pytest.approx(1.5)
+
+
+def test_window_cuts_empty_bins_on_real_tg30_scans_at_720_bins() -> None:
+    """The measurement that motivates the option: strict per-bin sampling
+    leaves 5-8% of 720 bins with no real return on the recorded fixtures;
+    +/-2 bins leaves ~1.3%."""
+    for scan in _all_fixture_scans():
+        strict = _nearest(scan["ranges"], scan["angle_min"], scan["angle_increment"],
+                          BEAMS_720, ARC_270, search_window_bins=0)
+        window = _nearest(scan["ranges"], scan["angle_min"], scan["angle_increment"],
+                          BEAMS_720, ARC_270, search_window_bins=2)
+        empty_strict = sum(1 for b in strict.bins if b == RANGE_MAX_M) / BEAMS_720
+        empty_window = sum(1 for b in window.bins if b == RANGE_MAX_M) / BEAMS_720
+        assert empty_strict >= 0.04, empty_strict
+        assert empty_window <= 0.025, empty_window
+        assert empty_window < empty_strict
+
+
+def test_mask_zone_blanks_its_rays_in_both_modes_without_an_empty_bin_fault() -> None:
+    ranges, amin, inc = _edge_to_edge_scan(6, 2, 180.0, 0.5)
+    bin0 = [-90.0, -90.0 + 180.0 / 6]  # exactly bin 0's angular extent
+    for mode in (SAMPLING_NEAREST_RAY, SAMPLING_MIN_POOL):
+        result = resample_forward_arc(
+            ranges, amin, inc, n_bins=6, arc_deg=180.0,
+            range_min=RANGE_MIN_M, range_max=RANGE_MAX_M,
+            sampling=mode, mask_zones_deg=[bin0],
+        )
+        assert result.fault is None, result.fault
+        assert result.bins[0] == pytest.approx(RANGE_MAX_M)
+        assert all(b == pytest.approx(0.5) for b in result.bins[1:])
+
+
+def test_masked_rays_never_feed_the_window_fallback() -> None:
+    """A masked sector next to a dropout bin must not leak its (chassis)
+    range into that bin through the window."""
+    ranges, amin, inc = _edge_to_edge_scan(6, 2, 180.0, 2.0)
+    ranges[0] = ranges[1] = 0.1        # bin 0: chassis-like returns, masked
+    ranges[2] = ranges[3] = 0.0        # bin 1: dropouts
+    bin0 = [-90.0, -90.0 + 180.0 / 6]
+    result = _nearest(ranges, amin, inc, 6, 180.0,
+                      search_window_bins=1, mask_zones_deg=[bin0])
+    assert result.fault is None
+    assert result.bins[0] == pytest.approx(RANGE_MAX_M)
+    assert result.bins[1] == pytest.approx(2.0)   # borrowed from bin 2, not bin 0
+
+
+def test_mask_zones_blank_the_standoff_sectors_on_real_scans() -> None:
+    """With the 4.0.0 zones, every 720-bin whose centre lies inside a zone by
+    more than the window's reach reads range_max on the recorded fixtures."""
+    bin_deg = ARC_270 / BEAMS_720
+    reach_deg = (2 + 0.5) * bin_deg
+    for scan in _all_fixture_scans():
+        result = _nearest(scan["ranges"], scan["angle_min"], scan["angle_increment"],
+                          BEAMS_720, ARC_270, search_window_bins=2,
+                          mask_zones_deg=ZONES_DEG)
+        assert result.fault is None, result.fault
+        for i, b in enumerate(result.bins):
+            centre = -ARC_270 / 2 + (i + 0.5) * bin_deg
+            deep_inside = any(lo + reach_deg < centre < hi - reach_deg for lo, hi in ZONES_DEG)
+            if deep_inside:
+                assert b == RANGE_MAX_M, (i, centre, b)
+
+
+@pytest.mark.parametrize("window", [-1, 1.5, "2", None])
+def test_invalid_search_window_faults_closed(window) -> None:
+    ranges, amin, inc = _edge_to_edge_scan(6, 2, 180.0, 2.0)
+    result = _nearest(ranges, amin, inc, 6, 180.0, search_window_bins=window)
+    assert result.bins is None
+    assert result.fault == "invalid_search_window"
+
+
+@pytest.mark.parametrize(
+    "zones",
+    [[[10.0]], [[10.0, 5.0]], [[float("nan"), 1.0]], [[0.0, float("inf")]], [["a", "b"]], [5.0]],
+)
+def test_invalid_mask_zone_faults_closed(zones) -> None:
+    ranges, amin, inc = _edge_to_edge_scan(6, 2, 180.0, 2.0)
+    result = _nearest(ranges, amin, inc, 6, 180.0, mask_zones_deg=zones)
+    assert result.bins is None
+    assert result.fault == "invalid_mask_zone"
