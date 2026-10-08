@@ -1598,6 +1598,51 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   the next drive, so the second half of A is contaminated — run B used the
   dashboard jog instead and had no e-stop at all.
 
+- 2026-10-08 (Daniel's first session on a new workstation, Pop!_OS + ROS 2
+  Jazzy, no torch): **bernard-1 BROUGHT UP, DRIVEN, AND THE 4.0.0 CONTRACT
+  BUILT.** Workstation: repo cloned, workstation target built under Jazzy,
+  446 tests green; NCP-on-Rosmaster found at `~/lumen/ncp` and symlinked to
+  the sibling path; `~/.ssh/lumen` works as `jetson@bernard-1`. Network:
+  RobotLab (Tenda, 192.168.4.0/24, no WAN) overlaps the lab WiFi
+  (192.168.4.0/22), so the laptop reaches the robot over an Ethernet cable
+  with a host-route-only NetworkManager profile (`robotlab-wired`, see the
+  offline handbook Part A) and keeps internet on WiFi. A 223-page offline
+  handbook PDF of all repo docs now lives at
+  `~/lumen/ncp_physical/ncp_ws_offline_handbook.pdf`.
+  Robot: booted with the usual post-power-cut state (clock in May,
+  `rosmaster_main.py` on ttyUSB1, `/dev/rplidar` -> base board); clock
+  pushed, `prep_robot.sh` ready, 490 tests green on the robot, full stack up
+  (16 nodes, one `/cmd_vel` publisher, all rates nominal, 11.0 V). Operator
+  drove four dashboard waypoints (two ARRIVED) and then ran the M4 policy
+  armed; battery read 10.8 V "low" by the end.
+  * **BUG FOUND, NOT YET FIXED:** `rm_waypoint/waypoint_node.py` `_finish`
+    picks `info` vs `warn` on one line; rclpy keys log call sites by line and
+    raises `ValueError('Logger severity cannot be changed between calls.')`
+    on the first ABORT after an ARRIVED. The tick handler fails closed (robot
+    stops) but overwrites the real abort reason (almost certainly the
+    6 s / 5 cm progress watchdog) with the logger error. Fix: two call sites.
+  * **OPEN ITEM 2 CLOSED:** the breakaway kick fires on hardware — 6
+    `front_right: stalled — applying breakaway kick` lines in
+    `~/stack_20261008_094055.log` on the robot, zero `still not turning after
+    3 breakaway kicks`.
+  * **INTERFACE 4.0.0 (branch `feat/720-beam-contract`, commits 62b45ac,
+    5bf9c71, f2dbff2; upstream `~/lumen/ncp` `feat/720-beam-270fov` @
+    bc1099d):** 720 beams over 270 deg, 724-dim observation, checkpoint
+    M8-v2 `s1436792` (sha256 `71cc50aeb734…`, 63% held-out, official BARN
+    0.219) exported on the training box (max action diff vs SB3 0.0).
+    Measured on the recorded TG30 fixtures: 2.1 rays per 0.375 deg bin, so
+    strict nearest-ray leaves 5.4-8.3% of bins empty; a +/-2-bin search
+    window leaves 1.2-1.4%. The 270 deg arc includes the chassis standoffs
+    (0.23 m at -119 deg on the open scan), masked via
+    `self_occlusion_zones_deg` with the safety file's sectors. New
+    `lidar_contract.py` reads the lidar block once for both nodes. 474
+    workstation tests green. **Hardware verification PENDING at time of
+    writing:** the robot went off the network (likely powered down to
+    charge) before the branch could be deployed; a watcher deploys both
+    repos and runs the robot tier when it returns, then the stack is to be
+    restarted with `dry_run:=true` and the policy node's logged hash /
+    `/ncp/scan` length (720) / obs length (724) checked before any armed run.
+
 ## 4. Current Goal
 
 **INTERFACE 4.0.0 — THE FULL-SENSOR POLICY (2026-10-08, branch
