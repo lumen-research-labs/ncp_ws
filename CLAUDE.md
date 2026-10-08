@@ -1636,12 +1636,18 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     (0.23 m at -119 deg on the open scan), masked via
     `self_occlusion_zones_deg` with the safety file's sectors. New
     `lidar_contract.py` reads the lidar block once for both nodes. 474
-    workstation tests green. **Hardware verification PENDING at time of
-    writing:** the robot went off the network (likely powered down to
-    charge) before the branch could be deployed; a watcher deploys both
-    repos and runs the robot tier when it returns, then the stack is to be
-    restarted with `dry_run:=true` and the policy node's logged hash /
-    `/ncp/scan` length (720) / obs length (724) checked before any armed run.
+    workstation tests green. **HARDWARE-VERIFIED in dry run (same day,
+    after the robot came back from a charge):** both deploys hash-verified,
+    519 tests green on the robot, stack up with 15 nodes and one `/cmd_vel`
+    publisher; `policy_node` logged `checkpoint sha256=71cc50aeb734…` and
+    accepted 4.0.0; the bridge logged `720 beams over 270 deg, search window
+    +/-2 bins, 2 self-occlusion zone(s)`; `/ncp/scan` spans -134.8125 to
+    +134.8125 deg at 0.375 deg (720 ranges); `/ncp_debug` carries a 724-dim
+    obs with the new hash and no fault; rates /scan 10.1, /ncp/scan 10.1,
+    /policy/cmd_vel 5.0, /cmd_vel 20.0 Hz. On a real scan the policy asked
+    for v 1.03 m/s, w 0.63 rad/s (clamped to 0.25 / 0.8 by rm_safety).
+    **Not yet driven armed** — that is the operator's next act. Battery
+    10.8 V at launch.
 
 ## 4. Current Goal
 
