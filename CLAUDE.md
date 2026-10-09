@@ -1648,6 +1648,19 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     for v 1.03 m/s, w 0.63 rad/s (clamped to 0.25 / 0.8 by rm_safety).
     **Not yet driven armed** — that is the operator's next act. Battery
     10.8 V at launch.
+  * **RESET MAP (branch `feat/dashboard-reset-map` on top of the 4.0.0
+    branch, commits b913f52 + a docs fix):** slam_toolbox 2.6.9 has no reset
+    service, so `slam.launch.py` now launches it `respawn=True` and the
+    dashboard's `reset_map` command kills the robot, cancels any waypoint,
+    SIGTERMs the one `async_slam_toolbox_node` (found by argv[0] basename in
+    /proc; refuses on 0 or 2), waits for a `map -> odom` stamped after the
+    kill, re-fixes the policy goal from the page's goal x/y, resets the
+    SLAM health counters, and returns KILLED. **Verified on hardware:**
+    pid 67924 -> 70432 in 2.8 s, goal re-fixed, 0 errors, counters reset.
+    Finding: the new map is anchored on the ODOM frame (map->odom restarts
+    at zero), so the robot's map pose after a reset equals its odom pose.
+    Consequence of respawn: a slam_toolbox crash also comes back with a
+    fresh map; the health panel's counters starting over is the tell.
 
 ## 4. Current Goal
 
