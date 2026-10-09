@@ -107,8 +107,11 @@ ncp_ws/
 │   ├── rm_dashboard/   # ROBOT — live web view. SUBSCRIBE-ONLY, publishes nothing
 │   ├── rm_waypoint/    # ROBOT — go-to-waypoint repositioning; publishes
 │   │                   #   /teleop/cmd_vel ONLY (an input to rm_safety)
-│   └── rm_tools/       # WORKSTATION only — bag analysis, export, schema check
-├── scripts/            # deploy.sh, fetch_bags.sh, check_interface.py
+│   └── rm_interfaces/  # BOTH — custom msg/srv
+├── scripts/            # deploy_to_robot.sh, deploy_upstream.sh, prep_robot.sh,
+│                       #   run_stack.sh, stack_down.sh, bench_*.sh + diagnostics/
+├── archive/            # retired code and docs, indexed in archive/README.md;
+│                       #   COLCON_IGNORE'd, never imported, never linked
 └── tests/
     ├── unit/           # pure-python, no ROS runtime
     ├── replay/         # nodes run against recorded bags
@@ -123,7 +126,7 @@ Key interfaces / contracts:
   schema loader (imported by both robot and workstation code) is the single
   source of ordering — never hand-written twice. `interface_version` bumps
   on any change; the policy node refuses to start on a version mismatch.
-- **`rm_tools`** — never a runtime dependency of `rm_safety` or `rm_policy`.
+- **`archive/`** — not part of the codebase: never built, imported, tested or linked (see the cruft rule in Daniel's CODING_PROMPT.md).
 
 Fail-closed is the governing principle everywhere: any error (stale message,
 NaN, exception) → publish zero velocity, never let the last command persist.

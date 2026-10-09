@@ -10,7 +10,7 @@
 | [`safety_validation.md`](safety_validation.md) | The Phase 2 sign-off record: which test tiers have passed, what is still operator-only, and which limits are running above their signed values. | current |
 | [`dev_env_setup.md`](dev_env_setup.md) | Workstation ROS2 setup (containerised). | mostly current |
 | [`deployment.md`](deployment.md) | Historical cold-start runbook and the measured rate/TF tables. | **partly superseded** — see its banner |
-| [`phase1_session_2026-08-08.md`](phase1_session_2026-08-08.md) | Session log, kept as a record. | historical |
+| [`../archive/docs/phase1_session_2026-08-08.md`](../archive/docs/phase1_session_2026-08-08.md) | Phase 1 session log. | archived |
 
 Per-package documentation lives next to the code, in `src/rm_*/README.md`.
 

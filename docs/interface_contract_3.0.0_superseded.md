@@ -15,7 +15,7 @@
 If the two ever disagree, the YAML wins and this file is the bug.
 
 The 2.0.0 draft is kept at
-[`interface_contract_2.0.0_superseded.md`](interface_contract_2.0.0_superseded.md)
+[`archive/docs/interface_contract_2.0.0_superseded.md`](../archive/docs/interface_contract_2.0.0_superseded.md)
 for history. It described a 41-dim observation that was **never implemented**.
 
 ---

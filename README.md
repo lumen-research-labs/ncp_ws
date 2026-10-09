@@ -89,7 +89,6 @@ YDLIDAR TG30 ──► /scan ──┬──► policy_node ──► /policy/cm
 | [`rm_dashboard`](src/rm_dashboard/README.md) | robot | Live web view. Subscribe-only. |
 | [`rm_waypoint`](src/rm_waypoint/README.md) | robot | Waypoints + WASD jog, for repositioning. |
 | [`rm_interfaces`](src/rm_interfaces/README.md) | both | Custom msg/srv. |
-| [`rm_tools`](src/rm_tools/README.md) | workstation | Offline analysis. Never a robot runtime dependency. |
 
 ---
 
@@ -131,7 +130,7 @@ colcon build --symlink-install --packages-select \
   rm_interfaces rm_safety rm_policy rm_base rm_bringup rm_dashboard rm_waypoint
 
 # Workstation
-colcon build --symlink-install --packages-select rm_interfaces rm_tools
+colcon build --symlink-install --packages-select rm_interfaces
 ```
 
 ---
@@ -176,11 +175,12 @@ config/         interface.yaml (THE contract), safety_limits.yaml,
                 topics.yaml, fastdds_unicast_peers.xml
 docs/           architecture, operating_guide, interface_contract,
                 safety_validation, deployment, dev_env_setup
-src/            the eight rm_* packages (see the table above)
+src/            the seven rm_* packages (see the table above)
 scripts/        deploy_to_robot.sh, deploy_upstream.sh, prep_robot.sh,
                 run_stack.sh, stack_down.sh, bench_up/down.sh,
                 record_run.sh, fetch_bags.sh + diagnostics/
 tests/          unit (no ROS runtime) -> replay (fixtures) -> hardware (human only)
+archive/        retired code and docs, indexed in archive/README.md; never built or imported
 ```
 
 ## Testing

@@ -20,7 +20,7 @@ doing it.
 - Fail closed: any error path (dropped message, stale observation, NaN,
   exception) must result in publishing zero velocity — never let the last
   command persist silently.
-- `rm_tools` must never become a runtime import of `rm_safety` or `rm_policy`.
+- Nothing under `archive/` is ever imported; it is not part of the codebase.
 - No magic numbers: timeouts, clamp limits, rates must be named constants
   sourced from `config/*.yaml`, never literals in the body.
 - Never hand-write the observation/action ordering twice — import the shared

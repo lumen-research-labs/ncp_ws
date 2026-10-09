@@ -155,7 +155,6 @@ It is a leaf; nothing depends on it.
 | [`rm_dashboard`](../src/rm_dashboard/README.md) | robot | Live web view. **Subscribe-only, publishes nothing.** |
 | [`rm_waypoint`](../src/rm_waypoint/README.md) | robot | Go-to-waypoint and WASD jog, for repositioning. Publishes `/teleop/cmd_vel` only. |
 | [`rm_interfaces`](../src/rm_interfaces/README.md) | **both** | Custom msg/srv definitions. |
-| [`rm_tools`](../src/rm_tools/README.md) | **workstation only** | Offline analysis. Never a runtime dependency of the robot packages. |
 
 ### A recurring structural pattern
 
