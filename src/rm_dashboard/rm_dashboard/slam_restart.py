@@ -6,8 +6,9 @@ What it does:
     so a fresh map is a restart of the slam_toolbox PROCESS. slam.launch.py
     launches it with `respawn=True`, so the only act required is to
     terminate the running node: the launch system brings it back with the
-    same parameters and an empty pose graph, and the robot's position at
-    that moment becomes the new map origin. This module finds that one
+    same parameters and an empty pose graph. The map -> odom correction
+    starts over at zero, so the new map is anchored on the odometry frame
+    and the robot's map pose equals its odom pose. This module finds that one
     process and decides whether a reset is allowed. The ROS node
     (dashboard_node._reset_map) does the killing, the waiting and the goal
     re-fix, in that order, after stopping the robot.

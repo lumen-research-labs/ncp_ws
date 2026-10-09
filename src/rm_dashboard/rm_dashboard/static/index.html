@@ -268,8 +268,8 @@ input[type=range]{accent-color:var(--accent)}
         <div style="display:flex;gap:8px;align-items:center;margin:8px 0">
           <button class="act danger" id="resetmap">RESET MAP</button>
           <span class="note">kills the robot, restarts slam_toolbox with an
-            empty map (here becomes the origin), re-fixes the policy goal from
-            the goal x / y fields. Use after the robot was carried.</span>
+            empty map anchored on the odometry frame, re-fixes the policy goal
+            from the goal x / y fields. Use after the robot was carried.</span>
         </div>
         <div class="note">
           <code>map&nbsp;→&nbsp;odom</code> IS the correction: how far SLAM has
@@ -1083,8 +1083,8 @@ for(const b of document.querySelectorAll("[data-src]")){
 $("setgoal").onclick = () => post("goal",{x:+$("gx").value, y:+$("gy").value});
 $("resetmap").onclick = () => {
   if(confirm("RESET the SLAM map?\n\nThis KILLS the robot, restarts slam_toolbox "+
-             "with an empty map (the robot's current position becomes the new "+
-             "origin), cancels any waypoint run, and re-fixes the policy goal "+
+             "with an empty map anchored on the odometry frame, cancels any waypoint "+
+             "run, and re-fixes the policy goal "+
              "from the goal x / y fields. You will need to ARM again afterwards. "+
              "Takes a few seconds."))
     post("reset_map",{x:+$("gx").value, y:+$("gy").value});

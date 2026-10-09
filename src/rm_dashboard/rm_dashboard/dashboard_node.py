@@ -975,8 +975,9 @@ class DashboardNode(rclpy.node.Node):
         relies on slam.launch.py's respawn to bring it back empty. The order
         is the same principle as stack_down.sh: the robot is stopped FIRST
         and is still stopped when this returns, whatever happens in between.
-        The map frame's origin moves to the robot's current position, so
-        every map-frame target becomes meaningless: the waypoint run is
+        The map -> odom correction starts over at zero, so the new map is
+        anchored on the odometry frame and every old map-frame target
+        becomes meaningless: the waypoint run is
         cancelled and the policy goal is re-fixed from the current pose, with
         the offsets the page sent (its goal x / y fields).
 

@@ -164,8 +164,9 @@ waypoint would not move the robot (killed / wrong source / dry run).
 
 slam_toolbox 2.6.9 has no reset service, so a fresh map is a restart of its
 process. `slam.launch.py` marks the node `respawn=True`; `reset_map`
-terminates it and the launch system brings it back empty, with the robot's
-current position as the new origin. The order inside `_reset_map` is the
+terminates it and the launch system brings it back empty, anchored on the
+odometry frame (the `map → odom` correction starts over at zero, so the
+robot's map pose equals its odom pose). The order inside `_reset_map` is the
 same principle as `stack_down.sh`: it calls `/safety/kill` **first** and
 returns with the robot still killed, cancels any waypoint run (its target
 lived in the frame that just vanished), waits for a `map → odom` transform
