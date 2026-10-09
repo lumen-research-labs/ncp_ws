@@ -33,7 +33,7 @@ _VENDORED = os.path.join(
 )
 
 # Recorded at vendoring time, from upstream commit
-# bc1099d43831db3b228b2b7ea3baf4e267b9dc4c. This pins the copy even where no
+# 97f293b (docstring; code unchanged since bc1099d). This pins the copy even where no
 # upstream checkout exists, so the robot tier still catches local edits.
 #
 # RE-VENDORED 2026-10-08 (was 69785c8 / sha da3830aa...) for interface 4.0.0:
@@ -48,7 +48,9 @@ _VENDORED = os.path.join(
 # `nn.Linear(motor, 2)` to the SB3 stack `Linear-Tanh-Linear-Tanh-Linear`, and
 # `obs_mean`/`obs_var` buffers were added for the checkpoint's VecNormalize
 # statistics.
-_EXPECTED_SHA256 = "784df5f455109fd3363f276cf369d2804449da79016c1e9b4d7ad76e211c0d71"
+# RE-VENDORED 2026-10-08 (second time, from 97f293b): docstring only — upstream
+# now ships weights/actor_m4.pt beside actor.pt for the m4 profile.
+_EXPECTED_SHA256 = "2f5870372dabef91ea7f3cdf89646815ca1e97c397142e82f239c513184d08df"
 
 
 def _sha256(path: str) -> str:

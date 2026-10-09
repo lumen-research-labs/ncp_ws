@@ -1,7 +1,9 @@
 # Interface contract — version 3.0.0 (SUPERSEDED)
 
-> **Superseded by [`interface_contract.md`](interface_contract.md) (4.0.0, 2026-10-08):**
-> 720 lidar beams over 270° and the M8-v2 checkpoint. Kept because the
+> **Superseded as the default by [`interface_contract.md`](interface_contract.md) (4.0.0, 2026-10-08):**
+> 720 lidar beams over 270° and the M8-v2 checkpoint. Still deployable as the
+> `m4` profile (`ncp.launch.py profile:=m4`, contract file
+> `config/interface_m4.yaml`). Kept because the
 > rationale for everything 4.0.0 leaves unchanged (the `0.0` no-return
 > sentinel, the two clip distances, goal normalization, the literal `3.14`,
 > the authority gap) is written here and linked from there. Numbers specific

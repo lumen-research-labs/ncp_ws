@@ -83,7 +83,7 @@ Parameters:  pose_source      (str, "odom") — "odom" reads the pose from /odom
 Failure mode:
     - Node refuses to construct (raises, never starts spinning) if:
         * `config/interface.yaml` cannot be read, or its `interface_version`
-          does not match `_EXPECTED_INTERFACE_VERSION` — a version mismatch
+          is not in `_SUPPORTED_INTERFACE_VERSIONS` — a version mismatch
           means the model and this code disagree about vector layout, which
           has no runtime error otherwise.
         * `config/safety_limits.yaml` cannot be read.
@@ -140,13 +140,15 @@ from rm_policy.pose_source import Pose2D, detect_pose_jump, pose_is_usable
 from rm_policy.vendor import ncp_policy
 
 # ---------------------------------------------------------------------------
-# Interface-contract version this node was written against. Loaded-and-checked
-# against config/interface.yaml's own `interface_version` at startup — see
-# `_load_interface_config`. A mismatch means the observation/action layout
-# this code assumes and the layout the checkpoint/contract actually specifies
-# have silently diverged, which otherwise produces no runtime error.
+# Interface-contract versions this node can run: one per policy profile
+# (3.0.0 = m4, 32 beams over 180 deg; 4.0.0 = m8v2, 720 over 270). The
+# contract file's `interface_version` must be one of these, and the network
+# is then built to that contract's width, so a checkpoint for the other
+# profile fails its strict load at startup. A layout this code has never seen
+# is refused outright: a mismatch produces no runtime error, only wrong
+# numbers.
 # ---------------------------------------------------------------------------
-_EXPECTED_INTERFACE_VERSION: str = "4.0.0"
+_SUPPORTED_INTERFACE_VERSIONS = ("3.0.0", "4.0.0")
 
 # ---------------------------------------------------------------------------
 # Default config paths — only valid in a standard colcon workspace layout
@@ -189,12 +191,10 @@ _DEFAULT_GOAL_Y_M: float = 0.0
 # applied). Matches policy_runner.PolicyRunner's own default.
 _DEFAULT_WEIGHTS_PATH: str = ""
 
-# Where the goal block sits in the observation (right after the lidar block,
-# so at ncp_policy.BEAMS), and the constant its normalization divides by. Both
-# are fixed by the trained checkpoint (config/interface.yaml
-# observation.layout: lidar, then goal_local, then previous_action;
-# `normalization: "xy / 5.0 - 1.0"`). Used ONLY to invert the normalization
-# for the debug stream — never to build the vector.
+# The goal block sits right after the lidar block (index `n_beams` of the
+# active contract), and `_GOAL_NORM_SCALE_M` is the constant its
+# normalization divides by (`normalization: "xy / 5.0 - 1.0"`). Used ONLY to
+# invert the normalization for the debug stream — never to build the vector.
 # Pose sources. "odom" reads the pose straight from /odom (the pre-SLAM
 # behaviour and still the default). "map" looks up map -> base_footprint via
 # TF, which is what slam_toolbox corrects. See pose_source.py.
@@ -207,7 +207,6 @@ _POSE_SOURCE_MAP: str = "map"
 _MAP_FRAME: str = "map"
 _BASE_FRAME: str = "base_footprint"
 
-_GOAL_SLICE_START: int = ncp_policy.BEAMS
 _GOAL_NORM_SCALE_M: float = 5.0
 
 # Throttle period (seconds) for repeated warning logs so a sustained fault
@@ -289,15 +288,16 @@ class PolicyNode(rclpy.node.Node):
         # wrong observation/action contract.
         # ------------------------------------------------------------------
         interface_cfg = self._load_yaml(interface_config_path, "interface.yaml")
-        interface_version = interface_cfg.get("interface_version")
-        if interface_version != _EXPECTED_INTERFACE_VERSION:
+        interface_version = str(interface_cfg.get("interface_version"))
+        if interface_version not in _SUPPORTED_INTERFACE_VERSIONS:
             raise RuntimeError(
-                f"policy_node: interface_version mismatch — this node was "
-                f"written against {_EXPECTED_INTERFACE_VERSION!r}, but "
-                f"{interface_config_path!r} declares {interface_version!r}. "
-                f"Refusing to start: the model and the code disagree about "
-                f"the observation/action vector layout."
+                f"policy_node: interface_version {interface_version!r} in "
+                f"{interface_config_path!r} is not one this node supports "
+                f"({', '.join(_SUPPORTED_INTERFACE_VERSIONS)}). Refusing to "
+                f"start: the model and the code disagree about the "
+                f"observation/action vector layout."
             )
+        self._interface_version = interface_version
         try:
             self._control_rate_hz: float = float(interface_cfg["control"]["rate_hz"])
         except (KeyError, TypeError, ValueError) as exc:
@@ -307,19 +307,18 @@ class PolicyNode(rclpy.node.Node):
             ) from exc
 
         # The lidar block: bin count, arc, range bounds, search window and
-        # self-occlusion zones. The bin count and arc must equal what the
-        # vendored checkpoint module was built with, or the contract and the
-        # network disagree about the vector and nothing would error at runtime.
+        # self-occlusion zones. Its width (`obs_dim`) is what the network is
+        # built to, below; the contract's `total_dim` must say the same.
         try:
             self._lidar = lidar_contract_from(interface_cfg)
         except ValueError as exc:
             raise RuntimeError(f"policy_node: {exc}") from exc
-        if (self._lidar.n_beams, self._lidar.arc_deg) != (ncp_policy.BEAMS, ncp_policy.FOV_DEG):
+        total_dim = interface_cfg.get("observation", {}).get("total_dim")
+        if total_dim != self._lidar.obs_dim:
             raise RuntimeError(
-                f"policy_node: interface.yaml lidar block declares "
-                f"{self._lidar.n_beams} beams over {self._lidar.arc_deg} deg, but the "
-                f"vendored checkpoint module is built for {ncp_policy.BEAMS} beams "
-                f"over {ncp_policy.FOV_DEG} deg. Refusing to start."
+                f"policy_node: {interface_config_path!r} declares total_dim "
+                f"{total_dim!r} but its lidar block implies "
+                f"{self._lidar.obs_dim} ({self._lidar.n_beams} + 4). Refusing to start."
             )
 
         # ------------------------------------------------------------------
@@ -357,7 +356,9 @@ class PolicyNode(rclpy.node.Node):
         # any subscription/timer exists, so a bad weights file prevents the
         # node from starting at all.
         # ------------------------------------------------------------------
-        self._runner = PolicyRunner(weights_path=weights_path)
+        self._runner = PolicyRunner(
+            weights_path=weights_path, obs_dim=self._lidar.obs_dim,
+        )
 
         # ------------------------------------------------------------------
         # Sensor state — everything starts "never received" (infinitely
@@ -733,6 +734,8 @@ class PolicyNode(rclpy.node.Node):
             # "the goal is drifting" and "the goal is fixed in a corrected
             # frame" look identical on a plot until you know which mode ran.
             "pose_source": self._pose_source,
+            "interface_version": self._interface_version,
+            "n_beams": self._lidar.n_beams,
             "goal_reached": self._goal_reached,
             "weights": self._runner.weights_path or None,
             # Short hash is enough to tell two checkpoints apart at a glance
@@ -1018,8 +1021,8 @@ class PolicyNode(rclpy.node.Node):
             action=(v, w),
             obs=obs_result.obs,
             goal_local=(
-                (float(obs_result.obs[_GOAL_SLICE_START]) + 1.0) * _GOAL_NORM_SCALE_M,
-                (float(obs_result.obs[_GOAL_SLICE_START + 1]) + 1.0) * _GOAL_NORM_SCALE_M,
+                (float(obs_result.obs[self._lidar.n_beams]) + 1.0) * _GOAL_NORM_SCALE_M,
+                (float(obs_result.obs[self._lidar.n_beams + 1]) + 1.0) * _GOAL_NORM_SCALE_M,
             ),
         )
 

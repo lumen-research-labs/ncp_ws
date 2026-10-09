@@ -8,7 +8,7 @@ as similar to, if not an exact copy of, what's on the NCP-on-Rosmaster repo."*
 |---|---|
 | Source repo | `LumenLabs/NCP-on-Rosmaster` (local checkout `~/lumen/ncp`) |
 | Source path | `rosmaster/policy.py` |
-| Commit | `bc1099d43831db3b228b2b7ea3baf4e267b9dc4c` (branch `feat/720-beam-270fov`, clean tree) |
+| Commit | `97f293b` (branch `feat/720-beam-270fov`, clean tree; docstring-only change on top of `bc1099d`, which carried the 720/270 constants) |
 | Vendored | 2026-10-08 (re-vendored; previously 2026-08-29 @ `69785c8`, first 2026-08-27 @ `0ad548c`) |
 
 ## Re-vendoring 2026-10-08 — interface 4.0.0, 720 beams over 270°

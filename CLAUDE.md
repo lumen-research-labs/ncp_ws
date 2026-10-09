@@ -1678,7 +1678,10 @@ so `policy_node` and `scan_bridge_node` read the lidar block from
 `interface.yaml` in one place and refuse to start if it disagrees with the
 vendored constants. Safety, base, clamps and zones are untouched. Upstream
 `~/lumen/ncp` carries the matching change on `feat/720-beam-270fov` @
-`bc1099d`. Hardware status is in the §3 entry for 2026-10-08.
+`bc1099d`. Hardware status is in the §3 entry for 2026-10-08. **Both policies are
+deployable: `run_stack.sh profile:=m4` (3.0.0, `config/interface_m4.yaml`,
+`actor_m4.pt`) or the default `m8v2`; the dashboard header shows which is
+live, and `policy_node` builds the network to the selected contract's width.**
 
 **THE NCP DEBUG TEST HAS RUN END TO END ON HARDWARE (2026-08-29 s2).** One
 command brings up the whole stack, the policy drives the wheels through

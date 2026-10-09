@@ -157,7 +157,7 @@ def _build_observation_inner(
     obs = ncp_policy.build_obs(scan_m, local_goal_xy, previous_action)
 
     # --- 4. Fail-closed validation of the assembled vector. ---
-    if len(obs) != ncp_policy.OBS_DIM:
+    if len(obs) != n_beams + 4:  # lidar + goal (2) + previous action (2)
         return ObservationResult(obs=None, fault="wrong_obs_length")
     if not all(math.isfinite(float(v)) for v in obs):
         return ObservationResult(obs=None, fault="non_finite_obs")

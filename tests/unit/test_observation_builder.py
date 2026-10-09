@@ -200,3 +200,23 @@ def test_garbage_input_faults_rather_than_raising() -> None:
     r = build_observation("not a scan", -math.pi, 0.003, POSE, YAW, GOAL, PREV)
     assert r.obs is None
     assert r.fault is not None
+
+
+# --- the m4 profile (32 beams over 180 deg, 36 dims) through the same builder --
+
+def test_m4_profile_layout_via_explicit_contract_values() -> None:
+    """profile:=m4 passes n_beams=32 / arc_deg=180 from interface_m4.yaml; the
+    builder must produce the 3.0.0 vector without touching vendored constants."""
+    scan = _flat_scan(value=2.5)
+    r = build_observation(
+        scan["ranges"], scan["angle_min"], scan["angle_increment"],
+        POSE, YAW, GOAL, PREV, n_beams=32, arc_deg=180.0,
+    )
+    assert r.fault is None, r.fault
+    assert len(r.obs) == 36
+    assert all(float(v) == pytest.approx(0.0, abs=1e-6) for v in r.obs[0:32])
+    assert float(r.obs[32]) == pytest.approx(-0.5, abs=1e-6)
+    assert float(r.obs[33]) == pytest.approx(-1.0, abs=1e-6)
+    assert float(r.obs[34]) == pytest.approx(-1.0 / 3.0, abs=1e-6)
+    assert float(r.obs[35]) == pytest.approx(0.0, abs=1e-6)
+

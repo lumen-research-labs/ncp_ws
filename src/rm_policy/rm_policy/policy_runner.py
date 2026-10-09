@@ -4,7 +4,7 @@ policy_runner.py — Loads the trained NCP actor and runs one inference tick.
 What it does:
     Thin, ROS-free wrapper around `rm_policy.vendor.ncp_policy.NcpActor` (the
     CfC/AutoNCP network vendored from the trained checkpoint's source repo).
-    Consumes a plain `ncp_policy.OBS_DIM`-element observation vector (already built and
+    Consumes a plain `obs_dim`-element observation vector (already built and
     normalized by `observation_builder`) and returns a plain `(v, w)` action
     tuple in physical units (m/s, rad/s) — the actor's own linear head + clip
     already produces pre-scaled units, so nothing here re-scales the output.
@@ -109,11 +109,21 @@ class InferenceResult:
 class PolicyRunner:
     """Owns one `NcpActor` instance and its recurrent state across ticks."""
 
-    def __init__(self, weights_path: str = "", seed: int = 0) -> None:
+    def __init__(
+        self, weights_path: str = "", seed: int = 0,
+        obs_dim: int = ncp_policy.OBS_DIM,
+    ) -> None:
         """Construct the actor and optionally load a trained state_dict.
 
         Parameters
         ----------
+        obs_dim:
+            Width of the observation the network is built for, from the
+            contract (`LidarContract.obs_dim`): 36 for the m4 profile, 724
+            for m8v2. The default is the vendored module's own constant.
+            A checkpoint exported for the other width fails the strict load
+            below, which is the check that the contract and the weights are
+            the same policy.
         weights_path:
             Path to a torch state_dict for `NcpActor`. Empty string (the
             default) means "random weights" — this is a legitimate mode for
@@ -132,7 +142,8 @@ class PolicyRunner:
             ROS interface exists, so a bad weights file prevents the node
             from starting at all rather than degrading at runtime.
         """
-        self._actor = ncp_policy.NcpActor(seed=seed)
+        self._obs_dim = int(obs_dim)
+        self._actor = ncp_policy.NcpActor(obs_dim=self._obs_dim, seed=seed)
         self._weights_path = weights_path
         self._weights_sha256: str = ""
         if weights_path:
@@ -164,6 +175,10 @@ class PolicyRunner:
         return self._weights_path
 
     @property
+    def obs_dim(self) -> int:
+        return self._obs_dim
+
+    @property
     def weights_sha256(self) -> str:
         """SHA-256 of the loaded checkpoint; "" when running random weights.
 
@@ -182,8 +197,8 @@ class PolicyRunner:
     def act(self, obs: Sequence[float]) -> InferenceResult:
         """Run one inference tick.
 
-        `obs` must be exactly `ncp_policy.OBS_DIM` (724) finite floats, in the
-        exact order `config/interface.yaml` / `observation_builder` produce.
+        `obs` must be exactly `obs_dim` finite floats (36 or 724 by profile),
+        in the exact order the contract / `observation_builder` produce.
         This function does not reorder, pad, or truncate a mismatched vector
         — that would silently feed the network garbage that still looks like
         a plausible observation.
@@ -193,7 +208,7 @@ class PolicyRunner:
         except Exception:
             return InferenceResult(action=None, fault="obs_conversion_failed")
 
-        if arr.shape != (ncp_policy.OBS_DIM,):
+        if arr.shape != (self._obs_dim,):
             return InferenceResult(
                 action=None, fault=f"obs_shape_mismatch:{arr.shape}"
             )

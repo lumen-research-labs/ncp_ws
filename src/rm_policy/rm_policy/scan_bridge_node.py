@@ -108,17 +108,23 @@ class ScanBridgeNode(rclpy.node.Node):
                 f"ncp_scan_bridge: cannot read the lidar contract from "
                 f"{interface_config_path!r}: {exc}"
             ) from exc
-        if (self._lidar.n_beams, self._lidar.arc_deg) != (ncp_policy.BEAMS, ncp_policy.FOV_DEG):
-            raise RuntimeError(
-                f"ncp_scan_bridge: interface.yaml declares {self._lidar.n_beams} beams "
-                f"over {self._lidar.arc_deg} deg, but the vendored checkpoint module is "
-                f"built for {ncp_policy.BEAMS} beams over {ncp_policy.FOV_DEG} deg."
-            )
         self._range_min = self._lidar.range_min_m
         self._range_max = self._lidar.range_max_m
 
-        self._n_beams = ncp_policy.BEAMS
-        self._arc_deg = ncp_policy.FOV_DEG
+        # Geometry follows the CONTRACT (the active profile). The vendored
+        # module's constants only matter to the upstream consumer, whose
+        # node.py refuses any scan that is not ncp_policy.BEAMS long; the
+        # launch refuses consumer:=upstream on any other profile, so this
+        # is a warning for the operator reading the log, not a refusal.
+        self._n_beams = self._lidar.n_beams
+        self._arc_deg = self._lidar.arc_deg
+        if (self._n_beams, self._arc_deg) != (ncp_policy.BEAMS, ncp_policy.FOV_DEG):
+            self.get_logger().warn(
+                f"ncp_scan_bridge: profile is {self._n_beams} beams over "
+                f"{self._arc_deg:.0f} deg; the vendored upstream module expects "
+                f"{ncp_policy.BEAMS} over {ncp_policy.FOV_DEG:.0f}, so "
+                f"consumer:=upstream cannot use this /ncp/scan."
+            )
 
         # Synthetic geometry: bin CENTRES, not bin edges. Bin i spans
         # [-135 + i*w, -135 + (i+1)*w] deg, so its centre is at

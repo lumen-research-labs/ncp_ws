@@ -1002,8 +1002,12 @@ function renderHeader(snap){
   $("battdot").className = "dot " + (v ? (v.level==="good"?"ok":v.level==="low"?"warn":"bad") : "");
   $("uptime").textContent = snap.uptime_s + "s";
   const d = val(snap,"/ncp_debug");
+  // Which policy profile is live: contract version and beam count travel
+  // with the checkpoint hash so a wrong profile:= is visible in the header.
+  const prof = d && d.interface_version
+    ? ` · interface ${d.interface_version} · ${d.n_beams} beams` : "";
   $("ckpt").textContent = d
-    ? (d.weights_sha256 ? "checkpoint " + d.weights_sha256 : "RANDOM WEIGHTS")
+    ? (d.weights_sha256 ? "checkpoint " + d.weights_sha256 : "RANDOM WEIGHTS") + prof
     : "checkpoint —";
   $("ckpt").style.color = d && !d.weights_sha256 ? "var(--warn)" : "";
 

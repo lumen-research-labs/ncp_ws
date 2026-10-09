@@ -11,7 +11,7 @@
 #
 # Why it exists at all: bernard-1 has NO INTERNET (RobotLab has no WAN
 # uplink), so `git pull` on the robot cannot reach GitHub. The workstation is
-# the only route by which the 2 MB `weights/actor.pt` gets onto the robot.
+# the only route by which the checkpoints in `weights/` get onto the robot.
 #
 # Mechanism: `tar | ssh tar -x`. Chosen over rsync because rsync's presence on
 # a JetPack image is not guaranteed and a missing binary would fail late,
@@ -94,7 +94,8 @@ SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8)
 CRITICAL=(
   "rosmaster/policy.py"
   "rosmaster/node.py"
-  "weights/actor.pt"
+  "weights/actor.pt"       # m8v2 profile (default)
+  "weights/actor_m4.pt"    # m4 profile (profile:=m4)
 )
 
 echo "==> Source: ${SRC}"
@@ -103,7 +104,7 @@ echo "==> Source: ${SRC}"
 for f in "${CRITICAL[@]}"; do
   if [[ ! -f "${SRC}/${f}" ]]; then
     echo "ERROR: missing '${f}' in ${SRC}." >&2
-    if [[ "$f" == "weights/actor.pt" ]]; then
+    if [[ "$f" == weights/*.pt ]]; then
       echo "       The trained checkpoint is not in this checkout. Pull the" >&2
       echo "       upstream repo on the WORKSTATION first (it has internet);" >&2
       echo "       the robot cannot fetch it itself." >&2

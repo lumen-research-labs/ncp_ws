@@ -12,8 +12,11 @@ wiring (256 neurons, 128 motor) with mixed memory, then the SB3 MLP head
 [64, 64] to (v, w) — with the checkpoint's VecNormalize obs statistics
 carried as buffers. `weights/actor.pt` holds the M8-v2 run, snapshot
 s1436792 (63% held-out success, official BARN 0.219), exported bit-exact
-from the SB3 checkpoint by `weights/export_from_sb3.py`; without a weights
-file the actor runs with random weights and pass-through normalization.
+from the SB3 checkpoint by `weights/export_from_sb3.py`. `weights/actor_m4.pt`
+is the earlier M4 run (32 beams over 180 deg, obs 36); a deployment that
+loads it must build the actor with obs_dim=36 and feed it that layout.
+Without a weights file the actor runs with random weights and pass-through
+normalization.
 """
 
 import numpy as np

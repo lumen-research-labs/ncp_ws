@@ -36,7 +36,9 @@
 | `command_source` | **`teleop`** | `policy` lets `/policy/cmd_vel` drive. Defaults to `teleop` so bringing the stack up to watch it **cannot** reach the base driver. |
 | `consumer` | `policy_node` | Or `upstream` — runs `NCP-on-Rosmaster/rosmaster/node.py` unmodified, the only way to get its `mode:=debug` reactive rule. |
 | `mode` | `debug` | Only meaningful for `consumer:=upstream`. `debug` = reactive rule drives, NCP runs in shadow. `ncp` = the network drives. |
-| `weights` | the real checkpoint | `weights:=''` is the explicit opt-in to **random weights**. |
+| `profile` | **`m8v2`** | Which trained policy: `m8v2` (720 beams over 270°, interface 4.0.0, `actor.pt`) or `m4` (32 over 180°, 3.0.0, `actor_m4.pt`). One argument switches contract and checkpoint together; the dashboard header shows what is live. `consumer:=upstream` is refused on any profile but `m8v2`. |
+| `interface_config_path` | from the profile | Contract file override. Rarely needed. |
+| `weights` | the profile's checkpoint | `weights:=''` is the explicit opt-in to **random weights**. A checkpoint of the other profile's width refuses to load. |
 | `dry_run` | **`false`** | Note this differs from `base.launch.py`'s own default of `true`: bringing up the full stack implies intent to drive. |
 | `control_mode` | `closed_loop` | The floor-validated path. |
 | `with_lidar` / `with_base` / `with_odom` | `true` | Turn off only if already running. |

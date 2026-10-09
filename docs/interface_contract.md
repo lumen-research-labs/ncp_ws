@@ -4,6 +4,8 @@
 
 Earlier versions: [3.0.0](interface_contract_3.0.0_superseded.md), the M4 checkpoint with 32 beams over 180°, and [2.0.0](interface_contract_2.0.0_superseded.md), never implemented. The 3.0.0 document holds the rationale for everything 4.0.0 keeps unchanged and is linked below instead of repeated.
 
+**Profiles.** 3.0.0 is still deployable: `ncp.launch.py profile:=m4` selects `config/interface_m4.yaml` and the M4 checkpoint together, and `profile:=m8v2` (the default) selects this contract and the M8-v2 checkpoint. The two files differ only in the lidar block, the checkpoint block and the version. `policy_node` accepts either version and builds the network to the selected contract's width.
+
 ## What changed
 
 | version | observation | action | driver |

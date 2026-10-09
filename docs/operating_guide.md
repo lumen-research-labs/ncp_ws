@@ -416,6 +416,30 @@ bash scripts/run_stack.sh dry_run:=true
 bash scripts/run_stack.sh with_slam:=true with_waypoint:=true
 ```
 
+### Choosing the policy profile
+
+Two trained policies are deployed, each with the contract it was exported
+against. `profile:=` selects both at once; everything else about the stack is
+the same.
+
+| profile | beams | contract | checkpoint | held-out / official BARN |
+|---|---|---|---|---|
+| `m8v2` (default) | 720 over 270° | `config/interface.yaml` (4.0.0) | `actor.pt`, sha `71cc50ae…` | 63% / 0.219 |
+| `m4` | 32 over 180° | `config/interface_m4.yaml` (3.0.0) | `actor_m4.pt`, sha `3c9bf0ee…` | 30% / 0.113 |
+
+```bash
+bash scripts/stack_down.sh && bash scripts/prep_robot.sh
+bash scripts/run_stack.sh profile:=m4 with_slam:=true    # the M4 policy
+bash scripts/run_stack.sh with_slam:=true                # back to M8-v2
+```
+
+Switching is a stack restart; a profile cannot change while running. The
+dashboard header reads `checkpoint <hash> · interface <version> · <n> beams`,
+which is how you confirm which one is live. `policy_node` builds the network
+to the contract's width and loads the checkpoint strictly, so a mismatched
+pair refuses to start instead of driving on wrong numbers. `consumer:=upstream`
+(the reactive debug rule) runs only on `m8v2`.
+
 ### Re-targeting the goal
 
 The goal is a **static point**, fixed once from the first usable pose at
@@ -530,6 +554,9 @@ ros2 node list | sort | uniq -d   # -> empty
 # arm (source FIRST — it force-kills)
 ros2 param set /safety_node command_source policy
 ros2 service call /safety/reset std_srvs/srv/Trigger
+
+# the other policy (M4, 32 beams); default is m8v2
+bash scripts/run_stack.sh profile:=m4 with_slam:=true
 
 # dashboard
 http://192.168.4.100:8080/

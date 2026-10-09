@@ -60,10 +60,30 @@ Launch arguments:
                   always inside it and the robot spins continuously instead of
                   ever cruising.
 
-    weights       Path to a trained actor state_dict. DEFAULTS to
-                  <upstream>/weights/actor.pt — the m4 BARN run that landed
-                  2026-08-29. Pass weights:='' for random weights, which
-                  exercises the PLUMBING and nothing else.
+    profile       Which trained policy to run, as a named pair of contract
+                  file + checkpoint (the _PROFILES table below):
+                      "m8v2" (DEFAULT)  config/interface.yaml (4.0.0),
+                                        720 beams over 270 deg,
+                                        <upstream>/weights/actor.pt
+                      "m4"              config/interface_m4.yaml (3.0.0),
+                                        32 beams over 180 deg,
+                                        <upstream>/weights/actor_m4.pt
+                  Both checkpoints are deployed, so switching is this one
+                  argument and a stack restart. policy_node builds the
+                  network to the contract's width and loads the checkpoint
+                  strictly, so a mismatched pair refuses to start; the
+                  dashboard header shows the live version and beam count.
+                  consumer:=upstream is refused on any profile but m8v2
+                  (the vendored upstream module is fixed at 720 beams).
+
+    interface_config_path
+                  Override the contract file. Default "profile" = from the
+                  profile table. Rarely needed.
+
+    weights       Path to a trained actor state_dict. Default "profile" =
+                  the profile's checkpoint in the upstream checkout. Pass
+                  weights:='' for random weights, which exercises the
+                  PLUMBING and nothing else.
 
                   The checkpoint lives in the UPSTREAM repo. It must be
                   present on the robot: bernard-1 has no internet, so it gets
@@ -208,23 +228,32 @@ from launch_ros.actions import Node
 
 _LAUNCH_DIR = pathlib.Path(__file__).resolve().parent
 _REPO_ROOT = _LAUNCH_DIR.parents[2]
-_DEFAULT_INTERFACE_PATH = str(_REPO_ROOT / "config" / "interface.yaml")
 _DEFAULT_LIMITS_PATH = str(_REPO_ROOT / "config" / "safety_limits.yaml")
+
+# Policy profiles: one trained checkpoint and the contract it was exported
+# against. The contract file is relative to config/, the checkpoint to
+# <upstream_path>/weights/. Adding a policy means adding a row here, a
+# contract file, a checkpoint in the upstream repo, and a line in
+# scripts/deploy_upstream.sh's CRITICAL list.
+_PROFILES = {
+    "m8v2": ("interface.yaml", "actor.pt"),
+    "m4": ("interface_m4.yaml", "actor_m4.pt"),
+}
+_DEFAULT_PROFILE = "m8v2"
+# Sentinel default for `weights` / `interface_config_path`: resolve from the
+# profile. Needed because '' already means "random weights".
+_FROM_PROFILE = "profile"
 
 # Sibling checkout convention, matching tests/unit/test_vendor_is_pristine.py.
 _DEFAULT_UPSTREAM_PATH = str(_REPO_ROOT.parent / "NCP-on-Rosmaster")
 
-# The trained checkpoint ships in the upstream repo, not this one — it is the
-# training stack's artefact and duplicating a 2 MB binary into two repos is how
-# they drift apart. Defaulting to it (rather than to "", random weights) is
-# deliberate: with the default the node FAILS TO START if the file is missing,
-# which is far better than silently exercising an untrained network in a run
-# the operator believes is testing a policy. Pass weights:='' for a plumbing
-# run. Note this default is a fixed path, NOT derived from `upstream_path`:
-# a launch-argument default cannot reference another launch argument.
-_DEFAULT_WEIGHTS_PATH = str(
-    _REPO_ROOT.parent / "NCP-on-Rosmaster" / "weights" / "actor.pt"
-)
+# The trained checkpoints ship in the upstream repo, not this one — they are
+# the training stack's artefacts and duplicating multi-MB binaries into two
+# repos is how they drift apart. Defaulting to the profile's checkpoint
+# (rather than to "", random weights) is deliberate: with the default the
+# node FAILS TO START if the file is missing, which is far better than
+# silently exercising an untrained network in a run the operator believes is
+# testing a policy. Pass weights:='' for a plumbing run.
 
 _DEFAULT_CALIBRATION_PATH = str(_REPO_ROOT / "config" / "base_calibration.yaml")
 
@@ -362,9 +391,16 @@ def _upstream_process(context, *args, **kwargs):
     if context.perform_substitution(LaunchConfiguration("consumer")) != "upstream":
         return []
 
+    profile, _interface, weights = _resolve_profile(context)
+    if profile != _DEFAULT_PROFILE:
+        raise RuntimeError(
+            f"consumer:=upstream supports only profile:={_DEFAULT_PROFILE}: the "
+            f"vendored upstream module is fixed at {_PROFILES[_DEFAULT_PROFILE][0]}'s "
+            f"beam count and its node.py refuses any other scan length. "
+            f"Use consumer:=policy_node with profile:={profile}."
+        )
     upstream = context.perform_substitution(LaunchConfiguration("upstream_path"))
     mode = context.perform_substitution(LaunchConfiguration("mode"))
-    weights = context.perform_substitution(LaunchConfiguration("weights"))
     obstacle_dist = context.perform_substitution(
         LaunchConfiguration("obstacle_dist")
     )
@@ -385,11 +421,79 @@ def _upstream_process(context, *args, **kwargs):
     return [ExecuteProcess(cmd=cmd, name="ncp_rosmaster", output="screen")]
 
 
+def _resolve_profile(context):
+    """(profile name, contract path, weights path) with the sentinels resolved.
+
+    Shared by both consumer builders so the two can never disagree about
+    which checkpoint and contract are live.
+    """
+    profile = context.perform_substitution(LaunchConfiguration("profile"))
+    if profile not in _PROFILES:
+        raise RuntimeError(
+            f"profile:={profile!r} is not one of {sorted(_PROFILES)}."
+        )
+    interface_file, weights_file = _PROFILES[profile]
+    interface = context.perform_substitution(
+        LaunchConfiguration("interface_config_path")
+    )
+    if interface == _FROM_PROFILE:
+        interface = str(_REPO_ROOT / "config" / interface_file)
+    weights = context.perform_substitution(LaunchConfiguration("weights"))
+    if weights == _FROM_PROFILE:
+        upstream = context.perform_substitution(LaunchConfiguration("upstream_path"))
+        weights = str(pathlib.Path(upstream) / "weights" / weights_file)
+    return profile, interface, weights
+
+
+def _policy_consumer(context):
+    """The scan bridge and (for consumer:=policy_node) policy_node, both
+    pointed at the resolved profile's contract. Built here rather than as
+    static Node actions because the paths depend on `profile`."""
+    _profile, interface, weights = _resolve_profile(context)
+    nodes = [
+        Node(
+            package="rm_policy",
+            executable="scan_bridge_node",
+            name="ncp_scan_bridge",
+            output="screen",
+            parameters=[{
+                "scan_topic": "/scan",
+                "output_topic": _NCP_SCAN_TOPIC,
+                "interface_config_path": interface,
+            }],
+        ),
+    ]
+    if context.perform_substitution(LaunchConfiguration("consumer")) == "policy_node":
+        params = {
+            # RAW /scan, deliberately NOT the bridge output: policy_node
+            # resamples internally, and re-resampling an already-reduced
+            # scan (bin centres, slightly narrower than the arc) into the
+            # full arc faults every tick.
+            "scan_topic": "/scan",
+            "odom_topic": "/odom",
+            "cmd_vel_topic": _POLICY_CMD_TOPIC,
+            "pose_source": _resolved_pose_source(
+                LaunchConfiguration("pose_source"), LaunchConfiguration("with_slam")
+            ),
+            "interface_config_path": interface,
+            "safety_limits_path": _DEFAULT_LIMITS_PATH,
+        }
+        # An empty `weights` must be OMITTED, not passed: rclpy aborts on
+        # `-p weights:=` (see _upstream_process). Empty is the default
+        # inside policy_node and means random weights.
+        if weights:
+            params["weights"] = weights
+        nodes.append(Node(
+            package="rm_policy",
+            executable="policy_node",
+            name="policy_node",
+            output="screen",
+            parameters=[params],
+        ))
+    return nodes
+
+
 def generate_launch_description() -> LaunchDescription:
-    consumer = LaunchConfiguration("consumer")
-    mode = LaunchConfiguration("mode")
-    upstream_path = LaunchConfiguration("upstream_path")
-    weights = LaunchConfiguration("weights")
     with_safety = LaunchConfiguration("with_safety")
     command_source = LaunchConfiguration("command_source")
     with_lidar = LaunchConfiguration("with_lidar")
@@ -404,12 +508,6 @@ def generate_launch_description() -> LaunchDescription:
     dashboard_port = LaunchConfiguration("dashboard_port")
     dashboard_controls = LaunchConfiguration("dashboard_controls")
     with_waypoint = LaunchConfiguration("with_waypoint")
-
-    # `upstream` is selected inside _upstream_process (an OpaqueFunction), so
-    # only the policy_node branch needs a launch-time condition here.
-    is_policy_node = IfCondition(
-        PythonExpression(["'", consumer, "' == 'policy_node'"])
-    )
 
     return LaunchDescription([
         # FIRST action: refuse to stack a second copy on a running one.
@@ -431,8 +529,18 @@ def generate_launch_description() -> LaunchDescription:
             description="Path to the NCP-on-Rosmaster checkout.",
         ),
         DeclareLaunchArgument(
-            "weights", default_value=_DEFAULT_WEIGHTS_PATH,
-            description="Trained actor state_dict. Defaults to the m4 "
+            "profile", default_value=_DEFAULT_PROFILE,
+            description="Which trained policy: " + ", ".join(
+                f"'{k}' ({v[0]}, {v[1]})" for k, v in _PROFILES.items()
+            ) + ". One argument switches checkpoint and contract together.",
+        ),
+        DeclareLaunchArgument(
+            "interface_config_path", default_value=_FROM_PROFILE,
+            description="Contract file override; default from the profile.",
+        ),
+        DeclareLaunchArgument(
+            "weights", default_value=_FROM_PROFILE,
+            description="Trained actor state_dict. Default: the profile's "
                         "checkpoint in the upstream checkout. Pass "
                         "weights:='' for RANDOM WEIGHTS (plumbing runs).",
         ),
@@ -622,18 +730,8 @@ def generate_launch_description() -> LaunchDescription:
             }.items(),
         ),
 
-        Node(
-            package="rm_policy",
-            executable="scan_bridge_node",
-            name="ncp_scan_bridge",
-            output="screen",
-            parameters=[{
-                "scan_topic": "/scan",
-                "output_topic": _NCP_SCAN_TOPIC,
-                "interface_config_path": _DEFAULT_INTERFACE_PATH,
-            }],
-        ),
-
+        # The scan bridge and policy_node, built from the resolved profile.
+        OpaqueFunction(function=_policy_consumer),
         OpaqueFunction(function=_upstream_process),
 
         IncludeLaunchDescription(
@@ -664,23 +762,4 @@ def generate_launch_description() -> LaunchDescription:
             }.items(),
         ),
 
-        Node(
-            condition=is_policy_node,
-            package="rm_policy",
-            executable="policy_node",
-            name="policy_node",
-            output="screen",
-            parameters=[{
-                # RAW /scan, deliberately NOT the bridge output: policy_node
-                # resamples internally, and re-resampling an already-reduced
-                # 269.625 deg scan into a 270 deg arc faults every tick.
-                "scan_topic": "/scan",
-                "odom_topic": "/odom",
-                "cmd_vel_topic": _POLICY_CMD_TOPIC,
-                "weights": weights,
-                "pose_source": _resolved_pose_source(pose_source, with_slam),
-                "interface_config_path": _DEFAULT_INTERFACE_PATH,
-                "safety_limits_path": _DEFAULT_LIMITS_PATH,
-            }],
-        ),
     ])
