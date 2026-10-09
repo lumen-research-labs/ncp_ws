@@ -1664,6 +1664,26 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     at zero), so the robot's map pose after a reset equals its odom pose.
     Consequence of respawn: a slam_toolbox crash also comes back with a
     fresh map; the health panel's counters starting over is the tell.
+  * **POLICY PROFILES (branch `feat/policy-profiles`, commit 0cd2e67 on top
+    of the reset-map branch; upstream 97f293b adds `weights/actor_m4.pt`):**
+    `run_stack.sh profile:=m4` runs the M4 policy (3.0.0,
+    `config/interface_m4.yaml`, 32 beams over 180 deg, obs 36);
+    `profile:=m8v2` (default) the M8-v2 one. The policy modules now take
+    the layout from the contract (`lidar_contract.obs_dim`), policy_node
+    accepts {3.0.0, 4.0.0} and builds the network to the contract width, so
+    a mismatched contract/checkpoint pair refuses to start; the dashboard
+    header shows `checkpoint · interface · beams`. `consumer:=upstream` is
+    refused on m4 (vendored module fixed at 720). 499 workstation tests.
+    **Hardware verification PENDING at time of writing** (robot offline);
+    a watcher deploys and runs both profiles when it returns.
+  * **CRUFT ARCHIVED (commit 68fc5ea, per the new cruft rule in Daniel's
+    CODING_PROMPT.md):** `scripts/check_interface.py` (stub), `src/rm_tools`
+    (empty placeholder; workstation build is `rm_interfaces` alone now),
+    the never-implemented 2.0.0 contract doc, the Phase 1 session log, and
+    three `.gitkeep`s. All under `archive/` with an index; `COLCON_IGNORE`
+    and `tests/unit/test_archive_is_dead.py` keep it out of the codebase.
+    Candidate left in place: `docs/dev_env_setup.md` (previous operator's
+    Arch + Docker workstation).
 
 ## 4. Current Goal
 
