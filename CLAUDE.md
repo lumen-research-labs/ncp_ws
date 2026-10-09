@@ -1673,9 +1673,16 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     accepts {3.0.0, 4.0.0} and builds the network to the contract width, so
     a mismatched contract/checkpoint pair refuses to start; the dashboard
     header shows `checkpoint · interface · beams`. `consumer:=upstream` is
-    refused on m4 (vendored module fixed at 720). 499 workstation tests.
-    **Hardware verification PENDING at time of writing** (robot offline);
-    a watcher deploys and runs both profiles when it returns.
+    refused on m4 (vendored module fixed at 720). 499 workstation tests,
+    546 on the robot. **HARDWARE-VERIFIED 2026-10-09:** both checkpoints
+    deployed hash-verified; `profile:=m4 dry_run:=true` came up with the
+    bridge at 32 beams over 180 deg (window 0, no zones), `policy_node
+    checkpoint sha256=3c9bf0ee112b…`, `/ncp_debug` interface 3.0.0 / 32
+    beams / obs 36, 15 nodes, one `/cmd_vel` publisher, 0 errors; the
+    default profile relaunched live (KILLED) with 720 / 270 / 724 / sha
+    `71cc50aeb734…`, 16 nodes, 0 errors; the dashboard header showed
+    `checkpoint 71cc50aeb734 · interface 4.0.0 · 720 beams`. Battery was
+    10.5 V ("low") at that bring-up.
   * **CRUFT ARCHIVED (commit 68fc5ea, per the new cruft rule in Daniel's
     CODING_PROMPT.md):** `scripts/check_interface.py` (stub), `src/rm_tools`
     (empty placeholder; workstation build is `rm_interfaces` alone now),
