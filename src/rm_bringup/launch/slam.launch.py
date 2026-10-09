@@ -94,11 +94,23 @@ def generate_launch_description() -> LaunchDescription:
                 "output_topic": "/scan_sanitized",
             }],
         ),
+        # respawn=True is what makes the dashboard's RESET MAP control work:
+        # slam_toolbox 2.6.9 has no reset service, so a fresh map is a restart
+        # of this process. The dashboard terminates it and the launch system
+        # brings it back here with the same parameters and an empty pose
+        # graph. Consequence worth knowing: a slam_toolbox CRASH also comes
+        # back silently with a fresh map. The dashboard's SLAM panel shows it
+        # (correction history and loop-closure count start over) and the
+        # launch log records the exit. stack_down.sh is unaffected: it stops
+        # the launch parent before the children, and a shutting-down launch
+        # does not respawn.
         Node(
             package="slam_toolbox",
             executable="async_slam_toolbox_node",
             name="slam_toolbox",
             output="screen",
+            respawn=True,
+            respawn_delay=0.5,
             parameters=[
                 LaunchConfiguration("params_file"),
                 # use_sim_time false is explicit, not inherited: bernard-1 has

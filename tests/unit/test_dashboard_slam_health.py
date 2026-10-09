@@ -263,3 +263,21 @@ def test_a_ragged_final_block_does_not_lose_or_invent_cells() -> None:
 def test_a_degenerate_grid_returns_an_empty_payload_rather_than_raising() -> None:
     p = pack_grid([], width=0, height=0, max_cells=400)
     assert p["width"] == 0 and p["data"] == ""
+
+
+def test_reset_forgets_the_old_map_entirely() -> None:
+    """RESET MAP restarts slam_toolbox; the first transform of the new map must
+    not read as a loop closure against the last one of the old."""
+    h = SlamHealth()
+    h.update(0.0, 0.0, 0.0, now=1.0)
+    h.update(2.0, 0.0, 0.0, now=2.0)        # a jump
+    assert h.snapshot(now=2.0, max_age_s=3.0)["jump_count"] == 1
+    h.reset()
+    snap = h.snapshot(now=2.5, max_age_s=3.0)
+    assert snap["available"] is False
+    assert snap["jump_count"] == 0
+    assert snap["correction_m"] is None
+    h.update(0.0, 0.0, 0.0, now=3.0)        # the new map's first transform
+    snap = h.snapshot(now=3.0, max_age_s=3.0)
+    assert snap["jump_count"] == 0
+    assert snap["available"] is True

@@ -265,6 +265,12 @@ input[type=range]{accent-color:var(--accent)}
           <dt>SLAM input (zeros)</dt><dd id="sanz">—</dd>
         </dl>
         <div class="spark" id="slamspark"></div>
+        <div style="display:flex;gap:8px;align-items:center;margin:8px 0">
+          <button class="act danger" id="resetmap">RESET MAP</button>
+          <span class="note">kills the robot, restarts slam_toolbox with an
+            empty map (here becomes the origin), re-fixes the policy goal from
+            the goal x / y fields. Use after the robot was carried.</span>
+        </div>
         <div class="note">
           <code>map&nbsp;→&nbsp;odom</code> IS the correction: how far SLAM has
           moved the odometry's idea of where the robot is. It should GROW as
@@ -1009,6 +1015,12 @@ function renderHeader(snap){
   // control that silently does nothing.
   $("drivebtn").disabled  = !en || !svc.waypoint;
   $("wpcancel").disabled  = !en || !svc.waypoint_cancel;
+  // Needs exactly one slam_toolbox process and the policy in map mode; the
+  // node re-checks both and says which one refused.
+  const inMap = (snap.slam||{}).policy_pose_source === "map";
+  $("resetmap").disabled  = !en || !svc.reset_map || !inMap;
+  $("resetmap").title = !svc.reset_map ? "slam_toolbox is not running (or runs twice)"
+                      : !inMap ? "policy_node is not in map mode" : "";
   $("drivebtn").title = svc.waypoint ? ""
     : "rm_waypoint is not running — launch with with_waypoint:=true";
   for(const b of document.querySelectorAll("[data-src]")) b.disabled = !en || !svc.safety_params;
@@ -1069,6 +1081,14 @@ for(const b of document.querySelectorAll("[data-src]")){
   };
 }
 $("setgoal").onclick = () => post("goal",{x:+$("gx").value, y:+$("gy").value});
+$("resetmap").onclick = () => {
+  if(confirm("RESET the SLAM map?\n\nThis KILLS the robot, restarts slam_toolbox "+
+             "with an empty map (the robot's current position becomes the new "+
+             "origin), cancels any waypoint run, and re-fixes the policy goal "+
+             "from the goal x / y fields. You will need to ARM again afterwards. "+
+             "Takes a few seconds."))
+    post("reset_map",{x:+$("gx").value, y:+$("gy").value});
+};
 
 // The waypoint frame follows the frame the MAP is in, which is the frame the
 // operator clicked in. Sent explicitly rather than defaulted, and refused by

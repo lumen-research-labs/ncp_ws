@@ -14,7 +14,7 @@
 | `safety.launch.py` | `rm_safety/safety_node` | Comes up KILLED regardless of arguments. |
 | `base.launch.py` | `rm_base/rm_base_node` | Defaults `dry_run:=true`, `control_mode:=open_loop`. |
 | `odom.launch.py` | `base_node_X3` + `imu_filter_madgwick` + EKF + `robot_state_publisher` | The vendor odom chain **without** the vendor driver. |
-| `slam.launch.py` | `slam_toolbox` + `scan_sanitizer_node` | Publishes `map → odom`. |
+| `slam.launch.py` | `slam_toolbox` + `scan_sanitizer_node` | Publishes `map → odom`. `slam_toolbox` respawns on exit, which is what the dashboard's RESET MAP relies on; a crash therefore also comes back with a fresh map. |
 | `dashboard.launch.py` | `rm_dashboard/dashboard_node` | For attaching to an already-running stack. |
 | `waypoint.launch.py` | `rm_waypoint/waypoint_node` | Off by default in `ncp.launch.py`. |
 | `teleop_joy.launch.py` | Yahboom gamepad, **remapped to `/teleop/cmd_vel`** | The vendor's own copy must be killed first. |

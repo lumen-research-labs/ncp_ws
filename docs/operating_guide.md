@@ -220,7 +220,8 @@ Two things worth knowing how to read:
 ### What the controls can do
 
 The page can **kill**, **reset (arm)**, **switch `command_source`**,
-**re-target the goal**, **send a waypoint**, and **jog** with WASD.
+**re-target the goal**, **send a waypoint**, **jog** with WASD, and **reset
+the SLAM map** (which kills first and leaves the robot killed; see §8).
 
 > **The server binds `0.0.0.0` with NO AUTHENTICATION.** Anyone who can route
 > to the robot can arm and drive it. That is an accepted operator decision for
@@ -451,7 +452,12 @@ ros2 param set /policy_node goal_x 1.8
 > **DO NOT PICK THE ROBOT UP.** slam_toolbox gates on odometry-reported motion,
 > so a lift-and-place reports zero movement: no scan is processed, and the map
 > and pose stay frozen where you lifted it. Mapping mode has no relocalization.
-> **Recovery is a full stack restart with a fresh map.**
+> **Recovery is the dashboard's RESET MAP button** (or a full stack restart).
+> It kills the robot, restarts slam_toolbox with an empty map so the robot's
+> current position becomes the new origin, cancels any waypoint run, and
+> re-fixes the policy goal from the goal x / y fields. It takes a few seconds
+> and leaves the robot KILLED; arm again afterwards. The button is greyed out
+> unless the policy is in map mode and exactly one slam_toolbox is running.
 
 Drive instead. Launch with `with_waypoint:=true`, then either:
 

@@ -113,6 +113,23 @@ class SlamHealth:
         self._jump_count = 0
         self._max_correction_m = 0.0
 
+    def reset(self) -> None:
+        """Forget every sample and every jump.
+
+        For a DELIBERATE SLAM restart (the dashboard's RESET MAP): the
+        correction history of the old map says nothing about the new one, and
+        the first transform of the new map must not read as a loop closure
+        against the last transform of the old.
+        """
+        with self._lock:
+            self._current = None
+            self._first_seen = None
+            self._last_seen = None
+            self._samples.clear()
+            self._jumps.clear()
+            self._jump_count = 0
+            self._max_correction_m = 0.0
+
     def update(self, x: float, y: float, yaw: float, now: float) -> Optional[Dict[str, Any]]:
         """Record one `map -> odom` sample. Returns the jump it detected, if any.
 

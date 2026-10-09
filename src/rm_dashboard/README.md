@@ -16,6 +16,7 @@
 |---|---|---|
 | `state_store.py` | pure, thread-safe | Latest value per topic, plus arrival-rate, jitter and staleness. |
 | `slam_health.py` | pure | Turns a stream of `map → odom` corrections into the few numbers that say whether SLAM works. Also `pack_grid` / `summarize_map`. |
+| `slam_restart.py` | pure | RESET MAP's ROS-free half: finds the one `slam_toolbox` process, decides whether a reset is allowed. |
 | `web_server.py` | pure, ROS-free | `http.server` + SSE. One page, one event stream, a few command endpoints. |
 | `dashboard_node.py` | ROS2 node | Subscribes to everything; runs the server on a background thread. |
 | `static/index.html` | the page | |
@@ -135,8 +136,9 @@ goes where the operator clicked.
 ## Controls, and an honest note about them
 
 The page can send: `/safety/kill`, `/safety/reset`, parameter sets on
-`safety_node` / `policy_node`, and the two `/waypoint` services (`goto`,
-`cancel`, `jog`). It has **no publisher of any kind**.
+`safety_node` / `policy_node`, the `/waypoint` services (`goto`, `cancel`,
+`jog`), and one thing that is not ROS at all: a SIGTERM to the `slam_toolbox`
+process (RESET MAP, below). It has **no publisher of any kind**.
 
 An earlier version of this docstring claimed waypoints "require two prior
 operator acts that this page cannot perform". **That was false**, and it is
@@ -157,6 +159,23 @@ endpoints refuse and the buttons render disabled.
 `/safety_node/get_parameters`, not remembered from what the page last asked
 for. The page also states plainly, *before* the button is pressed, why a
 waypoint would not move the robot (killed / wrong source / dry run).
+
+### RESET MAP restarts `slam_toolbox` in place
+
+slam_toolbox 2.6.9 has no reset service, so a fresh map is a restart of its
+process. `slam.launch.py` marks the node `respawn=True`; `reset_map`
+terminates it and the launch system brings it back empty, with the robot's
+current position as the new origin. The order inside `_reset_map` is the
+same principle as `stack_down.sh`: it calls `/safety/kill` **first** and
+returns with the robot still killed, cancels any waypoint run (its target
+lived in the frame that just vanished), waits for a `map → odom` transform
+stamped after the kill (tf2 keeps serving the dead map's last transform for
+seconds, so the stamp is the only honest signal), then re-fixes the policy
+goal from the current pose. The ROS-free half, finding exactly one
+`async_slam_toolbox_node` by argv[0] basename and refusing on zero or two of
+them, is `slam_restart.py` and is unit-tested. The one consequence of
+`respawn=True` to know about: a slam_toolbox crash also comes back silently
+with a fresh map; the SLAM panel's counters starting over is the tell.
 
 ### Keyboard driving lives in `rm_waypoint`, not here
 

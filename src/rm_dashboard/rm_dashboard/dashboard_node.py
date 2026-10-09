@@ -98,6 +98,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import signal
 import time
 from typing import Any, Dict, List, Optional
 
@@ -119,6 +121,7 @@ from std_srvs.srv import Trigger
 from rm_interfaces.msg import BaseDebug, SafetyStatus, WaypointStatus
 from rm_interfaces.srv import Jog, SetWaypoint
 from rm_dashboard.frames import world_to_body_offset
+from rm_dashboard.slam_restart import find_slam_pids, reset_refusal
 from rm_dashboard.slam_health import (
     OCCUPIED_THRESHOLD, SlamHealth, pack_grid, summarize_map,
 )
@@ -176,6 +179,18 @@ _COMMAND_SOURCE_POLL_SEC = 1.0
 # for a local call, but a hung service must not hold an HTTP worker forever.
 _SERVICE_TIMEOUT_SEC = 3.0
 
+# RESET MAP: how long to wait for the respawned slam_toolbox to publish a
+# map -> odom transform stamped after the kill, and how far past the kill
+# instant a stamp must be to count as the NEW process's. The old process
+# future-dates its last transform by slam_toolbox's transform_timeout
+# (0.2 s), so a margin smaller than that would accept the dead map.
+_MAP_RESET_TIMEOUT_SEC = 15.0
+_MAP_RESET_FRESH_MARGIN_S = 0.5
+# Goal offset used when the page sends none (config/interface.yaml
+# goal_default_m, the same default policy_node declares).
+_DEFAULT_GOAL_X_M = 2.5
+_DEFAULT_GOAL_Y_M = 0.0
+
 # Poll interval while waiting on a future from the HTTP thread. The future is
 # resolved by the executor on the ROS thread, so this thread can only wait.
 _FUTURE_POLL_SEC = 0.02
@@ -196,10 +211,11 @@ _BATTERY_LOW_V = 10.5
 # motion ALONE: it is a service call into rm_waypoint, whose commands go to
 # /teleop/cmd_vel and reach the wheels only if rm_safety is already armed and
 # already set to the teleop source. Both of those are separate acts, and
-# neither is performed here. "waypoint_cancel" only ever stops.
+# neither is performed here. "waypoint_cancel" only ever stops. "reset_map"
+# begins by killing the robot and ends with it still killed.
 _CONTROLS = (
     "kill", "reset", "source", "goal", "goal_map", "waypoint",
-    "waypoint_cancel", "reset_odom", "jog",
+    "waypoint_cancel", "reset_odom", "jog", "reset_map",
 )
 
 
@@ -307,6 +323,11 @@ class DashboardNode(rclpy.node.Node):
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
         self._map_pose: Optional[Dict[str, Any]] = None
         self._tf_fault: Optional[str] = None
+        # ROS stamp (s) of the latest map -> odom transform. RESET MAP waits
+        # for this to move past the kill instant, which is how it tells the
+        # respawned slam_toolbox's first transform from the dead one's last
+        # (tf2 keeps serving the old one from its buffer for ~10 s).
+        self._slam_tf_stamp: Optional[float] = None
         self.create_timer(1.0 / tf_poll_hz, self._poll_tf)
 
         # Service and parameter clients. Created unconditionally so the page
@@ -643,6 +664,9 @@ class DashboardNode(rclpy.node.Node):
                 self._tf_fault = None
                 t = tf.transform.translation
                 q = tf.transform.rotation
+                self._slam_tf_stamp = (
+                    tf.header.stamp.sec + tf.header.stamp.nanosec * 1e-9
+                )
                 self._slam.update(
                     float(t.x), float(t.y),
                     _yaw_from_quat(q.x, q.y, q.z, q.w),
@@ -764,6 +788,9 @@ class DashboardNode(rclpy.node.Node):
                 "policy_params": self._policy_params.service_is_ready(),
                 "waypoint": self._waypoint_goto.service_is_ready(),
                 "waypoint_cancel": self._waypoint_cancel.service_is_ready(),
+                # Exactly one slam_toolbox process: the precondition RESET
+                # MAP checks again at the moment it runs.
+                "reset_map": len(find_slam_pids()) == 1,
             },
         }
 
@@ -822,6 +849,8 @@ class DashboardNode(rclpy.node.Node):
             return self._send_jog(payload)
         if command == "waypoint_cancel":
             return self._call_trigger(self._waypoint_cancel, "/waypoint/cancel")
+        if command == "reset_map":
+            return self._reset_map(payload)
         return {"ok": False, "error": f"unhandled command {command!r}"}
 
     def _set_goal_from_world(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -916,7 +945,7 @@ class DashboardNode(rclpy.node.Node):
                     "odom origin that slam_toolbox's map->odom correction was "
                     "computed against, and slam_toolbox only recomputes after "
                     "0.2 m of travel — so the map pose would be silently wrong "
-                    "until the robot drove that far. Restart the stack for a "
+                    "until the robot drove that far. Use RESET MAP for a "
                     "fresh map, or run with pose_source:=odom."
                 ),
             }
@@ -938,6 +967,110 @@ class DashboardNode(rclpy.node.Node):
             return {"ok": False, "error": "/set_pose timed out"}
         self.get_logger().warn("dashboard: EKF pose reset to origin via /set_pose")
         return {"ok": True, "message": "odom reset to origin"}
+
+    def _reset_map(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """A fresh SLAM map in place: stop, restart slam_toolbox, re-fix the goal.
+
+        slam_toolbox has no reset service, so this terminates its process and
+        relies on slam.launch.py's respawn to bring it back empty. The order
+        is the same principle as stack_down.sh: the robot is stopped FIRST
+        and is still stopped when this returns, whatever happens in between.
+        The map frame's origin moves to the robot's current position, so
+        every map-frame target becomes meaningless: the waypoint run is
+        cancelled and the policy goal is re-fixed from the current pose, with
+        the offsets the page sent (its goal x / y fields).
+
+        Called on an HTTP worker thread, so the waits below are plain sleeps;
+        the executor keeps polling TF on its own thread meanwhile.
+        """
+        debug = self._store.snapshot().get("/ncp_debug", {}).get("value") or {}
+        pids = find_slam_pids()
+        refusal = reset_refusal(debug.get("pose_source"), pids)
+        if refusal is not None:
+            return {"ok": False, "error": refusal}
+        try:
+            gx = float(payload.get("x", _DEFAULT_GOAL_X_M))
+            gy = float(payload.get("y", _DEFAULT_GOAL_Y_M))
+        except Exception:
+            return {"ok": False, "error": "reset_map needs numeric goal x and y"}
+        if not (math.isfinite(gx) and math.isfinite(gy)):
+            return {"ok": False, "error": "goal must be finite"}
+
+        # 1. Stop, and stay stopped. A reset that cannot stop the robot first
+        #    does not happen.
+        killed = self._call_trigger(self._kill_client, "/safety/kill")
+        if not killed.get("ok"):
+            return {
+                "ok": False,
+                "error": f"refused: could not kill the robot first ({killed.get('error')})",
+            }
+        # 2. A waypoint target lives in the frame that is about to vanish.
+        if self._waypoint_cancel.service_is_ready():
+            self._call_trigger(self._waypoint_cancel, "/waypoint/cancel")
+
+        # 3. Restart slam_toolbox. The health history belongs to the old map.
+        pid = pids[0]
+        kill_ros_time = self.get_clock().now().nanoseconds * 1e-9
+        started = time.monotonic()
+        self._slam.reset()
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass  # exited between the scan and the signal; respawn covers it
+        except PermissionError as exc:
+            return {"ok": False, "error": f"cannot signal slam_toolbox pid {pid}: {exc}"}
+        self.get_logger().warn(
+            f"dashboard: RESET MAP — slam_toolbox pid {pid} terminated; "
+            f"waiting for the respawn. Robot is KILLED."
+        )
+
+        # 4. Wait for a NEW process and a transform it stamped.
+        new_pid: Optional[int] = None
+        deadline = started + _MAP_RESET_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            current = find_slam_pids()
+            if current and pid not in current:
+                new_pid = current[0]
+            stamp = self._slam_tf_stamp
+            if (
+                new_pid is not None
+                and stamp is not None
+                and stamp > kill_ros_time + _MAP_RESET_FRESH_MARGIN_S
+            ):
+                break
+            time.sleep(_FUTURE_POLL_SEC * 5)
+        else:
+            return {
+                "ok": False,
+                "error": (
+                    f"slam_toolbox did not publish a fresh map->odom within "
+                    f"{_MAP_RESET_TIMEOUT_SEC:.0f} s (respawned pid: {new_pid}). "
+                    f"The robot is KILLED. Check the launch log; restart the "
+                    f"stack if SLAM stays down."
+                ),
+            }
+        elapsed = time.monotonic() - started
+
+        # 5. Re-fix the policy goal from the robot's pose in the NEW map.
+        goal = self._set_params(
+            self._policy_params, "policy_node",
+            [_double_param("goal_x", gx), _double_param("goal_y", gy)],
+        )
+        goal_note = (
+            f"goal re-fixed {gx:.2f} m ahead, {gy:.2f} m left of here"
+            if goal.get("ok") else f"goal NOT re-fixed ({goal.get('error')})"
+        )
+        message = (
+            f"map reset: slam_toolbox restarted (pid {pid} -> {new_pid}) in "
+            f"{elapsed:.1f} s; {goal_note}; robot is KILLED — arm to continue"
+        )
+        self.get_logger().warn("dashboard: " + message)
+        return {
+            "ok": True,
+            "message": message,
+            "slam_restart_s": round(elapsed, 1),
+            "goal": goal,
+        }
 
     def _send_jog(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Forward one manual jog. The browser re-sends while a key is held.
