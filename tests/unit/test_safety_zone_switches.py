@@ -246,7 +246,11 @@ def test_velocity_clamps_survive_disabled_zones():
         limits,
     )
     assert d.out_vx == pytest.approx(limits.velocity.max_vx)
-    assert d.out_wz == pytest.approx(limits.velocity.max_wz)
+    # Uniform scaling (2026-10-09): the whole command shrinks by the factor
+    # vx needs (0.25 / 2.0), so wz lands BELOW its own cap rather than at it.
+    # The clamp is still the binding constraint; it now keeps the curvature.
+    assert abs(d.out_wz) <= limits.velocity.max_wz + 1e-9
+    assert abs(d.out_wz) < limits.velocity.max_wz
     assert d.clamping_active is True
 
 

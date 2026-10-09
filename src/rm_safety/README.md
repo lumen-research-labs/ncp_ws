@@ -221,3 +221,8 @@ Twist best-effort.
   real `evaluate()` with the real `safety_limits.yaml`, ROS-free.
 - Hardware tier: `docs/safety_validation.md` §3. **Operator only** — never run
   by an agent.
+
+## Clamps scale the whole command (2026-10-09)
+
+`safety_logic.clamp_velocity` applies one factor to `vx`, `vy` and `wz`, the largest factor that brings every axis inside its cap. The old per-axis clamp kept each axis legal but changed the command's shape. The M8-v2 policy asks for about 1.2 m/s with 0.36 rad/s, a 3.3 m-radius arc; capping `vx` alone made that 0.25 m/s with 0.36 rad/s, a 0.7 m circle, and the robot looped where the policy meant to arc. Uniform scaling keeps the curvature at the capped speed. It is never looser than per-axis clamping. The slow zone is unchanged and still scales `vx` alone, because a robot near an obstacle must keep its ability to turn away.
+

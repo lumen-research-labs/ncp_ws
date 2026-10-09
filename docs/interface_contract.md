@@ -54,7 +54,7 @@ The search window, the self-occlusion zones and the `0.0` no-return mapping are 
 
 ## Action, 2 dims, unchanged
 
-`[vx, wz]` in physical units from a linear head with clipping, v in [-1, 2] m/s and w in [-3.14, 3.14] rad/s. `pre_scaled: true`, `scaling.applies: false`. The authority gap against the safety clamps (0.25 m/s, 0.8 rad/s) is intentional. Rationale: the 3.0.0 document, "Action".
+`[vx, wz]` in physical units from a linear head with clipping, v in [-1, 2] m/s and w in [-3.14, 3.14] rad/s. `pre_scaled: true`, `scaling.applies: false`. The authority gap against the safety clamps (0.25 m/s, 0.8 rad/s) is intentional. The clamps scale `v` and `wz` by one factor (`safety_logic.clamp_velocity`, 2026-10-09), so the path shape the policy commands survives at the capped speed. Rationale: the 3.0.0 document, "Action".
 
 ## Control rate, 5 Hz, unchanged
 

@@ -460,10 +460,21 @@ def clamp_velocity(
     cmd_wz: float,
     limits: Limits,
 ) -> Tuple[float, float, float, bool]:
-    """Clamp each velocity axis to its absolute limit.
+    """Scale the whole command by ONE factor so every axis fits its limit.
 
-    Fail-closed: NaN or infinite values on any axis are replaced with 0.0 and
-    the clamped flag is raised.
+    The factor is the largest s <= 1 with |s*vx| <= max_vx, |s*vy| <= max_vy
+    and |s*wz| <= max_wz, applied to all three axes together (operator
+    decision 2026-10-09). Clamping each axis on its own changed the SHAPE of
+    the command: the trained policy asks for 1.2 m/s with 0.36 rad/s, a
+    3.3 m-radius arc, and a per-axis clamp turned that into 0.25 m/s with
+    0.36 rad/s, a 0.7 m circle. The robot looped where the policy meant to
+    arc. One factor keeps the curvature (wz/vx) and the strafe direction the
+    source asked for, at the capped speed. It is never looser than the
+    per-axis clamp: the factor is bounded by every axis's own limit, and a
+    final per-axis clamp guards the floating-point rounding of the product.
+
+    Fail-closed: a NaN or infinite value on any axis becomes 0.0 on THAT
+    axis and raises the clamped flag; the finite axes are then scaled.
 
     Parameters
     ----------
@@ -475,22 +486,36 @@ def clamp_velocity(
     Returns
     -------
     (vx, vy, wz, clamped):
-        Clamped velocities and a flag indicating whether any axis was altered.
+        Scaled velocities and a flag indicating whether the command was
+        altered (any axis non-finite, or the scale factor below 1).
     """
     clamped = False
+    finite = []
+    for val in (cmd_vx, cmd_vy, cmd_wz):
+        if math.isfinite(val):
+            finite.append(val)
+        else:
+            finite.append(0.0)
+            clamped = True
+    vx, vy, wz = finite
 
-    def _clamp_axis(val: float, max_abs: float) -> Tuple[float, bool]:
-        if not math.isfinite(val):
-            return 0.0, True
+    scale = 1.0
+    for val, max_abs in (
+        (vx, limits.velocity.max_vx),
+        (vy, limits.velocity.max_vy),
+        (wz, limits.velocity.max_wz),
+    ):
         if abs(val) > max_abs:
-            return math.copysign(max_abs, val), True
-        return val, False
+            # abs(val) > max_abs >= 0, so the division is safe.
+            scale = min(scale, max_abs / abs(val))
+    if scale < 1.0:
+        vx, vy, wz = vx * scale, vy * scale, wz * scale
+        clamped = True
 
-    vx, c0 = _clamp_axis(cmd_vx, limits.velocity.max_vx)
-    vy, c1 = _clamp_axis(cmd_vy, limits.velocity.max_vy)
-    wz, c2 = _clamp_axis(cmd_wz, limits.velocity.max_wz)
-    clamped = c0 or c1 or c2
-
+    # Rounding guard only: the scaled product can sit one ulp past the limit.
+    vx = math.copysign(min(abs(vx), limits.velocity.max_vx), vx)
+    vy = math.copysign(min(abs(vy), limits.velocity.max_vy), vy)
+    wz = math.copysign(min(abs(wz), limits.velocity.max_wz), wz)
     return vx, vy, wz, clamped
 
 

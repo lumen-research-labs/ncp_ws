@@ -1692,6 +1692,40 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     Candidate left in place: `docs/dev_env_setup.md` (previous operator's
     Arch + Docker workstation).
 
+- 2026-10-09: **"NCP FAST DOES LOOP-DE-LOOPS" — DIAGNOSED ON HARDWARE, AND THE
+  CLAMP NOW SCALES THE WHOLE COMMAND.** Operator ran M8-v2 armed; it circled
+  left instead of heading for the goal. Probed the network on the robot's
+  CPU with a real scan (tests/fixtures/tg30_open_scan.yaml) and the goal
+  placed ahead / 90 deg left / 90 deg right / behind:
+  * **M8-v2 IGNORES THE GOAL.** Identical action (v +1.20, wz +0.36) for
+    every placement, including directly behind. Not a normalization artefact
+    — the goal dims' VecNormalize std is 0.82 / 0.45 and the normalized
+    values ranged -1.5..+1.4, nowhere near the +-10 clip. Learned
+    indifference: BARN's goal is always 10 m straight ahead down the
+    corridor (`GOAL_OFFSET = [0, 10]` in barn_gym/env.py), so goal bearing
+    carried no information the lidar did not. Reversing the scan flips the
+    turn: it is a corridor runner steering toward free space. **Re-targeting
+    cannot change its behaviour; evaluate it on an obstacle course.**
+    M4 by contrast DOES respond (wz 0.44 goal-left vs 0.14 goal-right).
+  * **The loops themselves were the per-axis clamp.** 1.2 m/s with
+    0.36 rad/s is a 3.3 m-radius arc; capping vx to 0.25 while passing wz
+    made it a 0.7 m circle (5x tighter). M4 never showed it because its
+    requested speed (~0.3-0.5) sat near the clamp.
+  * **The "always left" was the room:** live sector means showed the right
+    side and dead ahead at 0.3-0.5 m and the left side at 1.4-4.9 m.
+  * **FIX (branch `fix/uniform-velocity-clamp`, on top of
+    feat/policy-profiles):** `safety_logic.clamp_velocity` applies ONE scale
+    factor to vx, vy, wz — the largest s <= 1 that fits every axis — so the
+    commanded curvature survives at the capped speed. Never looser than
+    per-axis (final per-axis clamp guards rounding). Slow zone unchanged
+    (still vx alone, so turning away stays possible). 506 workstation tests.
+    `docs/safety_validation.md` §3d records it as unsigned. Consequence to
+    expect: the policy's whole motion is ~5x slower in time than it was
+    trained for; its recurrent dynamics do not know that.
+  * Noted, not yet fixed: on one sample the extreme right-edge policy bin
+    read 0.15 m — the chassis standoff leaking past the mask's -135 edge via
+    the search window. Widen the right zone past the arc edge.
+
 ## 4. Current Goal
 
 **INTERFACE 4.0.0 — THE FULL-SENSOR POLICY (2026-10-08, branch
@@ -2156,6 +2190,15 @@ Settled, do not re-open:
 - **`bench_down.sh` RESTARTS the vendor `Mcnamu_driver_X3`**, which then holds
   the base-board serial port. Always re-run `prep_robot.sh` after it
   (2026-08-29).
+- **The velocity clamps scale the WHOLE command by one factor** (operator,
+  2026-10-09). Capping axes independently reshapes the command — a 3.3 m arc
+  became a 0.7 m circle — and that is what "NCP FAST loops" was. Never looser
+  than per-axis. The slow zone still scales vx alone on purpose.
+- **M8-v2 does not steer to the goal** (measured 2026-10-09): identical
+  actions for a goal ahead, beside or behind. BARN's goal is always straight
+  ahead, so the network learned corridor-running from the lidar. Judge it on
+  an obstacle course; goal-seeking needs retraining with randomized goal
+  bearings.
 
 ### Remote-command gotchas
 

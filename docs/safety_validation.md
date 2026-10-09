@@ -284,6 +284,19 @@ Threshold ordering that must be preserved, policy reacting before the safety
 layer has to: **0.90 m** (debug policy `obstacle_dist`) > **0.65 m** (safety
 scales) > **0.35 m** (safety zeroes and latches).
 
+### 3d. CLAMP SEMANTICS CHANGED 2026-10-09 — NOT SIGNED OFF
+
+`clamp_velocity` now scales the whole command by one factor instead of
+capping each axis on its own. Measured cause: the M8-v2 policy asks for
+~1.2 m/s with ~0.36 rad/s (a 3.3 m arc) and the per-axis clamp turned that
+into 0.25 m/s with 0.36 rad/s (a 0.7 m circle), so the robot looped on the
+floor where the policy meant to arc. Uniform scaling is never looser than
+per-axis (the factor is bounded by every axis's cap, and a per-axis clamp
+still guards rounding), so every stopping-distance sum above still holds.
+The slow zone keeps scaling `vx` alone so the robot can turn away from an
+obstacle. Unit tests pin: curvature preserved, never looser, non-finite axes
+zeroed. Hardware rows for this change are unsigned like the rest of §3.
+
 ## 4. Acceptance criteria
 
 - [ ] Every test above passes, recorded with date and operator.

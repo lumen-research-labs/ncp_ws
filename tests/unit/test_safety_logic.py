@@ -219,12 +219,46 @@ class TestClampVelocity:
         assert wz == pytest.approx(0.0)
         assert clamped is True
 
-    def test_all_axes_clamped_independently(self, real_limits: Limits) -> None:
+    def test_all_axes_scaled_by_the_single_tightest_factor(self, real_limits: Limits) -> None:
+        """One factor for the whole command: the axis furthest over its limit
+        sets it, and the others shrink with it (uniform scaling, 2026-10-09)."""
+        lim = real_limits.velocity
         vx, vy, wz, clamped = clamp_velocity(1.0, 1.0, 2.0, real_limits)
-        assert vx == pytest.approx(real_limits.velocity.max_vx)
-        assert vy == pytest.approx(real_limits.velocity.max_vy)
-        assert wz == pytest.approx(real_limits.velocity.max_wz)
+        s = min(lim.max_vx / 1.0, lim.max_vy / 1.0, lim.max_wz / 2.0)
+        assert vx == pytest.approx(1.0 * s)
+        assert vy == pytest.approx(1.0 * s)
+        assert wz == pytest.approx(2.0 * s)
         assert clamped is True
+        assert abs(vx) <= lim.max_vx and abs(vy) <= lim.max_vy and abs(wz) <= lim.max_wz
+
+    def test_uniform_scaling_preserves_curvature(self, real_limits: Limits) -> None:
+        """The case that produced loops on hardware: 1.2 m/s with 0.36 rad/s
+        is a 3.3 m arc. Scaling vx alone made it a 0.7 m circle."""
+        vx, vy, wz, clamped = clamp_velocity(1.2, 0.0, 0.36, real_limits)
+        assert clamped is True
+        assert vx == pytest.approx(real_limits.velocity.max_vx)
+        assert wz / vx == pytest.approx(0.36 / 1.2)
+        assert wz == pytest.approx(0.36 * real_limits.velocity.max_vx / 1.2)
+
+    @pytest.mark.parametrize(
+        "cmd", [(1.0, 0.0, 0.0), (0.0, 0.0, 5.0), (0.3, 0.3, 0.3), (-2.0, 0.5, -3.14), (0.1, 0.0, 0.9)]
+    )
+    def test_uniform_scaling_is_never_looser_than_per_axis(self, real_limits: Limits, cmd) -> None:
+        lim = real_limits.velocity
+        vx, vy, wz, _ = clamp_velocity(*cmd, real_limits)
+        assert abs(vx) <= lim.max_vx + 1e-12
+        assert abs(vy) <= lim.max_vy + 1e-12
+        assert abs(wz) <= lim.max_wz + 1e-12
+        # Signs survive scaling.
+        for out, inp in ((vx, cmd[0]), (vy, cmd[1]), (wz, cmd[2])):
+            assert (out >= 0) == (inp >= 0)
+
+    def test_nonfinite_axis_is_zeroed_and_the_rest_still_scaled(self, real_limits: Limits) -> None:
+        vx, vy, wz, clamped = clamp_velocity(1.0, math.nan, 0.5, real_limits)
+        assert vy == pytest.approx(0.0)
+        assert clamped is True
+        assert vx == pytest.approx(real_limits.velocity.max_vx)
+        assert wz == pytest.approx(0.5 * real_limits.velocity.max_vx / 1.0)
 
     def test_exactly_at_limit_not_clamped(self, real_limits: Limits) -> None:
         # Exactly at max_vx should pass through without clamping.

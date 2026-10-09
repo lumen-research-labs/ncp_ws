@@ -383,7 +383,10 @@ lidar that has stopped publishing — still stops the robot either way, because
 
 The trained policy's own range is `vx ∈ [-1, 2]`, `wz ∈ [-3.14, 3.14]` — about
 8× and 4× wider. **That gap is the design. Do not raise the clamps to "let the
-policy through."**
+policy through."** Since 2026-10-09 the clamps scale the whole command by one
+factor, so a policy asking for 1.2 m/s with 0.36 rad/s gets 0.25 m/s with
+0.075 rad/s: the same arc, five times slower. Before that, `vx` was capped
+alone and the robot drove a five-times-tighter circle than the policy meant.
 
 ---
 

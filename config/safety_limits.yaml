@@ -13,6 +13,16 @@ velocity_limits:
   # Absolute caps applied to every command regardless of source. These are at
   # or below the action scaling in interface.yaml so the safety layer is
   # always the tighter of the two.
+  #
+  # HOW THEY ARE APPLIED (operator decision 2026-10-09): as ONE scale factor
+  # for the whole command, the largest s <= 1 that brings every axis inside
+  # its cap, applied to vx, vy and wz together. Clamping each axis on its own
+  # changed the command's SHAPE: the M8-v2 policy asks for ~1.2 m/s with
+  # ~0.36 rad/s (a 3.3 m arc) and a per-axis clamp made that 0.25 m/s with
+  # 0.36 rad/s, a 0.7 m circle; the robot looped where the policy meant to
+  # arc. Uniform scaling keeps the curvature at the capped speed and is never
+  # looser than per-axis (safety_logic.clamp_velocity). The slow zone still
+  # scales vx ALONE, so the robot can always turn away from an obstacle.
   # RAISED 2026-08-29 (operator request, to make the NCP debug test readable
   # at a useful pace). 0.15 -> 0.25 returns this to its pre-2026-08-14 value.
   #
