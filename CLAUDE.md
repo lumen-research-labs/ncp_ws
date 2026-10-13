@@ -1754,13 +1754,41 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   against each policy's own pose); jog and waypoint refuse while any policy
   row is selected. `record_run.sh` records every row's topics; `pose_ab.py`
   gained `--policy`. Cruft archived (c7ff2a5): the three unread
-  `topics.yaml` keys. 564 workstation tests. **Hardware verification
-  pending** (robot was unreachable at the time of writing); the intended
-  check is both policy topics at 5 Hz, two debug streams, one `/cmd_vel`
-  publisher, the safety log naming four sources, and a source switch through
-  the dashboard API landing KILLED. Design note: the loader lives in
-  `rm_safety` because the safety node is the table's authority; the launch
-  and the dashboard import it, never the reverse.
+  `topics.yaml` keys. Safety-reviewer pass: no Critical; its warnings fixed
+  in 6c5b102 (whole-set parameter validation, stale-pose refusal on map
+  clicks, `/cmd_vel` refused as a debug stream, duplicate YAML rows refused,
+  launch refuses a `command_source` whose node it does not start). 570
+  workstation tests. **HARDWARE-VERIFIED the same evening:** deployed
+  6c5b102, 617 robot-tier tests, 17 nodes with `policy_node_m8v2` +
+  `policy_node_m4`, one `/cmd_vel` publisher, both policy topics and both
+  debug streams at 5.0 Hz, `/cmd_vel` 19.9 Hz, zero errors, CPU 42% idle
+  with both policies, 11.8 V; the safety start line names all four sources
+  and both checkpoint hashes are logged. Daniel switched `teleop -> m4` from
+  the page (force-killed as designed), armed, and drove M4; every re-target
+  landed on both nodes, map clicks converted per node. Design note: the
+  loader lives in `rm_safety` because the safety node is the table's
+  authority; the launch and the dashboard import it, never the reverse.
+  * **M4 "not aimed at the goal", measured live:** with the goal 1.65 m
+    BEHIND the robot (bearing -148 deg, normalised goal x -1.28, below the
+    -0.92 floor BARN ever produced) M4 asked for v +1.0 with wz alternating
+    +0.59/-0.28 (the known stationary limit cycle). Off-distribution: BARN's
+    goal is always ahead and episodes end on arrival. M4's goal response is
+    weak (+-0.15 rad/s modulation), the uniform clamp makes heading converge
+    4x slower than its dynamics expect, and the 0.4 m arrival latch misses
+    by half a metre, so the goal falls behind. Options offered: wider
+    `goal_reached_dist`, a fail-closed `goal_behind` guard, or retraining
+    with random goal bearings (the only real fix).
+  * **"Freezes when close" was the SLOW ZONE**, not the policy: live status
+    `SLOW / slow_zone / 0.30 m` while M4 asked for 1 m/s; no `GOAL REACHED`
+    all session. I had launched with both zones ON; Daniel chose BOTH OFF
+    (the launch default, the 2026-08-31 decision) and the stack was restarted
+    that way (KILL is the only stop; clamps, watchdogs and kill remain).
+  * **TRAP: `stack_down.sh` kills the SSH session that runs it** when that
+    session's command line sources `/home/jetson/ncp_ws/install/...` (the
+    catch-all `pkill -f` on the install prefix matches the remote shell).
+    Run it via `ssh bernard-1 bash -s <<EOF` with the sourcing inside, or
+    without sourcing the install on the command line. Recorded in the
+    robot-ssh skill.
 
 ## 4. Current Goal
 

@@ -186,6 +186,15 @@ ssh bernard-1 "pkill -f '[y]ahboomcar_bringup'"       # bracket breaks self-matc
 Prefer stopping nodes by the PID you started; confirm with `pgrep -af` before
 and after.
 
+**`scripts/stack_down.sh` has the same trap built in.** Its catch-all
+`pkill -f /home/jetson/ncp_ws/install` matches any remote shell whose command
+line sources `/home/jetson/ncp_ws/install/setup.bash`, so a one-liner like
+`ssh bernard-1 'source .../ncp_ws/install/setup.bash && bash scripts/stack_down.sh && ...'`
+dies at the teardown and never runs what follows (2026-10-13). Put the
+sourcing inside a script fed over stdin (`ssh bernard-1 bash -s <<'EOF'`),
+or do not source the install on the command line (`run_stack.sh` sources it
+itself).
+
 ## 7. `ros2 multicast send/receive` proves nothing about DDS
 
 It uses group 225.0.0.1. FastDDS SPDP discovery uses **239.255.0.1**, which
