@@ -116,7 +116,7 @@ import math
 import os
 import pathlib
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import rclpy
 import rclpy.node
@@ -618,7 +618,7 @@ class SafetyNode(rclpy.node.Node):
     # Subscription callbacks — record data + arrival time only
     # ------------------------------------------------------------------
 
-    def _command_cb(self, name: str):
+    def _command_cb(self, name: str) -> Callable[[Twist], None]:
         """The subscription callback for one table row: record its latest Twist."""
         buffer = self._commands[name]
 
@@ -677,6 +677,15 @@ class SafetyNode(rclpy.node.Node):
         would otherwise hand a live robot to the policy in one step, with no
         operator act in between.
         """
+        # VALIDATE EVERYTHING FIRST, APPLY ONCE AFTER. A set carrying several
+        # parameters is accepted or rejected as a whole by rcl, so applying
+        # command_source inside the loop and then rejecting a later parameter
+        # would leave this node forwarding the new source while
+        # `ros2 param get` (and the dashboard's read-back) still showed the
+        # old one. Fail-closed either way (the kill would have fired), but a
+        # page saying 'teleop' over a node forwarding a policy is exactly the
+        # mismatch an operator arms into.
+        new_source: Optional[str] = None
         for param in params:
             if param.name in ("slow_zone_enabled", "stop_zone_enabled"):
                 # Called out separately from the generic rejection because
@@ -713,17 +722,20 @@ class SafetyNode(rclpy.node.Node):
                         f"command_sources), got {value!r}"
                     ),
                 )
-            if value == self._command_source:
-                continue  # no-op: do not kill a running robot for nothing
+            new_source = value
 
-            previous = self._command_source
-            self._command_source = value
-            self._is_killed = True
-            self._write_kill_state(True)
-            self.get_logger().warn(
-                f"safety_node: command_source {previous!r} -> {value!r}; "
-                f"KILLED as a consequence. Call /safety/reset to arm."
-            )
+        if new_source is None or new_source == self._command_source:
+            # No-op (same row): do not kill a running robot for nothing.
+            return SetParametersResult(successful=True)
+
+        previous = self._command_source
+        self._command_source = new_source
+        self._is_killed = True
+        self._write_kill_state(True)
+        self.get_logger().warn(
+            f"safety_node: command_source {previous!r} -> {new_source!r}; "
+            f"KILLED as a consequence. Call /safety/reset to arm."
+        )
         return SetParametersResult(successful=True)
 
     def _kill_srv(

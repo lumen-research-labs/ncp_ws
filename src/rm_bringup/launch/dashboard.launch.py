@@ -62,12 +62,12 @@ Usage:
     ros2 launch rm_bringup dashboard.launch.py enable_controls:=false
 """
 
+import pathlib
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-
-import pathlib
 
 _DEFAULT_TOPICS_PATH = str(
     pathlib.Path(__file__).resolve().parents[3] / "config" / "topics.yaml"

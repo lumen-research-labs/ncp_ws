@@ -113,12 +113,26 @@ def _with(name, **fields):
     (_with("m4", node="/policy_node_m4"), "bare node name"),
     (_with("M4", topic="/x", kind="policy", debug="/y"), "name"),
     (_with("m4", topic="/ncp_debug/m8v2"), "both a command and a debug"),
+    (_with("m4", debug="/cmd_vel"), "second publisher"),
+    ({**_raw(), "base_driver": {"cmd_vel": "/base/cmd_vel"}}, "base_driver.cmd_vel"),
     ({**_raw(), "command_sources": {**_raw()["command_sources"], "m4": "string"}}, "mapping"),
 ])
 def test_malformed_tables_are_refused(raw, needle) -> None:
     with pytest.raises(ValueError) as exc:
         parse_command_sources(copy.deepcopy(raw))
     assert needle in str(exc.value)
+
+
+def test_a_row_named_twice_is_refused_not_last_wins(tmp_path) -> None:
+    """PyYAML keeps the last duplicate key silently; the loader must not."""
+    text = open(_TOPICS, "r", encoding="utf-8").read()
+    dup = text.replace("  m4:\n", "  m4:\n    topic: /policy/other/cmd_vel\n    kind: policy\n  m4:\n", 1)
+    assert dup != text
+    path = tmp_path / "topics.yaml"
+    path.write_text(dup, encoding="utf-8")
+    with pytest.raises(ValueError) as exc:
+        load_command_sources(str(path))
+    assert "'m4' appears twice" in str(exc.value)
 
 
 def test_missing_file_raises() -> None:
@@ -175,6 +189,32 @@ def test_switching_to_an_unknown_name_is_rejected_and_names_the_rows() -> None:
     assert "topics.yaml" in result.reason
     assert n._command_source == "teleop"
     assert n._is_killed is False and n._kill_writes == []
+
+
+def test_a_rejected_parameter_in_the_same_set_leaves_the_source_untouched() -> None:
+    """rcl applies a multi-parameter set as a whole, so the node must too:
+    a valid command_source followed by a rejected parameter must change
+    nothing, or the forwarded source and the readable one would disagree."""
+    n = _node("teleop")
+    result = n._on_set_parameters([
+        _P("command_source", "m4"), _P("stop_zone_enabled", False),
+    ])
+    assert result.successful is False
+    assert n._command_source == "teleop"
+    assert n._is_killed is False and n._kill_writes == []
+
+    result = n._on_set_parameters([
+        _P("command_source", "m4"), _P("command_source", "bogus"),
+    ])
+    assert result.successful is False
+    assert n._command_source == "teleop" and n._kill_writes == []
+
+    # And a set that is valid throughout applies the LAST value, once.
+    result = n._on_set_parameters([
+        _P("command_source", "m8v2"), _P("command_source", "m4"),
+    ])
+    assert result.successful is True
+    assert n._command_source == "m4" and n._kill_writes == [True]
 
 
 def test_reselecting_the_current_row_does_not_kill() -> None:

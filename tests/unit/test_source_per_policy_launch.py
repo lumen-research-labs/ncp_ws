@@ -77,6 +77,14 @@ def test_resolver_refuses_bad_lists_and_multi_profile_overrides() -> None:
         assert needle in body, needle
 
 
+def test_launch_refuses_a_command_source_whose_node_it_does_not_start() -> None:
+    src = _read(_LAUNCH)
+    body = src[src.index("def _policy_consumer("):src.index("def generate_launch_description(")]
+    assert 'LaunchConfiguration("command_source")' in body
+    assert "selected not in started" in body
+    assert body.index("selected not in started") < body.index("Node(")
+
+
 def test_upstream_consumer_needs_m8v2_first_and_publishes_on_the_policy_row() -> None:
     src = _read(_LAUNCH)
     body = src[src.index("def _upstream_process("):src.index("def _resolve_profiles(")]

@@ -110,6 +110,14 @@ def test_goals_go_to_every_running_policy() -> None:
     assert 'f"/{source.node}/set_parameters_atomically"' in src
 
 
+def test_map_click_refuses_a_policy_whose_debug_stream_is_stale() -> None:
+    src = _read(_NODE)
+    body = src[src.index("def _set_goal_from_world("):src.index("def _reset_odom(")]
+    stale = body.index("is_live(topics.get(self._sources[name].debug))")
+    assert stale < body.index("self._retarget(")
+    assert "stale" in body[stale:stale + 600]
+
+
 def test_manual_paths_refuse_on_any_policy_kind_source() -> None:
     src = _read(_NODE)
     for fn in ("def _send_jog(", "def _send_waypoint("):

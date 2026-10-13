@@ -116,9 +116,11 @@ not accepted and silently ignored, which is what it used to do.
 The value is validated against the table at startup and on every set. A name
 that is not a row is refused with the row names in the reason. The table
 itself (`topics_path`, default `config/topics.yaml`) is read once; a table
-that names `/cmd_vel` as an input, lists one topic twice, or lacks a `teleop`
-row is fatal at startup. `tests/unit/test_command_sources.py` pins the rows
-and the refusals.
+that names `/cmd_vel` as an input or a debug stream, lists one topic or one
+row twice, or lacks a `teleop` row is fatal at startup. A set that carries
+several parameters is validated whole before `command_source` is applied, so
+the forwarded row and the readable one cannot disagree.
+`tests/unit/test_command_sources.py` pins the rows and the refusals.
 
 ### Two zones, two arcs
 

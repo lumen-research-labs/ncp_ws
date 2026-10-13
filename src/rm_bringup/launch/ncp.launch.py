@@ -527,6 +527,18 @@ def _policy_consumer(context):
     static Node actions because everything depends on `profiles`."""
     profiles = _resolve_profiles(context)
     _first, _source, first_interface, _weights = profiles[0]
+    # A command_source naming a policy row whose node this launch does not
+    # start would come up forwarding nothing: zero forever with reason
+    # command_timeout. Fail-closed, but a confusing bring-up; refuse it here.
+    selected = context.perform_substitution(LaunchConfiguration("command_source"))
+    started = {name for name, _s, _i, _w in profiles}
+    row = _SOURCES.get(selected)
+    if row is not None and row.node is not None and selected not in started:
+        raise RuntimeError(
+            f"command_source:={selected} names {row.node}, but profiles:= "
+            f"({', '.join(started)}) does not start it. Add it to profiles:= "
+            f"or select a source that will be publishing."
+        )
     nodes = [
         Node(
             package="rm_policy",

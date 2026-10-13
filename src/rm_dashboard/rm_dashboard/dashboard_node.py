@@ -1075,6 +1075,18 @@ class DashboardNode(rclpy.node.Node):
             pose = debug.get("pose")
             pose_source = debug.get("pose_source")
             node = self._sources[name].node
+            # A pose from a stalled stream is a pose from the past, and the
+            # offset would land the goal relative to where the robot WAS.
+            if not is_live(topics.get(self._sources[name].debug)):
+                offsets[name] = {
+                    "ok": False,
+                    "error": (
+                        f"refused: {self._sources[name].debug} is stale, so "
+                        f"{node}'s last pose cannot be trusted for the "
+                        f"conversion. Use the robot-frame offset box, or wait."
+                    ),
+                }
+                continue
             if not isinstance(pose, (list, tuple)) or len(pose) != 3:
                 offsets[name] = {
                     "ok": False,

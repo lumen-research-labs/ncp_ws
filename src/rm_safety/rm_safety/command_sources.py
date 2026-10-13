@@ -8,8 +8,12 @@ What it does:
     refuses any table that could route around the safety layer or that the
     rest of the stack could misread:
 
-      * a row whose topic is /cmd_vel (an input that IS the output);
-      * two rows on one topic, one debug stream, or one node name;
+      * a row whose topic or debug stream is /cmd_vel (the table's own
+        base_driver.cmd_vel): an input that IS the output, or a second
+        publisher on it;
+      * two rows on one topic, one debug stream, or one node name, and a
+        YAML document that names one row twice (PyYAML would otherwise keep
+        the last silently);
       * no `teleop` row, or a `teleop` row that is not of kind teleop (it is
         the startup default and the direction every switch falls back to);
       * a kind other than "teleop" / "policy";
@@ -60,6 +64,27 @@ TELEOP_SOURCE = "teleop"
 BASE_CMD_VEL_TOPIC = "/cmd_vel"
 
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+class _StrictLoader(yaml.SafeLoader):
+    """SafeLoader that refuses a mapping with a repeated key.
+
+    PyYAML keeps the LAST of two `m4:` rows and says nothing. For a table
+    whose rows decide what the safety layer forwards, that silence is the
+    failure mode this loader exists to remove.
+    """
+
+    def construct_mapping(self, node, deep=False):
+        seen = set()
+        for key_node, _value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise ValueError(
+                    f"topics.yaml: key {key!r} appears twice in one mapping "
+                    f"(line {key_node.start_mark.line + 1})"
+                )
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
 _TOPIC_RE = re.compile(r"^/[A-Za-z0-9_/]+$")
 _NODE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
@@ -87,6 +112,15 @@ def parse_command_sources(raw: Any) -> Dict[str, CommandSource]:
     table = raw["command_sources"]
     if not table:
         raise ValueError("topics.yaml: `command_sources` is empty")
+    # The output topic, from the same document, so the two cannot drift.
+    # It must still BE /cmd_vel: rm_safety publishes that name, and a table
+    # claiming otherwise would let a row take the real one.
+    base = (raw.get("base_driver") or {}).get("cmd_vel", BASE_CMD_VEL_TOPIC)
+    if base != BASE_CMD_VEL_TOPIC:
+        raise ValueError(
+            f"topics.yaml: base_driver.cmd_vel is {base!r}; rm_safety publishes "
+            f"{BASE_CMD_VEL_TOPIC} and nothing else"
+        )
 
     out: Dict[str, CommandSource] = {}
     for name, row in table.items():
@@ -116,6 +150,11 @@ def parse_command_sources(raw: Any) -> Dict[str, CommandSource]:
             raise ValueError(f"topics.yaml: {name}.node must be a bare node name, got {node!r}")
         if debug is not None and (not isinstance(debug, str) or not _TOPIC_RE.match(debug)):
             raise ValueError(f"topics.yaml: {name}.debug must be an absolute topic, got {debug!r}")
+        if debug == BASE_CMD_VEL_TOPIC:
+            raise ValueError(
+                f"topics.yaml: {name}.debug is {BASE_CMD_VEL_TOPIC}; a debug stream "
+                f"there would be a second publisher on the output topic"
+            )
         if node is not None and kind != KIND_POLICY:
             raise ValueError(f"topics.yaml: {name} has a node but is not a policy row")
         if node is not None and debug is None:
@@ -149,7 +188,7 @@ def parse_command_sources(raw: Any) -> Dict[str, CommandSource]:
 def load_command_sources(path: str = DEFAULT_TOPICS_PATH) -> Dict[str, CommandSource]:
     """Load and validate the table from `path`. Raises on any problem."""
     with open(path, "r", encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh)
+        raw = yaml.load(fh, Loader=_StrictLoader)
     return parse_command_sources(raw)
 
 
