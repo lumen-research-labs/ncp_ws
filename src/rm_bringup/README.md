@@ -26,19 +26,27 @@
 ```
 /scan (TG30, ~2000 pts, 360°)
       │
-      ├─ scan_bridge_node ──► /ncp/scan (720 beams, 270°)  [upstream consumer only]
+      ├─ scan_bridge_node ──► /ncp/scan (first profile's beams)  [upstream consumer only]
       │
-      └─ consumer ──► /policy/cmd_vel ──► rm_safety ──► /cmd_vel ──► rm_base ──► wheels
+      ├─ policy_node_m8v2 ──► /policy/m8v2/cmd_vel ──┐
+      │                                               ├──► rm_safety ──► /cmd_vel ──► rm_base ──► wheels
+      └─ policy_node_m4   ──► /policy/m4/cmd_vel   ──┘    (command_source picks ONE row)
 ```
+
+Node names, command topics and debug streams come from `config/topics.yaml`
+`command_sources`, the table `rm_safety` validates `command_source` against
+and the dashboard draws its source buttons from (loader:
+`rm_safety/command_sources.py`). Every listed policy runs at once; switching
+the live one is a parameter set, never a restart.
 
 | argument | default | what it does |
 |---|---|---|
-| `command_source` | **`teleop`** | `policy` lets `/policy/cmd_vel` drive. Defaults to `teleop` so bringing the stack up to watch it **cannot** reach the base driver. |
+| `command_source` | **`teleop`** | A `config/topics.yaml` row: `teleop`, `policy`, `m8v2` or `m4`. Defaults to `teleop` so bringing the stack up to watch it **cannot** reach the base driver. Any other name is refused. |
 | `consumer` | `policy_node` | Or `upstream` — runs `NCP-on-Rosmaster/rosmaster/node.py` unmodified, the only way to get its `mode:=debug` reactive rule. |
 | `mode` | `debug` | Only meaningful for `consumer:=upstream`. `debug` = reactive rule drives, NCP runs in shadow. `ncp` = the network drives. |
-| `profile` | **`m8v2`** | Which trained policy: `m8v2` (720 beams over 270°, interface 4.0.0, `actor.pt`) or `m4` (32 over 180°, 3.0.0, `actor_m4.pt`). One argument switches contract and checkpoint together; the dashboard header shows what is live. `consumer:=upstream` is refused on any profile but `m8v2`. |
-| `interface_config_path` | from the profile | Contract file override. Rarely needed. |
-| `weights` | the profile's checkpoint | `weights:=''` is the explicit opt-in to **random weights**. A checkpoint of the other profile's width refuses to load. |
+| `profiles` | **`m8v2,m4`** | Which trained policies to run, each as its own node on its own row: `m8v2` (720 beams over 270°, interface 4.0.0, `actor.pt`) and `m4` (32 over 180°, 3.0.0, `actor_m4.pt`). The scan bridge serves the first listed. `consumer:=upstream` needs `m8v2` first. The dashboard header shows which policy is live. |
+| `interface_config_path` | from the table | Contract file override for one profile; pass `profiles:=<one>` with it. |
+| `weights` | the profile's checkpoint | For one profile (`profiles:=<one>`). `weights:=''` is the explicit opt-in to **random weights**. A checkpoint of the other profile's width refuses to load. |
 | `dry_run` | **`false`** | Note this differs from `base.launch.py`'s own default of `true`: bringing up the full stack implies intent to drive. |
 | `control_mode` | `closed_loop` | The floor-validated path. |
 | `with_lidar` / `with_base` / `with_odom` | `true` | Turn off only if already running. |

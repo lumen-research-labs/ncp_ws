@@ -29,8 +29,12 @@ OUT="${HOME}/ncp_ws/bags/${NAME}_${STAMP}"
 # The set is deliberate:
 #   /scan            the full-resolution truth the safety layer acts on
 #   /ncp/scan        the policy's beams, to confirm the resampler agrees
-#   /ncp_debug       the observation, action, goal and pose policy_node used
-#   /policy/cmd_vel  what was asked for
+#   /ncp_debug/*     the observation, action, goal and pose each policy node
+#                    used (one stream per config/topics.yaml policy row;
+#                    /ncp_debug itself is the upstream consumer's)
+#   /policy/*/cmd_vel  what each policy asked for; rm_safety forwarded the
+#                    one named by command_source (/safety/status says which
+#                    state it was in, the bag's /cmd_vel says what got through)
 #   /cmd_vel         what was allowed -- the pair is the whole clamp story
 #   /safety/status   state, reason and min_range per tick
 #   /base/debug      per-wheel target/measured/pwm and the flags
@@ -38,8 +42,10 @@ OUT="${HOME}/ncp_ws/bags/${NAME}_${STAMP}"
 #   /imu/data_raw    raw IMU, so a future SLAM/EKF comparison has its input
 #   /tf /tf_static   frames, needed for any map-frame work later
 TOPICS=(
-  /scan /ncp/scan /ncp_debug
-  /policy/cmd_vel /cmd_vel /teleop/cmd_vel
+  /scan /ncp/scan
+  /ncp_debug /ncp_debug/m8v2 /ncp_debug/m4
+  /policy/cmd_vel /policy/m8v2/cmd_vel /policy/m4/cmd_vel
+  /teleop/cmd_vel /cmd_vel
   /safety/status /base/debug
   /odom /vel_raw /imu/data_raw /voltage
   /tf /tf_static

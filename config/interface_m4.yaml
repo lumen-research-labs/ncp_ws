@@ -1,9 +1,10 @@
 # PROFILE m4 — the 3.0.0 contract for the M4 checkpoint (32 beams over 180 deg).
-# Select it with `ncp.launch.py profile:=m4`. config/interface.yaml is the
-# default profile (m8v2, 4.0.0). The two files differ only in the lidar block,
-# the checkpoint block and the version; goal, previous_action, action and the
-# control rate are identical. See docs/operating_guide.md "Choosing the
-# policy profile".
+# ncp.launch.py runs it as policy_node_m4 whenever `profiles:=` lists m4
+# (the default list is m8v2,m4); `command_source:=m4` or the dashboard's m4
+# button makes it the live one. config/interface.yaml is the m8v2 (4.0.0)
+# contract. The two files differ only in the lidar block, the checkpoint
+# block and the version; goal, previous_action, action and the control rate
+# are identical. See docs/operating_guide.md "Choosing the policy".
 #
 # THE FROZEN CONTRACT — obs/action interface for the ROSMASTER X3 policy pipeline.
 #
