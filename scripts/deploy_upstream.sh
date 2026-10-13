@@ -24,7 +24,8 @@
 # then the robot runs a different policy than the workstation believes. So
 # every transferred file's sha256 is compared afterwards, and the script exits
 # non-zero on any mismatch. The checkpoint hash printed here is the same one
-# policy_node logs at startup and publishes on /ncp_debug, so all three can be
+# policy_node logs at startup and publishes on its debug stream
+# (/ncp_debug/<profile>), so all three can be
 # eyeballed against each other.
 #
 # Transfers ONLY. Never builds, never launches, never touches a ROS node.
@@ -172,6 +173,6 @@ CKPT_SHA="$(sha256sum "${SRC}/weights/actor.pt" | cut -d' ' -f1)"
 echo "==> Deployed and verified."
 echo "    checkpoint sha256 = ${CKPT_SHA}"
 echo "    policy_node logs this same hash at startup and publishes its first"
-echo "    12 chars on /ncp_debug. If they ever disagree, the robot is running"
+echo "    12 chars on /ncp_debug/<profile>. If they ever disagree, the robot is running"
 echo "    a different checkpoint than this workstation thinks."
 echo "    Not built, not launched -- those remain operator-supervised steps."

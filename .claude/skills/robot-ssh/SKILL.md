@@ -264,7 +264,9 @@ first.
 - **Never start `cpt_b2_engine`.** It publishes `/cmd_vel` directly with no
   safety layer and moves the robot the instant it starts. Concurrent with
   `rm_safety` it is two publishers on `/cmd_vel`.
-- **Never publish to `/cmd_vel` or `/policy/cmd_vel`** from a remote command.
+- **Never publish to `/cmd_vel` or any command-source topic** (`/teleop/cmd_vel`,
+  `/policy/cmd_vel`, `/policy/m8v2/cmd_vel`, `/policy/m4/cmd_vel`) from a
+  remote command.
 - **Never run teleop or any test that moves the robot.** There is no physical
   E-stop; `/safety/kill` is the only stop and battery pull is the last resort.
   Anything that moves the base requires a human operator with a kill switch in

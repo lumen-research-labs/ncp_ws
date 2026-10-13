@@ -97,7 +97,8 @@ ncp_ws/
 ├── config/
 │   ├── interface.yaml      # THE FROZEN CONTRACT — obs/action shape, units, control rate
 │   ├── safety_limits.yaml  # clamps, e-stop distances, timeouts
-│   └── topics.yaml         # canonical topic names
+│   └── topics.yaml         # the command-source table: the rows rm_safety
+│                           #   forwards; the launch and dashboard read it too
 ├── src/
 │   ├── rm_interfaces/  # custom msg/srv defs (ROBOT + WORKSTATION)
 │   ├── rm_safety/      # ROBOT — sole publisher of /cmd_vel
@@ -119,9 +120,12 @@ ncp_ws/
 ```
 
 Key interfaces / contracts:
-- **`/cmd_vel`** — published ONLY by `rm_safety`. All other sources
-  (`/policy/cmd_vel`, `/teleop/cmd_vel`) are inputs to the safety node, not
-  direct paths to the base driver.
+- **`/cmd_vel`** — published ONLY by `rm_safety`. All other sources (the
+  rows of `config/topics.yaml` `command_sources`: `/teleop/cmd_vel`,
+  `/policy/cmd_vel`, `/policy/m8v2/cmd_vel`, `/policy/m4/cmd_vel`) are
+  inputs to the safety node, not direct paths to the base driver.
+  `rm_safety/command_sources.py` is the table's loader; `rm_safety`
+  subscribes to every row and forwards the one named by `command_source`.
 - **`config/interface.yaml`** — the frozen obs/action contract. A shared
   schema loader (imported by both robot and workstation code) is the single
   source of ordering — never hand-written twice. `interface_version` bumps
@@ -1726,6 +1730,38 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     read 0.15 m — the chassis standoff leaking past the mask's -135 edge via
     the search window. Widen the right zone past the arc edge.
 
+- 2026-10-13: **SWITCH THE LIVE POLICY FROM THE DASHBOARD (branch
+  `feat/source-per-policy` on top of fix/uniform-velocity-clamp; commits
+  8e69291, 380dae0, e84a98a, d763433, c7ff2a5).** `config/topics.yaml`
+  `command_sources` is now a live table of rows (`teleop`, `policy`, `m8v2`,
+  `m4`: topic, kind, and for our policy nodes a node name and debug stream),
+  loaded and validated by the new `rm_safety/command_sources.py` (refuses
+  `/cmd_vel` as an input, duplicate topics/streams/nodes, a missing or
+  mis-kinded `teleop` row, malformed rows). `safety_node` subscribes to every
+  row into its own buffer, forwards only the row `command_source` names, and
+  validates that name against the table at startup and on every runtime set
+  (still force-killing on change); the policy-only lateral check follows the
+  row's kind; `safety_logic.py` untouched. `ncp.launch.py profile:=` became
+  `profiles:=` (default `m8v2,m4`): one `policy_node_<name>` per profile on
+  its row's topic and debug stream, the scan bridge on the first listed,
+  `consumer:=upstream` on the `policy` row and needing `m8v2` first. The
+  dashboard builds one source button per row (a policy button greys until its
+  node publishes), follows an ACTIVE policy for the header, observation,
+  chain and command table (`rm_dashboard/sources.py`: the selected source if
+  a policy row, else the last selected, else the first live), and sends goal
+  re-targets, map-click goals and RESET MAP's re-fix to EVERY running policy
+  through its own `/<node>/set_parameters_atomically` (map clicks converted
+  against each policy's own pose); jog and waypoint refuse while any policy
+  row is selected. `record_run.sh` records every row's topics; `pose_ab.py`
+  gained `--policy`. Cruft archived (c7ff2a5): the three unread
+  `topics.yaml` keys. 564 workstation tests. **Hardware verification
+  pending** (robot was unreachable at the time of writing); the intended
+  check is both policy topics at 5 Hz, two debug streams, one `/cmd_vel`
+  publisher, the safety log naming four sources, and a source switch through
+  the dashboard API landing KILLED. Design note: the loader lives in
+  `rm_safety` because the safety node is the table's authority; the launch
+  and the dashboard import it, never the reverse.
+
 ## 4. Current Goal
 
 **INTERFACE 4.0.0 — THE FULL-SENSOR POLICY (2026-10-08, branch
@@ -1742,10 +1778,14 @@ so `policy_node` and `scan_bridge_node` read the lidar block from
 `interface.yaml` in one place and refuse to start if it disagrees with the
 vendored constants. Safety, base, clamps and zones are untouched. Upstream
 `~/lumen/ncp` carries the matching change on `feat/720-beam-270fov` @
-`bc1099d`. Hardware status is in the §3 entry for 2026-10-08. **Both policies are
-deployable: `run_stack.sh profile:=m4` (3.0.0, `config/interface_m4.yaml`,
-`actor_m4.pt`) or the default `m8v2`; the dashboard header shows which is
-live, and `policy_node` builds the network to the selected contract's width.**
+`bc1099d`. Hardware status is in the §3 entry for 2026-10-08. **Both policies
+run at once (branch `feat/source-per-policy`, 2026-10-13): `ncp.launch.py
+profiles:=m8v2,m4` (the default) starts `policy_node_m8v2` and
+`policy_node_m4` on their own `config/topics.yaml` rows, and `command_source`
+(`teleop` / `policy` / `m8v2` / `m4`, the dashboard's source buttons) picks
+the one `rm_safety` forwards. A switch is a parameter set, force-kills as
+before, and never restarts the stack. Goals re-target every running policy.
+The dashboard header names the policy the page follows.**
 
 **THE NCP DEBUG TEST HAS RUN END TO END ON HARDWARE (2026-08-29 s2).** One
 command brings up the whole stack, the policy drives the wheels through

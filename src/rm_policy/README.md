@@ -3,7 +3,8 @@
 **Runs on: the robot.** Turns raw sensor data into the trained network's
 observation, runs the network, and publishes a *candidate* command.
 
-> `rm_policy` publishes `/policy/cmd_vel`. It has **no route to `/cmd_vel`** —
+> `rm_policy` publishes its `cmd_vel_topic` (`/policy/<profile>/cmd_vel` under
+> `ncp.launch.py`, one node per profile). It has **no route to `/cmd_vel`** —
 > that topic belongs to `rm_safety`. `policy_node` refuses to start if its
 > `cmd_vel_topic` parameter resolves to `/cmd_vel`.
 
