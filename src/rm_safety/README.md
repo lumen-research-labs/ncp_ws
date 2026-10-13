@@ -20,6 +20,7 @@ from that one fact.
 |---|---|
 | `rm_safety/safety_logic.py` | The decision core. **Pure**: no ROS, no I/O, no clock reads, no logging. One function, `evaluate()`, takes a snapshot and returns a `Decision`. |
 | `rm_safety/safety_node.py` | The ROS2 shell. Owns the timer, the subscriptions, the services, the kill-state file — and the sole `/cmd_vel` publisher. |
+| `rm_safety/command_sources.py` | The command-source table, loaded and validated from `config/topics.yaml`. Pure. `ncp.launch.py` and `rm_dashboard` import it so all three agree on every name and topic; nothing here imports them. |
 
 The split is deliberate and must not be collapsed. `safety_logic` has no clock
 and no I/O, so every safety decision in the system is reachable from a unit
@@ -31,22 +32,26 @@ and the replay tier possible.
 ## The pipeline
 
 ```
-/policy/cmd_vel  ─┐
-/teleop/cmd_vel  ─┤
-/scan            ─┼──►  safety_node  ──►  safety_logic.evaluate()  ──►  /cmd_vel
-/odom            ─┘                                    │
-                                                       └──►  /safety/status
+/teleop/cmd_vel       ─┐  one subscription per row of
+/policy/cmd_vel       ─┤  config/topics.yaml command_sources
+/policy/m8v2/cmd_vel  ─┤
+/policy/m4/cmd_vel    ─┼──►  safety_node  ──►  safety_logic.evaluate()  ──►  /cmd_vel
+/scan                 ─┤                                    │
+/odom                 ─┘                                    └──►  /safety/status
 ```
 
 **Only ONE command input is live at a time**, selected by the `command_source`
-parameter (`"teleop"` or `"policy"`). The other is ignored entirely — it is not
-merged, arbitrated, or fallen back to.
+parameter, which names a row of the table (`teleop`, `policy`, `m8v2`, `m4`).
+The others are ignored entirely. They are not merged, arbitrated, or fallen
+back to. The row's `kind` (`teleop` or `policy`) decides whether the
+policy-only checks apply, so a new policy row gets the lateral-velocity check
+without any change here.
 
 ### Topics and services
 
 | | |
 |---|---|
-| Subscribes | `/policy/cmd_vel`, `/teleop/cmd_vel` (Twist) · `/scan` (LaserScan) · `/odom` (Odometry) |
+| Subscribes | every `command_sources` row's `topic` (Twist) · `/scan` (LaserScan) · `/odom` (Odometry) |
 | Publishes | **`/cmd_vel`** (Twist) @ 20 Hz — sole publisher · `/safety/status` (`rm_interfaces/SafetyStatus`) @ 10 Hz |
 | Services | `/safety/kill` (`std_srvs/Trigger`) · `/safety/reset` (`std_srvs/Trigger`) |
 
@@ -108,6 +113,13 @@ Arming stays a separate, explicit act. Every *other* parameter on this node is
 read once at startup and a runtime `param set` is **rejected** with a reason —
 not accepted and silently ignored, which is what it used to do.
 
+The value is validated against the table at startup and on every set. A name
+that is not a row is refused with the row names in the reason. The table
+itself (`topics_path`, default `config/topics.yaml`) is read once; a table
+that names `/cmd_vel` as an input, lists one topic twice, or lacks a `teleop`
+row is fatal at startup. `tests/unit/test_command_sources.py` pins the rows
+and the refusals.
+
 ### Two zones, two arcs
 
 The slow zone and the stop zone have **separate arcs**, and this is not an
@@ -131,8 +143,8 @@ couplings are pinned by `tests/unit/test_safety_arc_split.py`.
 Interface 4.0.0 has a 2-dim action `[vx, wz]` — no strafe. But `max_vy` and the
 lateral e-stop arcs remain, because **`/teleop/cmd_vel` is also an input** and
 an operator may legitimately strafe while repositioning. A non-zero `linear.y`
-arriving on `/policy/cmd_vel` is treated as a **bug, not a command**: zeroed and
-warned about, never silently clamped.
+arriving on any `policy`-kind row is treated as a **bug, not a command**: zeroed
+and warned about (naming the topic), never silently clamped.
 
 ### The authority gap is intentional
 
@@ -202,7 +214,9 @@ hard is always safe; ramping down a stop is not.
 `config/safety_limits.yaml` is the **only** source of numeric limits. No numeric
 literal appears in a logic body. The node loads it at runtime via
 `Limits.from_dict()` and **raises on init** if it cannot be read or parsed — it
-never starts in an unknown-limits state.
+never starts in an unknown-limits state. `config/topics.yaml` is the only
+source of command-source names and topics, loaded the same way through
+`command_sources.load_command_sources()`.
 
 ## Failure mode
 

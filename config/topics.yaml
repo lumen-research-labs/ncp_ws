@@ -1,9 +1,36 @@
-# Canonical topic names — single source of truth.
+# Topic names, and THE COMMAND-SOURCE TABLE.
 #
 # The central invariant: /cmd_vel has exactly ONE publisher, rm_safety.
 # Command sources publish to namespaced INPUT topics and have no route to the
 # base driver. Anything that adds a second publisher to /cmd_vel is a bug,
 # not a shortcut.
+#
+# `command_sources` is LIVE CONFIGURATION, read at startup by three things:
+#   * rm_safety/safety_node   subscribes to every row and forwards the ONE
+#                             row named by its `command_source` parameter;
+#                             a name not in this table is refused, at startup
+#                             and at runtime (rm_safety/command_sources.py is
+#                             the loader and validator).
+#   * rm_bringup/ncp.launch.py  starts one policy node per `profiles:=` entry,
+#                             named and topic'd from the row of the same name.
+#   * rm_dashboard            renders one source button per row, follows the
+#                             active policy's `debug` stream, and re-targets
+#                             goals on every row that has a `node`.
+# Adding a policy is a row here, a profile in ncp.launch.py's _PROFILES table,
+# a contract file and a checkpoint. Everything else follows the table.
+#
+# Row fields:
+#   topic        the Twist topic rm_safety subscribes to. Never /cmd_vel.
+#   kind         "teleop" (an operator path: gamepad, waypoints, WASD jog) or
+#                "policy" (a network drives; linear.y is a bug, not a command).
+#   node         the rm_policy policy_node that publishes the row, when one of
+#                ours does. The dashboard re-targets goals through
+#                /<node>/set_parameters_atomically. Omit for rows published by
+#                something that takes no goal (the upstream consumer, the
+#                bench tools).
+#   debug        the node's one-line JSON status stream (observation, action,
+#                pose, checkpoint hash). Policy rows only.
+#   description  shown as the dashboard button's tooltip.
 #
 # !! The previous team's stack (LumenLabs/firmware, cpt_b2) publishes /cmd_vel
 # !! DIRECTLY from cpt_b2_engine, with no safety layer — its e-stop is a
@@ -16,13 +43,34 @@ base_driver:
   cmd_vel: /cmd_vel
 
 command_sources:
-  # Inputs to rm_safety. Never connected directly to the base driver.
-  policy: /policy/cmd_vel
-  teleop: /teleop/cmd_vel
-
-debug:
-  # Where rm_policy publishes when dry_run is true (which is the default).
-  policy_cmd_vel_debug: /policy/cmd_vel_debug
+  # The default and the safe direction: everything an operator drives with.
+  # Must exist, must be kind teleop. rm_safety starts here.
+  teleop:
+    topic: /teleop/cmd_vel
+    kind: teleop
+    description: gamepad, waypoints and the WASD jog (rm_waypoint)
+  # The upstream NCP-on-Rosmaster consumer (consumer:=upstream) and the bench
+  # and calibration tools (scripts/diagnostics/*, drive_test.sh) publish here.
+  # No node: nothing on this row takes a goal.
+  policy:
+    topic: /policy/cmd_vel
+    kind: policy
+    debug: /ncp_debug
+    description: upstream consumer (consumer:=upstream) or a bench tool
+  # One row per trained policy. ncp.launch.py starts policy_node_<name> on
+  # these topics for every profile listed in profiles:= (default both).
+  m8v2:
+    topic: /policy/m8v2/cmd_vel
+    kind: policy
+    node: policy_node_m8v2
+    debug: /ncp_debug/m8v2
+    description: M8-v2, 720 beams over 270 deg, interface 4.0.0 (ignores the goal)
+  m4:
+    topic: /policy/m4/cmd_vel
+    kind: policy
+    node: policy_node_m4
+    debug: /ncp_debug/m4
+    description: M4, 32 beams over 180 deg, interface 3.0.0 (steers to the goal)
 
 sensors:
   # Names below are the previous team's OBSERVED topics on this exact
@@ -58,13 +106,7 @@ sensors:
 
 status:
   safety: /safety/status
-  policy: /policy/status
 
 services:
   safety_kill: /safety/kill
   safety_reset: /safety/reset
-
-foreign:
-  # Topics owned by the previous team's stack. Listed so nothing of ours ever
-  # collides with them. We do not publish or subscribe to any of these.
-  cpt_namespace: /cpt/*
