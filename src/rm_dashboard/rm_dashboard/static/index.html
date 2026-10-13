@@ -547,7 +547,8 @@ function renderScan(snap){
     });
   }
   // goal bearing, from the active policy's own observation
-  const dbg = val(snap, activePolicy(snap).debug);
+  const ap = activePolicy(snap);
+  const dbg = val(snap, ap.debug);
   if(dbg && dbg.goal_local_m){
     const [gx,gy] = dbg.goal_local_m;
     const a = Math.atan2(gy,gx), d = Math.hypot(gx,gy);
@@ -874,7 +875,8 @@ function renderMap(snap){
   }
 
   // the active policy's goal, in the map frame
-  const dbg = val(snap, activePolicy(snap).debug);
+  const ap = activePolicy(snap);
+  const dbg = val(snap, ap.debug);
   if(dbg && dbg.goal_world_m && dbg.pose_source === "map"){
     marker(ctx, mapView.toCanvas(dbg.goal_world_m[0], dbg.goal_world_m[1]),
            "#f0883e", "goal");
