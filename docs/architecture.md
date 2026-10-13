@@ -37,9 +37,16 @@ Every other source of motion publishes to an *input* topic and reaches the
 wheels only through the safety layer:
 
 ```
-/policy/cmd_vel  ── policy_node
-/teleop/cmd_vel  ── gamepad, rm_waypoint (waypoints + WASD jog)
+/policy/m8v2/cmd_vel  ── policy_node_m8v2
+/policy/m4/cmd_vel    ── policy_node_m4
+/policy/cmd_vel       ── the upstream consumer, the bench tools
+/teleop/cmd_vel       ── gamepad, rm_waypoint (waypoints + WASD jog)
 ```
+
+These rows live in `config/topics.yaml` `command_sources`, loaded by
+`rm_safety/command_sources.py`. `rm_safety` subscribes to every row and
+forwards the one named by `command_source`; the launch starts a policy node
+per row that has one; the dashboard draws a button per row.
 
 There is **no bypass for anyone**, including the operator. Manual driving sits
 behind the same clamps, arcs, acceleration limiter and kill as the policy.
@@ -111,7 +118,7 @@ YDLIDAR TG30  ──►  /scan  (~2000 pts, 360°, 10.1 Hz)
       │               │                           │
       └───► pose ─────┤                           │
                       ▼                           │
-              /policy/cmd_vel ────────────────────┤
+              /policy/<p>/cmd_vel (one per policy) ─┤
                                                   │
    gamepad ──┐                                    │
    waypoint ─┴──► /teleop/cmd_vel ────────────────┘
@@ -134,7 +141,7 @@ It is a leaf; nothing depends on it.
 | topic | rate | why that rate |
 |---|---|---|
 | `/scan` | 10.1 Hz | the sensor |
-| `/policy/cmd_vel` | **5 Hz** | half the sensor rate — 10 Hz has no headroom, 5 Hz gives 2:1 margin and matches the previous team's stack |
+| `/policy/<p>/cmd_vel` | **5 Hz** | half the sensor rate — 10 Hz has no headroom, 5 Hz gives 2:1 margin and matches the previous team's stack |
 | `/cmd_vel` | 20 Hz | the safety republish rate; must be ≥ `zero_publish_rate_hz` for the continuous-zero-when-killed guarantee |
 | `/odom` | 30 Hz | the EKF |
 | `/base/debug` | 20 Hz | the base control tick |

@@ -131,11 +131,13 @@ def test_goal_map_refuses_a_frame_mismatch_rather_than_converting():
     src = _read(_DASHBOARD_NODE)
     handler = src.split("def _set_goal_from_world")[1].split("def _reset_odom")[0]
     assert "expected_frame" in handler
-    # The refusal must come BEFORE anything is written to policy_node, or a
+    # The refusal must come BEFORE anything is written to a policy node, or a
     # mismatched frame would set the goal and then report an error about it.
+    # (_retarget is the one path that writes; it takes the per-policy
+    # refusals alongside the offsets and never sends a refused one.)
     refusal = handler.index('if frame != expected_frame:')
-    assert refusal < handler.index("_set_params")
-    branch = handler[refusal:handler.index("_set_params")]
+    assert refusal < handler.index("self._retarget(")
+    branch = handler[refusal:handler.index("self._retarget(")]
     assert '"ok": False' in branch
     assert "refused" in branch
 

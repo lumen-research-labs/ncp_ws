@@ -52,8 +52,9 @@ Checked in deliberately, so the knowledge is not stuck on one laptop:
 
 **`/cmd_vel` has exactly one publisher: `rm_safety`.**
 
-Command sources (`/policy/cmd_vel`, `/teleop/cmd_vel`) are *inputs* to the
-safety node and have no route to the base driver. That includes manual
+Command sources (`/policy/m8v2/cmd_vel`, `/policy/m4/cmd_vel`,
+`/policy/cmd_vel`, `/teleop/cmd_vel`, the rows of `config/topics.yaml`) are
+*inputs* to the safety node and have no route to the base driver. That includes manual
 driving — the gamepad, waypoints and the WASD jog all publish
 `/teleop/cmd_vel`, so they sit behind the same clamps, e-stop arcs,
 acceleration limiter and kill as the policy.
@@ -66,8 +67,9 @@ letting the last command persist.
 ## The stack
 
 ```
-YDLIDAR TG30 ──► /scan ──┬──► policy_node ──► /policy/cmd_vel ──┐
-                         │                                       ├──► rm_safety ──► /cmd_vel ──► rm_base ──► wheels
+YDLIDAR TG30 ──► /scan ──┬──► policy_node_m8v2 ──► /policy/m8v2/cmd_vel ──┐
+                         ├──► policy_node_m4   ──► /policy/m4/cmd_vel   ──┤  (command_source picks ONE)
+                         │                                                 ├──► rm_safety ──► /cmd_vel ──► rm_base ──► wheels
                          ├──► scan_sanitizer ──► slam_toolbox     │
                          │                       (pose)           │
                          └──► rm_safety (e-stop, full resolution)  │
@@ -102,7 +104,7 @@ YDLIDAR TG30 ──► /scan ──┬──► policy_node ──► /policy/cm
 | `ROS_DOMAIN_ID` | **28** (both machines) |
 | Lidar | YDLIDAR **TG30** (TOF), 360°, ~10.1 Hz. Encodes no-returns as `0.0`, not `inf`. |
 | Robots | `bernard-1` at `192.168.4.100` (the working unit) · `bernard-2` at `bernard-2.local` |
-| Policy profiles | **`m8v2`** (default): interface **4.0.0**, 724-dim observation, 720 beams over 270° · `m4`: interface 3.0.0, 36-dim, 32 beams over 180°. `run_stack.sh profile:=m4` switches. Action is `[vx, wz]` in both. |
+| Policies | `m8v2`: interface **4.0.0**, 724-dim observation, 720 beams over 270° · `m4`: interface 3.0.0, 36-dim, 32 beams over 180°. Both run by default; `command_source` (a dashboard button) picks the one that drives. Action is `[vx, wz]` in both. |
 
 `bernard-1` has **no internet** and its clock resets ~3 months behind on every
 boot. Everything reaches it from the workstation over LAN.
@@ -150,7 +152,7 @@ Nothing can move yet — `rm_safety` starts **KILLED** and `command_source`
 defaults to `teleop`. Arming takes two deliberate acts:
 
 ```bash
-ros2 param set /safety_node command_source policy   # this force-kills
+ros2 param set /safety_node command_source m8v2   # or m4; this force-kills
 ros2 service call /safety/reset std_srvs/srv/Trigger
 ```
 

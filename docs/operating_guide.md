@@ -161,8 +161,10 @@ bash scripts/run_stack.sh command_source:=teleop with_slam:=true
 not get from `~/.bashrc`, sets `ROS_DOMAIN_ID=28`, and passes every argument
 straight through to `ncp.launch.py`.
 
-This starts about 12 nodes: lidar → `rm_base` → odom chain → `rm_safety` →
-scan bridge → `policy_node` → dashboard, plus SLAM.
+This starts about 13 nodes: lidar → `rm_base` → odom chain → `rm_safety` →
+scan bridge → `policy_node_m8v2` and `policy_node_m4` → dashboard, plus SLAM.
+Both trained policies run; `rm_safety` forwards only the one named by
+`command_source` (§6).
 
 **Nothing can move yet.** `rm_safety` comes up **KILLED**, and
 `command_source` is `teleop` while nothing is publishing `/teleop/cmd_vel`.
@@ -219,9 +221,12 @@ Two things worth knowing how to read:
 
 ### What the controls can do
 
-The page can **kill**, **reset (arm)**, **switch `command_source`**,
-**re-target the goal**, **send a waypoint**, **jog** with WASD, and **reset
-the SLAM map** (which kills first and leaves the robot killed; see §8).
+The page can **kill**, **reset (arm)**, **switch `command_source`** (one
+button per source: `teleop`, `policy`, `m8v2`, `m4`; a policy button is
+greyed until its node is publishing), **re-target the goal** on every running
+policy, **send a waypoint**, **jog** with WASD, and **reset the SLAM map**
+(which kills first and leaves the robot killed; see §8). The header names the
+policy the page is following next to its checkpoint hash.
 
 > **The server binds `0.0.0.0` with NO AUTHENTICATION.** Anyone who can route
 > to the robot can arm and drive it. That is an accepted operator decision for
@@ -239,12 +244,14 @@ Motion requires **two separate deliberate acts**, and no single button, launch
 argument or parameter grants both.
 
 ```bash
-# Act 1 — choose the source. This FORCE-KILLS, every time.
-ros2 param set /safety_node command_source policy
+# Act 1 — choose the source (m8v2 or m4 for a policy). This FORCE-KILLS, every time.
+ros2 param set /safety_node command_source m8v2
 
 # Act 2 — arm.
 ros2 service call /safety/reset std_srvs/srv/Trigger
 ```
+
+The dashboard's source buttons do Act 1; ARM does Act 2.
 
 **Order matters.** Changing `command_source` force-kills, so doing it *after*
 arming just disarms you again. Source first, then arm.
@@ -282,28 +289,33 @@ The reset is refused while an obstacle is still inside the stop zone.
 
 **Only one command source is live at a time.** They are not merged, arbitrated
 between, or fallen back to. `rm_safety` reads the selected one and ignores the
-other entirely.
+others entirely. The sources are the rows of `config/topics.yaml`
+`command_sources`; `rm_safety` subscribes to all of them and refuses any
+`command_source` that is not a row.
 
 ```
-                                       command_source
-/policy/cmd_vel  ──── policy_node ─────────┐   selects
-                                           ├──► rm_safety ──► /cmd_vel ──► rm_base
-/teleop/cmd_vel  ──┬── gamepad ────────────┘         ▲
-                   └── rm_waypoint (goto + jog)      │
-                                              clamps, arcs,
-                                              accel limit, kill
+                                                command_source
+/policy/m8v2/cmd_vel ── policy_node_m8v2 ──────────┐   selects ONE
+/policy/m4/cmd_vel   ── policy_node_m4   ──────────┤
+/policy/cmd_vel      ── upstream consumer / bench ─┼──► rm_safety ──► /cmd_vel ──► rm_base
+/teleop/cmd_vel  ──┬── gamepad ────────────────────┘         ▲
+                   └── rm_waypoint (goto + jog)              │
+                                                      clamps, arcs,
+                                                      accel limit, kill
 ```
 
 | `command_source` | live input | who publishes it |
 |---|---|---|
 | `teleop` **(default)** | `/teleop/cmd_vel` | the gamepad (`teleop_joy.launch.py`) and `rm_waypoint` |
-| `policy` | `/policy/cmd_vel` | `policy_node` (or the upstream node) |
+| `m8v2` | `/policy/m8v2/cmd_vel` | `policy_node_m8v2` (M8-v2, 720 beams, interface 4.0.0) |
+| `m4` | `/policy/m4/cmd_vel` | `policy_node_m4` (M4, 32 beams, interface 3.0.0) |
+| `policy` | `/policy/cmd_vel` | the upstream node (`consumer:=upstream`) or a bench tool |
 
 ### Why `teleop` is the default
 
-Bringing the stack up to look at it must not be able to connect the policy to
-the base driver. Switching to `policy` is a deliberate act — and because the
-switch **force-kills**, it can only ever *stop* the robot, never start it.
+Bringing the stack up to look at it must not be able to connect a policy to
+the base driver. Switching to a policy row is a deliberate act — and because
+the switch **force-kills**, it can only ever *stop* the robot, never start it.
 
 ### Manual driving is not a bypass
 
@@ -397,11 +409,11 @@ bash scripts/stack_down.sh && bash scripts/prep_robot.sh
 bash scripts/run_stack.sh with_slam:=true
 
 # verify (§3c), then:
-ros2 param set /safety_node command_source policy
+ros2 param set /safety_node command_source m8v2
 ros2 service call /safety/reset std_srvs/srv/Trigger
 ```
 
-Watch `/ncp_debug` and the dashboard.
+Watch `/ncp_debug/m8v2` and the dashboard.
 
 ### Options you will actually use
 
@@ -409,8 +421,8 @@ Watch `/ncp_debug` and the dashboard.
 # prove the sensor path end to end with the reactive rule, no network involved
 bash scripts/run_stack.sh consumer:=upstream mode:=debug
 
-# exercise the plumbing with an untrained network (logs a warning)
-bash scripts/run_stack.sh weights:=''
+# exercise the plumbing with an untrained network (logs a warning); one profile
+bash scripts/run_stack.sh profiles:=m8v2 weights:=''
 
 # compute everything, publish everything, send only zero PWM
 bash scripts/run_stack.sh dry_run:=true
@@ -419,29 +431,38 @@ bash scripts/run_stack.sh dry_run:=true
 bash scripts/run_stack.sh with_slam:=true with_waypoint:=true
 ```
 
-### Choosing the policy profile
+### Choosing the policy
 
 Two trained policies are deployed, each with the contract it was exported
-against. `profile:=` selects both at once; everything else about the stack is
-the same.
+against. By default both run, each as its own node on its own command topic,
+and `command_source` picks which one `rm_safety` forwards.
 
-| profile | beams | contract | checkpoint | held-out / official BARN |
+| source | beams | contract | checkpoint | held-out / official BARN |
 |---|---|---|---|---|
-| `m8v2` (default) | 720 over 270° | `config/interface.yaml` (4.0.0) | `actor.pt`, sha `71cc50ae…` | 63% / 0.219 |
+| `m8v2` | 720 over 270° | `config/interface.yaml` (4.0.0) | `actor.pt`, sha `71cc50ae…` | 63% / 0.219 |
 | `m4` | 32 over 180° | `config/interface_m4.yaml` (3.0.0) | `actor_m4.pt`, sha `3c9bf0ee…` | 30% / 0.113 |
 
+Switch from the dashboard (press `m4` or `m8v2`, confirm, then ARM) or from a
+terminal:
+
 ```bash
-bash scripts/stack_down.sh && bash scripts/prep_robot.sh
-bash scripts/run_stack.sh profile:=m4 with_slam:=true    # the M4 policy
-bash scripts/run_stack.sh with_slam:=true                # back to M8-v2
+ros2 param set /safety_node command_source m4     # force-kills
+ros2 service call /safety/reset std_srvs/srv/Trigger
 ```
 
-Switching is a stack restart; a profile cannot change while running. The
-dashboard header reads `checkpoint <hash> · interface <version> · <n> beams`,
-which is how you confirm which one is live. `policy_node` builds the network
-to the contract's width and loads the checkpoint strictly, so a mismatched
-pair refuses to start instead of driving on wrong numbers. `consumer:=upstream`
-(the reactive debug rule) runs only on `m8v2`.
+No restart: both nodes keep running and the switch is a parameter set. Goal
+re-targets go to every running policy, so the one you switch to is already
+aimed. The dashboard header reads `<policy> · checkpoint <hash> · interface
+<version> · <n> beams`, which is how you confirm which one the page is
+following; the safety panel's `command source` says which one drives.
+`policy_node` builds the network to its contract's width and loads its
+checkpoint strictly, so a mismatched pair refuses to start instead of driving
+on wrong numbers.
+
+To run one policy only, list it: `run_stack.sh profiles:=m4 with_slam:=true`.
+The scan bridge serves the first listed profile's beams. `consumer:=upstream`
+(the reactive debug rule) needs `m8v2` first and is selected with
+`command_source:=policy`.
 
 ### Re-targeting the goal
 
@@ -554,12 +575,12 @@ bash scripts/run_stack.sh with_slam:=true
 ros2 topic info /cmd_vel          # -> 1 publisher
 ros2 node list | sort | uniq -d   # -> empty
 
-# arm (source FIRST — it force-kills)
-ros2 param set /safety_node command_source policy
+# arm (source FIRST — it force-kills); m8v2 or m4
+ros2 param set /safety_node command_source m8v2
 ros2 service call /safety/reset std_srvs/srv/Trigger
 
-# the other policy (M4, 32 beams); default is m8v2
-bash scripts/run_stack.sh profile:=m4 with_slam:=true
+# the other policy: a parameter set, not a restart (or the dashboard button)
+ros2 param set /safety_node command_source m4
 
 # dashboard
 http://192.168.4.100:8080/

@@ -1,7 +1,7 @@
 """
 dashboard_node.py — ROS2 node behind the web dashboard. Subscribe-only on
-topics; the sole outbound effects are two safety services and two parameter
-sets.
+topics; the sole outbound effects are two safety services and parameter
+sets on safety_node and the policy nodes.
 
 What it does:
     Subscribes to every stage of the NCP pipeline, keeps the latest message
@@ -21,21 +21,23 @@ What it does:
     So the layout follows the signal:
 
         /scan -> /ncp/scan -> [observation] -> policy (v,w)
-              -> /policy/cmd_vel -> rm_safety -> /cmd_vel -> rm_base -> wheels
+              -> /policy/<p>/cmd_vel -> rm_safety -> /cmd_vel -> rm_base -> wheels
 
     with rate and staleness on every hop, and the safety state and per-wheel
-    telemetry alongside. The observation comes from `/ncp_debug` (published by
-    policy_node) rather than being rebuilt here — see `_ncp_debug_cb`.
+    telemetry alongside. Several policy nodes may run at once (one per row
+    of config/topics.yaml `command_sources`, see ncp.launch.py profiles:=);
+    the page follows ONE, the ACTIVE policy (rm_dashboard/sources.py), and
+    offers one source button per row. The observation comes from that
+    policy's debug stream rather than being rebuilt here — see `_debug_cb`.
 
 Subscribes:  /scan            [sensor_msgs/LaserScan]
-Subscribes:  /ncp/scan        [sensor_msgs/LaserScan]   (bridge output, the policy's beams)
+Subscribes:  /ncp/scan        [sensor_msgs/LaserScan]   (bridge output, first profile's beams)
 Subscribes:  /odom            [nav_msgs/Odometry]
-Subscribes:  /policy/cmd_vel  [geometry_msgs/Twist]     (policy request)
-Subscribes:  /teleop/cmd_vel  [geometry_msgs/Twist]     (gamepad request)
+Subscribes:  <every command_sources row's topic>  [geometry_msgs/Twist]  (requests)
+Subscribes:  <every policy row's debug stream>    [std_msgs/String]      (JSON, incl. the obs)
 Subscribes:  /cmd_vel         [geometry_msgs/Twist]     (rm_safety output)
 Subscribes:  /safety/status   [rm_interfaces/SafetyStatus]
 Subscribes:  /base/debug      [rm_interfaces/BaseDebug]
-Subscribes:  /ncp_debug       [std_msgs/String]         (JSON, incl. the obs)
 Subscribes:  /voltage         [std_msgs/Float32]
 Subscribes:  /scan_sanitized  [sensor_msgs/LaserScan]   (what SLAM actually reads)
 Subscribes:  /map             [nav_msgs/OccupancyGrid]  (latched; SLAM's map)
@@ -50,16 +52,21 @@ Parameters:  scan_stride (int,   6)    — decimation for the displayed /scan
 Parameters:  enable_controls (bool, True) — false serves a read-only page
 Parameters:  map_max_cells (int, 400) — longest side of the map image served
 Parameters:  tf_poll_hz  (float, 5.0)  — how often the SLAM transforms are read
+Parameters:  topics_path (str, <in-repo config/topics.yaml>) — the command-source
+                                         table; fatal if unreadable (a page that
+                                         cannot name rm_safety's sources would
+                                         offer buttons that do nothing)
 
 Failure mode:
     Diagnostic-grade, and structurally unable to move the robot. It publishes
     no Twist on any topic, so it cannot be a second `/cmd_vel` publisher —
     the violation this workspace is built around preventing. Its only writes
     are `/safety/kill`, `/safety/reset` and parameter sets on `safety_node` /
-    `policy_node`, each of which is individually incapable of starting motion:
-    kill only stops; a `command_source` change force-kills (see safety_node);
-    a goal change only re-targets a policy that must still be armed
-    separately. Arming therefore always remains an explicit, separate act.
+    the policy nodes, each of which is individually incapable of starting
+    motion: kill only stops; a `command_source` change force-kills (see
+    safety_node); a goal change only re-targets policies that must still be
+    armed separately. Arming therefore always remains an explicit, separate
+    act.
 
     THE WAYPOINT CONTROL IS THE ONE ADDITION THAT CAN MOVE THE ROBOT, and it
     changes what this page is. `/waypoint/goto` is a service call into
@@ -120,8 +127,10 @@ from std_srvs.srv import Trigger
 
 from rm_interfaces.msg import BaseDebug, SafetyStatus, WaypointStatus
 from rm_interfaces.srv import Jog, SetWaypoint
+from rm_safety.command_sources import DEFAULT_TOPICS_PATH, load_command_sources
 from rm_dashboard.frames import world_to_body_offset
 from rm_dashboard.slam_restart import find_slam_pids, reset_refusal
+from rm_dashboard.sources import active_policy, is_live
 from rm_dashboard.slam_health import (
     OCCUPIED_THRESHOLD, SlamHealth, pack_grid, summarize_map,
 )
@@ -137,12 +146,9 @@ _EXPECTED_HZ: Dict[str, float] = {
     "/scan": 10.1,
     "/ncp/scan": 10.1,
     "/odom": 30.0,
-    "/policy/cmd_vel": 5.0,
-    "/teleop/cmd_vel": 5.0,
     "/cmd_vel": 20.0,
     "/safety/status": 10.0,
     "/base/debug": 20.0,
-    "/ncp_debug": 5.0,
     # 30 Hz, not the ~9 Hz recorded in interface.yaml: that figure was
     # measured when the VENDOR Mcnamu_driver_X3 published it. rm_base
     # replaced that driver and republishes /voltage on its own sensor
@@ -157,6 +163,11 @@ _EXPECTED_HZ: Dict[str, float] = {
     # rm_waypoint's status tick, config/waypoint.yaml rate_hz.
     "/waypoint/status": 10.0,
 }
+
+# Every command-source row (and every policy row's debug stream) is added to
+# the expected-rate table at this rate: policy nodes tick at control.rate_hz
+# (5 Hz, config/interface.yaml) and the teleop publishers near it.
+_SOURCE_HZ = 5.0
 
 # Frames. base_footprint (not base_link) matches /odom's child_frame_id and
 # what the EKF publishes — see config/slam_toolbox.yaml.
@@ -230,6 +241,7 @@ class DashboardNode(rclpy.node.Node):
         self.declare_parameter("enable_controls", True)
         self.declare_parameter("map_max_cells", 400)
         self.declare_parameter("tf_poll_hz", 5.0)
+        self.declare_parameter("topics_path", DEFAULT_TOPICS_PATH)
 
         host = self.get_parameter("host").get_parameter_value().string_value
         port = int(self.get_parameter("port").get_parameter_value().integer_value)
@@ -250,7 +262,23 @@ class DashboardNode(rclpy.node.Node):
             self.get_parameter("tf_poll_hz").get_parameter_value().double_value
         ) or 5.0
 
-        self._store = StateStore(expected_hz=_EXPECTED_HZ)
+        # The command-source table: one button per row, the policy rows'
+        # debug streams and nodes. Loaded through rm_safety's own loader so
+        # the names here are exactly the names safety_node accepts. Fatal if
+        # it cannot be read: a page that cannot name the sources would offer
+        # buttons that do nothing, the failure this page exists to show.
+        topics_path = self.get_parameter("topics_path").get_parameter_value().string_value
+        self._sources = load_command_sources(topics_path)
+        # Policy rows in table order; the active-policy choice walks this.
+        self._policies: List[str] = [
+            name for name, source in self._sources.items() if source.is_policy
+        ]
+        expected = dict(_EXPECTED_HZ)
+        for source in self._sources.values():
+            expected[source.topic] = _SOURCE_HZ
+            if source.debug:
+                expected[source.debug] = _SOURCE_HZ
+        self._store = StateStore(expected_hz=expected)
         self._slam = SlamHealth()
         self._started_at = time.monotonic()
 
@@ -280,18 +308,22 @@ class DashboardNode(rclpy.node.Node):
             LaserScan, "/ncp/scan", self._ncp_scan_cb, sensor_qos
         )
         self.create_subscription(Odometry, "/odom", self._odom_cb, sensor_qos)
-        self.create_subscription(
-            Twist, "/policy/cmd_vel", self._twist_cb("/policy/cmd_vel"), 10
-        )
-        self.create_subscription(
-            Twist, "/teleop/cmd_vel", self._twist_cb("/teleop/cmd_vel"), 10
-        )
+        # One request subscription per table row, and one debug subscription
+        # per policy row. The page shows every request side by side and
+        # follows the active policy's debug stream.
+        for source in self._sources.values():
+            self.create_subscription(
+                Twist, source.topic, self._twist_cb(source.topic), 10
+            )
+            if source.debug:
+                self.create_subscription(
+                    String, source.debug, self._debug_cb(source.debug), 10
+                )
         self.create_subscription(Twist, "/cmd_vel", self._twist_cb("/cmd_vel"), 10)
         self.create_subscription(
             SafetyStatus, "/safety/status", self._safety_cb, 10
         )
         self.create_subscription(BaseDebug, "/base/debug", self._base_cb, 10)
-        self.create_subscription(String, "/ncp_debug", self._ncp_debug_cb, 10)
         self.create_subscription(Float32, "/voltage", self._voltage_cb, sensor_qos)
         self.create_subscription(
             LaserScan, "/scan_sanitized", self._sanitized_cb, sensor_qos
@@ -346,9 +378,17 @@ class DashboardNode(rclpy.node.Node):
         # "re-targeted" log lines per click, and two recurrent-state resets
         # for one operator action. The final goal was correct, but a goal is a
         # PAIR and applying half of one is not a state worth passing through.
-        self._policy_params = self.create_client(
-            SetParametersAtomically, "/policy_node/set_parameters_atomically"
-        )
+        #
+        # One client per policy row that has a node, keyed by row name. A
+        # goal is sent to EVERY one whose service is up (see _retarget), so
+        # "the goal" stays one thing and the policy you switch to is already
+        # aimed at it.
+        self._policy_params = {
+            name: self.create_client(
+                SetParametersAtomically, f"/{source.node}/set_parameters_atomically"
+            )
+            for name, source in self._sources.items() if source.node
+        }
         # rm_waypoint. Absent unless that node was launched, which is the
         # normal case — the page reports the service as unavailable and greys
         # the button, rather than offering a control that silently does
@@ -378,6 +418,9 @@ class DashboardNode(rclpy.node.Node):
         )
         self._command_source: Optional[str] = None
         self._command_source_pending = None
+        # The policy row most recently READ BACK as the active source. The
+        # page keeps following it through a switch to teleop (sources.py).
+        self._last_policy: Optional[str] = None
         self.create_timer(_COMMAND_SOURCE_POLL_SEC, self._poll_command_source)
 
         self._server = DashboardServer(
@@ -540,16 +583,19 @@ class DashboardNode(rclpy.node.Node):
             })
         self._guard("/base/debug", body)
 
-    def _ncp_debug_cb(self, msg: String) -> None:
-        def body():
-            # policy_node (and the upstream node) publish JSON here. This is
-            # the ONLY source of the observation vector: rebuilding it in this
-            # node would be a second implementation of the frozen contract,
-            # and a wrong one would render as a plausible-looking vector that
-            # is not what the network consumed. The whole value of showing the
-            # observation is that it is the same numbers the policy saw.
-            self._store.update("/ncp_debug", json.loads(msg.data))
-        self._guard("/ncp_debug", body)
+    def _debug_cb(self, topic: str):
+        def cb(msg: String) -> None:
+            def body():
+                # Each policy node (and the upstream node) publishes JSON on
+                # its own debug stream. This is the ONLY source of the
+                # observation vector: rebuilding it in this node would be a
+                # second implementation of the frozen contract, and a wrong
+                # one would render as a plausible-looking vector that is not
+                # what the network consumed. The whole value of showing the
+                # observation is that it is the same numbers the policy saw.
+                self._store.update(topic, json.loads(msg.data))
+            self._guard(topic, body)
+        return cb
 
     def _voltage_cb(self, msg: Float32) -> None:
         def body():
@@ -724,6 +770,8 @@ class DashboardNode(rclpy.node.Node):
                     # NOT_SET value rather than an error. Either way it is not
                     # an answer, so keep reporting "unknown" instead of "".
                     self._command_source = value or None
+                    if value in self._policies:
+                        self._last_policy = value
                 return
             if not self._safety_get_params.service_is_ready():
                 self._command_source = None
@@ -747,6 +795,101 @@ class DashboardNode(rclpy.node.Node):
         return payload
 
     # ------------------------------------------------------------------
+    # The command-source table, as the page and the commands see it
+    # ------------------------------------------------------------------
+
+    def _source_is_policy(self, name: Optional[str]) -> bool:
+        """True when `name` is a policy row of the table. Unknown is False."""
+        source = self._sources.get(name) if name else None
+        return bool(source and source.is_policy)
+
+    def _live_sources(self, topics: Dict[str, Any]) -> set:
+        """Rows whose command topic is being published right now."""
+        return {
+            name for name, source in self._sources.items()
+            if is_live(topics.get(source.topic))
+        }
+
+    def _active_policy(self, topics: Dict[str, Any]) -> Optional[str]:
+        """The policy row the page follows (rm_dashboard/sources.py)."""
+        return active_policy(
+            self._command_source, self._last_policy, self._policies,
+            self._live_sources(topics),
+        )
+
+    def _policy_debug(self, name: Optional[str], topics=None) -> Dict[str, Any]:
+        """The latest debug JSON of one policy row, or an empty dict."""
+        if name is None:
+            return {}
+        source = self._sources[name]
+        if source.debug is None:
+            return {}
+        if topics is None:
+            topics = self._store.snapshot()
+        return _slot_value(topics, source.debug)
+
+    def _active_debug(self) -> Dict[str, Any]:
+        topics = self._store.snapshot()
+        return self._policy_debug(self._active_policy(topics), topics)
+
+    def _retarget_targets(self) -> List[str]:
+        """Policy rows with a node whose parameter service is up right now.
+
+        A goal goes to every RUNNING policy, not to every row: a profile that
+        was not launched has no service, and reporting it as a failure on
+        every click would bury the real result.
+        """
+        return [
+            name for name in self._policies
+            if name in self._policy_params
+            and self._policy_params[name].service_is_ready()
+        ]
+
+    def _retarget(self, offsets: Dict[str, Any]) -> Dict[str, Any]:
+        """Set goal_x/goal_y on each named policy node and aggregate.
+
+        `offsets` maps a row name to its robot-frame (x, y) offset, or to a
+        dict carrying a refusal (`{"ok": False, "error": ...}`) decided by
+        the caller, which is reported alongside the sets without being sent.
+        The result is ok when at least one node took the goal; every
+        per-policy outcome is in `policies`, so a half-applied goal is never
+        reported as a clean one.
+        """
+        results: Dict[str, Any] = {}
+        done: List[str] = []
+        for name, offset in offsets.items():
+            if isinstance(offset, dict):
+                results[name] = offset
+                continue
+            ox, oy = offset
+            results[name] = self._set_params(
+                self._policy_params[name], self._sources[name].node,
+                [_double_param("goal_x", ox), _double_param("goal_y", oy)],
+            )
+            if results[name].get("ok"):
+                done.append(name)
+        failed = [n for n in results if n not in done]
+        out: Dict[str, Any] = {
+            "ok": bool(done), "policies": results, "retargeted": done,
+        }
+        if not results:
+            out["error"] = (
+                "no policy node is running (no parameter service is up); "
+                "is a profile launched?"
+            )
+        elif not done:
+            out["error"] = "no policy re-targeted: " + "; ".join(
+                f"{n}: {results[n].get('error')}" for n in failed
+            )
+        else:
+            out["message"] = f"goal set on {', '.join(done)}" + (
+                f" (not on {', '.join(failed)}: "
+                + "; ".join(str(results[n].get("error")) for n in failed) + ")"
+                if failed else ""
+            )
+        return out
+
+    # ------------------------------------------------------------------
     # Snapshot assembly (called on the broadcast thread)
     # ------------------------------------------------------------------
 
@@ -755,6 +898,9 @@ class DashboardNode(rclpy.node.Node):
         # expensive part of a broadcast frame, and taking it twice would also
         # risk the two halves of one payload describing different instants.
         topics = self._store.snapshot()
+        live = self._live_sources(topics)
+        active = self._active_policy(topics)
+        active_source = self._sources[active] if active else None
         return {
             "now": time.time(),
             "uptime_s": round(time.monotonic() - self._started_at, 1),
@@ -764,6 +910,33 @@ class DashboardNode(rclpy.node.Node):
             # None means "not yet known", which the page renders as unknown
             # rather than guessing at a default.
             "command_source": self._command_source,
+            # The table, in order, with what the page needs to draw a button
+            # per row: liveness (a policy button greys until its node
+            # publishes) and whether its goal can be set.
+            "sources": [
+                {
+                    "name": name,
+                    "kind": source.kind,
+                    "topic": source.topic,
+                    "node": source.node,
+                    "debug": source.debug,
+                    "description": source.description,
+                    "live": name in live,
+                    "params_ready": (
+                        name in self._policy_params
+                        and self._policy_params[name].service_is_ready()
+                    ),
+                }
+                for name, source in self._sources.items()
+            ],
+            # The policy the header, observation panel and chain follow.
+            "active_policy": (
+                {
+                    "name": active, "topic": active_source.topic,
+                    "debug": active_source.debug, "node": active_source.node,
+                }
+                if active_source else None
+            ),
             "slam": {
                 # The correction itself, plus its jump history — see
                 # slam_health.py for why those two are the whole story.
@@ -777,7 +950,7 @@ class DashboardNode(rclpy.node.Node):
                 # panel because a healthy map with `pose_source: odom` means
                 # SLAM is running and being ignored — a deliberate and safe
                 # intermediate state, but one nobody should be in by accident.
-                "policy_pose_source": _slot_value(topics, "/ncp_debug")
+                "policy_pose_source": self._policy_debug(active, topics)
                 .get("pose_source"),
             },
             # Service readiness, so a disabled-looking button has a reason.
@@ -785,7 +958,10 @@ class DashboardNode(rclpy.node.Node):
                 "kill": self._kill_client.service_is_ready(),
                 "reset": self._reset_client.service_is_ready(),
                 "safety_params": self._safety_params.service_is_ready(),
-                "policy_params": self._policy_params.service_is_ready(),
+                # Any running policy node: the goal buttons need one.
+                "policy_params": any(
+                    c.service_is_ready() for c in self._policy_params.values()
+                ),
                 "waypoint": self._waypoint_goto.service_is_ready(),
                 "waypoint_cancel": self._waypoint_cancel.service_is_ready(),
                 # Exactly one slam_toolbox process: the precondition RESET
@@ -811,8 +987,12 @@ class DashboardNode(rclpy.node.Node):
             return self._call_trigger(self._reset_client, "/safety/reset")
         if command == "source":
             value = payload.get("value")
-            if value not in ("policy", "teleop"):
-                return {"ok": False, "error": "value must be 'policy' or 'teleop'"}
+            if value not in self._sources:
+                return {
+                    "ok": False,
+                    "error": f"value must be one of {sorted(self._sources)} "
+                             f"(config/topics.yaml command_sources)",
+                }
             return self._set_params(
                 self._safety_params, "safety_node",
                 [_string_param("command_source", value)],
@@ -825,9 +1005,10 @@ class DashboardNode(rclpy.node.Node):
                 return {"ok": False, "error": "goal needs numeric x and y"}
             if not (math.isfinite(gx) and math.isfinite(gy)):
                 return {"ok": False, "error": "goal must be finite"}
-            result = self._set_params(
-                self._policy_params, "policy_node",
-                [_double_param("goal_x", gx), _double_param("goal_y", gy)],
+            # The same offset to every running policy: it is an offset from
+            # the robot, and the robot is where it is for all of them.
+            result = self._retarget(
+                {name: (gx, gy) for name in self._retarget_targets()}
             )
             # Optional "clean slate": zero the EKF as part of re-targeting.
             # Ordered AFTER the goal is fixed, not before. The goal is derived
@@ -854,15 +1035,15 @@ class DashboardNode(rclpy.node.Node):
         return {"ok": False, "error": f"unhandled command {command!r}"}
 
     def _set_goal_from_world(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Set the POLICY goal from a world point the operator clicked.
+        """Set EVERY running policy's goal from a world point the operator clicked.
 
         policy_node takes `goal_x`/`goal_y` as a ROBOT-FRAME OFFSET and re-fixes
         the goal against its own current pose. A map click is a WORLD point, so
-        something has to do the conversion. It is done HERE, against the pose
-        policy_node itself published on /ncp_debug, so the offset is expressed
-        in exactly the frame policy_node will rotate it back out of. Converting
-        in the browser instead would use whatever pose that page last rendered,
-        which is a different sample.
+        something has to do the conversion. It is done HERE, per policy,
+        against the pose that policy node itself published on its debug
+        stream, so each offset is expressed in exactly the frame its node will
+        rotate it back out of. Converting in the browser instead would use
+        whatever pose that page last rendered, which is a different sample.
 
         REFUSED rather than converted on a frame mismatch, exactly as
         rm_waypoint refuses one: the map and odom frames differ by the SLAM
@@ -886,57 +1067,69 @@ class DashboardNode(rclpy.node.Node):
         if not (math.isfinite(wx) and math.isfinite(wy)):
             return {"ok": False, "error": "goal must be finite"}
 
-        debug = self._store.snapshot().get("/ncp_debug", {}).get("value") or {}
-        pose = debug.get("pose")
-        pose_source = debug.get("pose_source")
-        if not isinstance(pose, (list, tuple)) or len(pose) != 3:
-            return {
-                "ok": False,
-                "error": (
-                    "no pose on /ncp_debug yet — policy_node has not fixed a "
-                    "goal. It publishes a pose only once it has one; use the "
-                    "robot-frame offset box, or wait for the first fix."
-                ),
-            }
-        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in pose):
-            return {"ok": False, "error": "pose on /ncp_debug is not finite"}
+        topics = self._store.snapshot()
+        offsets: Dict[str, Any] = {}
+        poses_used: Dict[str, Any] = {}
+        for name in self._retarget_targets():
+            debug = self._policy_debug(name, topics)
+            pose = debug.get("pose")
+            pose_source = debug.get("pose_source")
+            node = self._sources[name].node
+            if not isinstance(pose, (list, tuple)) or len(pose) != 3:
+                offsets[name] = {
+                    "ok": False,
+                    "error": (
+                        f"no pose on {self._sources[name].debug} yet — {node} "
+                        "has not fixed a goal. It publishes a pose only once "
+                        "it has one; use the robot-frame offset box, or wait "
+                        "for the first fix."
+                    ),
+                }
+                continue
+            if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in pose):
+                offsets[name] = {"ok": False, "error": f"pose from {node} is not finite"}
+                continue
 
-        expected_frame = _MAP_FRAME if pose_source == "map" else _ODOM_FRAME
-        frame = payload.get("frame", expected_frame)
-        if frame != expected_frame:
-            return {
-                "ok": False,
-                "error": (
-                    f"refused: point is in '{frame}' but policy_node is driving "
-                    f"in '{expected_frame}' (pose_source {pose_source!r}). Those "
-                    "frames differ by the SLAM correction, which grows as the "
-                    "robot drives — converting would move the goal silently."
-                ),
-            }
+            expected_frame = _MAP_FRAME if pose_source == "map" else _ODOM_FRAME
+            frame = payload.get("frame", expected_frame)
+            if frame != expected_frame:
+                offsets[name] = {
+                    "ok": False,
+                    "error": (
+                        f"refused: point is in '{frame}' but {node} is driving "
+                        f"in '{expected_frame}' (pose_source {pose_source!r}). "
+                        "Those frames differ by the SLAM correction, which "
+                        "grows as the robot drives — converting would move "
+                        "the goal silently."
+                    ),
+                }
+                continue
 
-        rx, ry, ryaw = float(pose[0]), float(pose[1]), float(pose[2])
-        # World -> body: the inverse of the rotation policy_node applies when
-        # it turns the offset back into a world point. In its own pure module
-        # so the round-trip can be pinned by a workstation test.
-        offset_x, offset_y = world_to_body_offset(wx, wy, rx, ry, ryaw)
+            rx, ry, ryaw = float(pose[0]), float(pose[1]), float(pose[2])
+            # World -> body: the inverse of the rotation policy_node applies
+            # when it turns the offset back into a world point. In its own
+            # pure module so the round-trip can be pinned by a workstation
+            # test.
+            offsets[name] = world_to_body_offset(wx, wy, rx, ry, ryaw)
+            poses_used[name] = [round(rx, 3), round(ry, 3), round(ryaw, 4)]
 
-        result = self._set_params(
-            self._policy_params, "policy_node",
-            [_double_param("goal_x", offset_x), _double_param("goal_y", offset_y)],
-        )
+        result = self._retarget(offsets)
         if result.get("ok"):
             result["message"] = (
-                f"policy goal set to ({wx:.2f}, {wy:.2f}) in {frame} "
-                f"— offset ({offset_x:.2f}, {offset_y:.2f}) from pose "
-                f"({rx:.2f}, {ry:.2f}, {math.degrees(ryaw):.0f} deg)"
+                f"policy goal ({wx:.2f}, {wy:.2f}) set on "
+                f"{', '.join(result['retargeted'])}"
+                + (
+                    f" (not on {', '.join(n for n in offsets if n not in result['retargeted'])})"
+                    if len(result["retargeted"]) < len(offsets) else ""
+                )
             )
             result["goal_world"] = [round(wx, 3), round(wy, 3)]
-            result["pose_used"] = [round(rx, 3), round(ry, 3), round(ryaw, 4)]
+            result["pose_used"] = poses_used
         return result
 
     def _reset_odom(self) -> Dict[str, Any]:
         """Zero the EKF pose. REFUSED in map mode — see the client comment."""
-        debug = self._store.snapshot().get("/ncp_debug", {}).get("value") or {}
+        debug = self._active_debug()
         if debug.get("pose_source") == "map":
             return {
                 "ok": False,
@@ -977,14 +1170,14 @@ class DashboardNode(rclpy.node.Node):
         and is still stopped when this returns, whatever happens in between.
         The map -> odom correction starts over at zero, so the new map is
         anchored on the odometry frame and every old map-frame target
-        becomes meaningless: the waypoint run is
-        cancelled and the policy goal is re-fixed from the current pose, with
-        the offsets the page sent (its goal x / y fields).
+        becomes meaningless: the waypoint run is cancelled and every running
+        policy's goal is re-fixed from the current pose, with the offsets the
+        page sent (its goal x / y fields).
 
         Called on an HTTP worker thread, so the waits below are plain sleeps;
         the executor keeps polling TF on its own thread meanwhile.
         """
-        debug = self._store.snapshot().get("/ncp_debug", {}).get("value") or {}
+        debug = self._active_debug()
         pids = find_slam_pids()
         refusal = reset_refusal(debug.get("pose_source"), pids)
         if refusal is not None:
@@ -1052,13 +1245,12 @@ class DashboardNode(rclpy.node.Node):
             }
         elapsed = time.monotonic() - started
 
-        # 5. Re-fix the policy goal from the robot's pose in the NEW map.
-        goal = self._set_params(
-            self._policy_params, "policy_node",
-            [_double_param("goal_x", gx), _double_param("goal_y", gy)],
-        )
+        # 5. Re-fix every running policy's goal from the robot's pose in the
+        #    NEW map.
+        goal = self._retarget({name: (gx, gy) for name in self._retarget_targets()})
         goal_note = (
-            f"goal re-fixed {gx:.2f} m ahead, {gy:.2f} m left of here"
+            f"goal re-fixed {gx:.2f} m ahead, {gy:.2f} m left of here on "
+            f"{', '.join(goal['retargeted'])}"
             if goal.get("ok") else f"goal NOT re-fixed ({goal.get('error')})"
         )
         message = (
@@ -1099,13 +1291,14 @@ class DashboardNode(rclpy.node.Node):
         # so a cached copy cannot be stale in the way a pose can, and catching
         # it here saves the operator pressing keys at a robot that structurally
         # cannot respond.
-        if self._command_source == "policy":
+        if self._source_is_policy(self._command_source):
             return {
                 "ok": False,
                 "error": (
-                    "refused: command_source is 'policy', so rm_safety is "
-                    "forwarding /policy/cmd_vel and ignores the jog's "
-                    "/teleop/cmd_vel. Switch to 'teleop' first."
+                    f"refused: command_source is '{self._command_source}' (a "
+                    f"policy row), so rm_safety is forwarding "
+                    f"{self._sources[self._command_source].topic} and ignores "
+                    f"the jog's /teleop/cmd_vel. Switch to 'teleop' first."
                 ),
             }
 
@@ -1151,18 +1344,20 @@ class DashboardNode(rclpy.node.Node):
         # the way its pose snapshot can. Everything else is still left to
         # rm_waypoint per the note above.
         #
-        # Without this, a waypoint sent while the source is "policy" is
-        # ACCEPTED, the robot never moves because rm_safety is forwarding
-        # /policy/cmd_vel instead, and the attempt eventually times out with a
+        # Without this, a waypoint sent while the source is a policy row is
+        # ACCEPTED, the robot never moves because rm_safety is forwarding that
+        # policy's topic instead, and the attempt eventually times out with a
         # stall/obstacle reason that blames the hardware for a mode error.
-        if self._command_source == "policy":
+        if self._source_is_policy(self._command_source):
             return {
                 "ok": False,
                 "error": (
-                    "refused: command_source is 'policy', so rm_safety is "
-                    "forwarding /policy/cmd_vel and would ignore the waypoint "
-                    "controller's /teleop/cmd_vel entirely. Switch the source "
-                    "to 'teleop' first (that force-kills, so re-arm after)."
+                    f"refused: command_source is '{self._command_source}' (a "
+                    f"policy row), so rm_safety is forwarding "
+                    f"{self._sources[self._command_source].topic} and would "
+                    f"ignore the waypoint controller's /teleop/cmd_vel "
+                    f"entirely. Switch the source to 'teleop' first (that "
+                    f"force-kills, so re-arm after)."
                 ),
             }
 

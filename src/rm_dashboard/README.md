@@ -38,8 +38,16 @@ side by side, right now.** So the layout follows the signal:
 
 ```
 /scan → /ncp/scan → [observation] → policy (v,w)
-      → /policy/cmd_vel → rm_safety → /cmd_vel → rm_base → wheels
+      → /policy/<p>/cmd_vel → rm_safety → /cmd_vel → rm_base → wheels
 ```
+
+Several policy nodes run at once (`ncp.launch.py profiles:=`, one per row of
+`config/topics.yaml` `command_sources`). The page follows ONE of them, the
+**active policy**: the selected source when that is a policy row, else the
+policy most recently selected, else the first one publishing
+(`rm_dashboard/sources.py`). The header names it next to its checkpoint
+hash, and the observation panel, the chain and the command table read its
+debug stream and request topic.
 
 with **rate, jitter and staleness on every hop**, plus safety state/reason/
 `min_range`, per-wheel base telemetry with its flags, and the SLAM panel.
@@ -136,9 +144,20 @@ goes where the operator clicked.
 ## Controls, and an honest note about them
 
 The page can send: `/safety/kill`, `/safety/reset`, parameter sets on
-`safety_node` / `policy_node`, the `/waypoint` services (`goto`, `cancel`,
-`jog`), and one thing that is not ROS at all: a SIGTERM to the `slam_toolbox`
-process (RESET MAP, below). It has **no publisher of any kind**.
+`safety_node` and the policy nodes, the `/waypoint` services (`goto`,
+`cancel`, `jog`), and one thing that is not ROS at all: a SIGTERM to the
+`slam_toolbox` process (RESET MAP, below). It has **no publisher of any
+kind**.
+
+The **source buttons** are one per row of the table, built from the snapshot,
+so the page offers exactly the names `rm_safety` accepts. A policy button is
+greyed until its node is publishing (a button for a silent source would
+select silence, and kill). Every goal command (`goal`, the map click,
+RESET MAP's re-fix) goes to **every running policy** through
+`/<node>/set_parameters_atomically`, so the goal stays one thing and the
+policy you switch to is already aimed. The map click converts the world point
+against each policy's own published pose. The response lists the policies
+that took the goal and any that refused.
 
 An earlier version of this docstring claimed waypoints "require two prior
 operator acts that this page cannot perform". **That was false**, and it is
@@ -158,7 +177,8 @@ endpoints refuse and the buttons render disabled.
 `command_source` is **read back** from `safety_node` via
 `/safety_node/get_parameters`, not remembered from what the page last asked
 for. The page also states plainly, *before* the button is pressed, why a
-waypoint would not move the robot (killed / wrong source / dry run).
+waypoint would not move the robot (killed / a policy row selected / dry run);
+the jog and waypoint commands refuse while any policy row is selected.
 
 ### RESET MAP restarts `slam_toolbox` in place
 
