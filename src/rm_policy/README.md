@@ -118,7 +118,9 @@ frame.
   the policy.
 - **`goal_x` / `goal_y` are runtime-settable.** A set re-fixes the goal from
   the *current* pose — always, even to an unchanged value, because a set is an
-  explicit "re-target now" — and resets the recurrent state.
+  explicit "re-target now". A new goal is a new episode: the arrival latch
+  clears, the recurrent state resets and the fed-back previous action returns
+  to zero. `policy_node._fix_goal` is the one place the goal is written.
 
 ### Previous action: the *requested* action is fed back
 

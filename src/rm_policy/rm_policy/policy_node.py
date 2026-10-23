@@ -622,24 +622,44 @@ class PolicyNode(rclpy.node.Node):
             )
             return SetParametersResult(successful=True)
 
-        dx, dy = _rotate_2d(
-            self._goal_offset_x, self._goal_offset_y, self._robot_yaw
-        )
+        self._fix_goal(self._goal_offset_x, self._goal_offset_y, why="parameter set")
+        return SetParametersResult(successful=True)
+
+    def _fix_goal(self, offset_x: float, offset_y: float, why: str) -> None:
+        """Fix the goal from the CURRENT pose. The ONE place the goal is written.
+
+        `(offset_x, offset_y)` is a robot-frame offset, rotated by the current
+        yaw and added to the current position: a one-time frame conversion
+        done at fix time. It is NOT the per-tick robot-frame `local_goal()`
+        transform that observation_builder performs every tick against this
+        fixed point (interface.yaml goal_local.preprocessing). The two are
+        different operations, and this one is not part of the frozen per-tick
+        observation formula, so computing it here duplicates nothing
+        observation_builder owns.
+
+        A new goal is a new episode: the arrival latch clears (or the robot
+        would sit still having "already arrived" somewhere it no longer is),
+        the recurrent state resets (a CfC carries its history, and the
+        objective changing underneath it is exactly the discontinuity
+        `PolicyRunner.reset()` exists for), and the fed-back previous action
+        returns to the zero a training episode starts from (interface.yaml
+        previous_action init_note). Callers: the first /odom pose, the first
+        map pose, a parameter set, and a roam hand-off.
+        """
+        dx, dy = _rotate_2d(offset_x, offset_y, self._robot_yaw)
         self._goal_world_x = self._robot_x + dx
         self._goal_world_y = self._robot_y + dy
-        # A new goal is a new episode: clear the arrival latch, or the robot
-        # would sit still having "already arrived" somewhere it no longer is.
         self._goal_reached = False
+        self._prev_action_v = 0.0
+        self._prev_action_w = 0.0
         self._runner.reset()
+        frame = _MAP_FRAME if self._pose_source == _POSE_SOURCE_MAP else "odom"
         self.get_logger().info(
-            f"policy_node: re-targeted to offset "
-            f"({self._goal_offset_x}, {self._goal_offset_y}) m from the current "
-            f"pose — goal now ({self._goal_world_x:.3f}, "
-            f"{self._goal_world_y:.3f}) in "
-            f"{_MAP_FRAME if self._pose_source == _POSE_SOURCE_MAP else 'odom'}"
-            f"; recurrent state reset."
+            f"policy_node: goal fixed ({why}) at ({self._goal_world_x:.3f}, "
+            f"{self._goal_world_y:.3f}) in {frame} from pose "
+            f"({self._robot_x:.3f}, {self._robot_y:.3f}, yaw {self._robot_yaw:.3f}) "
+            f"+ offset ({offset_x:.2f}, {offset_y:.2f}) m; recurrent state reset."
         )
-        return SetParametersResult(successful=True)
 
     def _scan_cb(self, msg: LaserScan) -> None:
         self._scan_ranges = list(msg.ranges)
@@ -658,25 +678,10 @@ class PolicyNode(rclpy.node.Node):
         self._odom_stamp = time.monotonic()
 
         if self._goal_world_x is None and self._pose_source == _POSE_SOURCE_ODOM:
-            # Fix the goal ONCE, from the first /odom message: start position
-            # plus the launch-parameter (goal_x, goal_y) offset, rotated by
-            # the start yaw into the world (odom) frame. This is a one-time
-            # frame conversion done here at "start pose capture" time — it is
-            # NOT the per-tick robot-frame `local_goal()` transform that
-            # observation_builder performs every tick against this fixed
-            # point (see interface.yaml goal_local.preprocessing). The two
-            # are different operations and this one is not part of the
-            # frozen per-tick observation formula, so computing it here does
-            # not duplicate anything observation_builder owns.
-            dx, dy = _rotate_2d(self._goal_offset_x, self._goal_offset_y, yaw)
-            self._goal_world_x = pos.x + dx
-            self._goal_world_y = pos.y + dy
-            self.get_logger().info(
-                f"policy_node: goal fixed at odom-frame "
-                f"({self._goal_world_x:.3f}, {self._goal_world_y:.3f}) m "
-                f"(start ({pos.x:.3f}, {pos.y:.3f}), yaw {yaw:.3f} rad, "
-                f"offset ({self._goal_offset_x}, {self._goal_offset_y}) m)."
-            )
+            # Fix the goal ONCE, from the first /odom message: the start pose
+            # was just written to self._robot_*. See _fix_goal.
+            self._fix_goal(self._goal_offset_x, self._goal_offset_y,
+                           why="first /odom pose")
 
     # ------------------------------------------------------------------
     # Publish helpers
@@ -860,16 +865,8 @@ class PolicyNode(rclpy.node.Node):
         # the odom frame migrates with the odometry drift; one fixed in the
         # map frame does not.
         if self._goal_world_x is None and self._pose_source == _POSE_SOURCE_MAP:
-            dx, dy = _rotate_2d(
-                self._goal_offset_x, self._goal_offset_y, pose.yaw
-            )
-            self._goal_world_x = pose.x + dx
-            self._goal_world_y = pose.y + dy
-            self.get_logger().info(
-                f"policy_node: goal fixed in the {_MAP_FRAME} frame at "
-                f"({self._goal_world_x:.3f}, {self._goal_world_y:.3f}) from "
-                f"pose ({pose.x:.3f}, {pose.y:.3f}, {pose.yaw:.3f})."
-            )
+            self._fix_goal(self._goal_offset_x, self._goal_offset_y,
+                           why=f"first {_MAP_FRAME} pose")
 
         # ------------------------------------------------------------------
         # Goal must be defined. No default is ever substituted (interface.yaml
