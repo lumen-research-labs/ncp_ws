@@ -1843,6 +1843,31 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     `ros2 param set roam true` bypasses the dashboard guard; the node cannot
     see the zones (settled: no safety state in policy_node), so the doc
     carries the rule.
+  * **RETREAT OUT OF A STOP-ZONE E-STOP (same day, Daniel: "if it does
+    emergency stop, go along the most recent path backwards a bit and reset
+    the goal"; "things won't be moving").** A safety-review pass (the
+    rm-safety-reviewer brief, run as a Plan agent) rejected my draft: a
+    reverse that outlives its source (the latch branch returns before the
+    command-timeout check), no ramp in that branch, a yaw tolerance the
+    actor's own `v < 0` output could satisfy, a release range above the
+    slow zone that never clears in this room, and commanded-velocity
+    integration as "distance". The shipped design (e3f758b and the
+    rm_policy commit after it): in `safety_logic` precedence 3 a FRESH,
+    PURE, STRAIGHT reverse (vx < 0, vy and wz exactly 0) passes capped to
+    `estop.retreat_max_vx` (0.12, the only measured reverse speed) and
+    ramped, as SLOW / `stop_zone_retreat`, latch kept; a carried
+    `retreat_clear_count` climbs only on ticks where that reverse passes
+    with the wide-arc min_range >= `retreat_release_range_m` (0.30) and at
+    `retreat_release_ticks` (10) the latch clears on its own; a clear scan
+    with no reverse never releases. `SafetyStatus` gained `command_topic`.
+    `policy_node` subscribes `/safety/status` for this one decision
+    (`rm_policy/retreat.py`): on a fresh STOPPED/stop_zone while roaming,
+    selected, with its last request forward, it publishes straight reverse
+    without the network until the latch releases or `retreat_m` (0.3) is
+    covered, then roam draws (`retreated`); timeout 8 s holds and warns;
+    kill, stale inputs, roam off, source change or a pose jump abort with
+    zero. One retreat per goal, 20 s cooldown. 665+ tests. Recorded as
+    UNSIGNED in docs/safety_validation.md 3e. NOT yet driven live.
   * **Second live run (zones on): the robot reached its first goal and HELD
     there** ("no candidate goal in free space"). The captured scan
     (`tests/fixtures/tg30_roam_hold_scan.yaml`, 2020 rays, 29 % no-returns)
@@ -2359,6 +2384,24 @@ Settled, do not re-open:
   odom pose, first map pose, parameter set, roam hand-off. A new goal clears
   the latch, resets the recurrent state and zeroes the fed-back previous
   action. Do not add a fifth writer.
+- **A latched robot may back STRAIGHT out under a fresh pure-reverse command,
+  and the latch releases only after N clear ticks DURING that reverse**
+  (operator, 2026-10-23; unsigned, safety_validation.md 3e). Nothing else
+  re-arms it: an obstacle that walks away still needs RESET. No yaw and no
+  strafe under the latch, ever: the stop radius sits inside the chassis
+  corners and the actor's own output can be `v < 0`.
+- **`policy_node` reads `/safety/status` for exactly one decision, the
+  retreat** (2026-10-23, re-opening the same-day "no safety state" item for
+  that input only). No pause on KILLED, no arming, no source logic from it;
+  pinned by `tests/unit/test_retreat.py`.
+- **"ROAM off never stops the robot" has one footnote:** ROAM off during a
+  retreat ends the reverse (zero published) on a robot that is in a latched
+  e-stop.
+- **OPEN: yaw at the 0.15 m stop radius can sweep a chassis corner into the
+  obstacle.** `safety_logic`'s "yaw is not scaled in the slow zone"
+  justification was written for 0.35 m; at 0.15 m the corners (0.19-0.23 m
+  from the lidar) lie outside the stop circle. Found by the 2026-10-23
+  review; not fixed; noted in the code.
 - **ROAM runs with BOTH lidar zones ON** (2026-10-23, after the wall). The
   launch's zones-off default is for evaluating a policy on a corridor with
   an operator's goal, not for an autonomous goal loop. The dashboard refuses
