@@ -1,4 +1,4 @@
-> Status: approved 2026-10-23 (Daniel), implementation in progress on `feat/roam-mode`. Revised in place as implementation finds things.
+> Status: approved 2026-10-23 (Daniel); BUILT the same day on `feat/roam-mode` (commits 64f1bda, b6e2322, 9b39e6c, 97e77f2, 25152f9, 75aa34e, c53afba; 611 workstation tests; pushed to GitHub). OPEN: the hardware verification below (deployed to bernard-1 for the dry run; the live run on `m4` is the operator's). Revised in place as implementation finds things.
 
 # Plan: roam mode (random waypoints, the robot keeps running)
 
@@ -77,6 +77,12 @@ Bring the robot stack up: `prep_robot.sh` (base-board serial trap, clock push) t
 
 - Workstation: `python3 -m pytest tests/` green; `py_compile` of `policy_node.py`.
 - Robot, operator with KILL in hand: deploy the branch, restart the stack; the policy logs show the roam limits line; with the source on `teleop`, ROAM on from the dashboard gives hand-offs on timeouts only and no motion; switch to `m4`, arm: the robot drives to the goal, the log shows `roam #1 arrived after Ns`, the pill counts; block it: `roam #2 timeout after 30s` and the goal moves; KILL stops it; re-arm resumes; ROAM off leaves the current goal. Set `timeout_s` from the elapsed-seconds distribution. Record the result in `CLAUDE.md`.
+
+## Found during implementation
+
+- The `roam` launch argument proposed by the operator-side pass was dropped: roam is a runtime parameter only (no feature flags; switching it on is an operator act after bring-up).
+- `docs/dev_env_setup.md` was not rewritten in place but replaced by `docs/workstation_setup.md`, so the Docker recipe could be archived in its own commit with no dangling link in between.
+- The timeout starts at 30 s (not 60): the longest leg is 10 s at the clamp; the hand-off log line carries the elapsed seconds so the number is set from a real run.
 
 ## Not in this plan
 
