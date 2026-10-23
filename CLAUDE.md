@@ -1883,9 +1883,17 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     any roam hand-off whose goal is more than turn_tolerance_deg (15) off
     the nose the node turns in place at turn_wz (0.5 rad/s, above the
     dead band) until the goal is within tolerance, only with nothing
-    within turn_clear_m (0.30, the corners sweep 0.23 m), then the policy
-    starts with the goal ahead; a retreat cancels a turn; the roam clocks
-    restart when the turn is done.
+    then the policy starts with the goal ahead; a retreat cancels a turn;
+    the roam clocks restart when the turn is done. Third live try: pinned
+    again with the draw holding and the retreat refused by my
+    one-retreat-per-goal rule, so nothing moved. Daniel: "turn 90 to 180",
+    then "turn to whatever angle will give it the most open space; if
+    things are close it doesn't matter much since this can purely rotate".
+    Now: a retreat always ends in a RECOVERY TURN toward the deepest
+    robot-width free strip in the scan (any angle, `recovery_bearing`), the
+    goal is drawn after it, the per-goal rule is gone (the 20 s cooldown
+    bounds retreats), and turn_clear_m is 0.0 by his decision (the corners
+    sweep 0.23 m; a touch while rotating in place is accepted).
   * **Second live run (zones on): the robot reached its first goal and HELD
     there** ("no candidate goal in free space"). The captured scan
     (`tests/fixtures/tg30_roam_hold_scan.yaml`, 2020 rays, 29 % no-returns)

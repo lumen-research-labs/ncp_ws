@@ -130,17 +130,15 @@ def test_a_latch_after_the_nodes_own_reverse_is_refused_with_a_reason():
     assert ctl.step(0.0, _LATCHED, (0, 0), True, _MY, 0.0) is not None   # zero counts as forward
 
 
-def test_one_retreat_per_goal_and_a_cooldown_between_retreats():
+def test_a_cooldown_bounds_repeated_retreats():
     ctl = _ctl()
     _start(ctl, 0.0)
     assert ctl.step(1.0, _DRIVING, (0.0, 0.0), True, _MY, -0.12).reason == RELEASED
-    # Same goal, latched again: refused.
-    assert ctl.step(2.0, _LATCHED, (0, 0), True, _MY, 0.1) is None
-    assert "already" in ctl.hold_reason
-    ctl.goal_fixed()
-    # New goal, but inside the cooldown: refused with the seconds left.
+    # Latched again inside the cooldown: refused with the seconds left.
     assert ctl.step(5.0, _LATCHED, (0, 0), True, _MY, 0.1) is None
     assert "cooldown" in ctl.hold_reason
+    ctl.goal_fixed()                                   # a new goal changes nothing here
+    assert ctl.step(6.0, _LATCHED, (0, 0), True, _MY, 0.1) is None
     assert ctl.step(21.5, _LATCHED, (0, 0), True, _MY, 0.1).reason == STARTED
     assert ctl.status()["retreats"] == 2
 
@@ -344,7 +342,9 @@ def test_a_retreat_cancels_a_turn():
 
 def test_the_node_turns_after_roam_hand_offs_only_with_clear_floor():
     src = _read(_POLICY_NODE)
-    assert src.count("self._after_roam_handoff(now)") == 2     # the stall/arrival hand-off and the retreated one
+    assert src.count("self._after_roam_handoff(now)") == 2     # the stall/arrival hand-off and the post-recovery one
+    assert "recovery_bearing(scan, self._roam.limits)" in src
+    assert src.index("self._turn_target_yaw = self._robot_yaw + bearing") < src.index("self._roam.retreated(now, scan)")
     block = src[src.index("if self._turn.active and self._goal_world_x is not None:"):]
     block = block[:block.index("# Goal must be defined")]
     assert "nearest_return(scan, self._roam.limits.self_radius_m)" in block

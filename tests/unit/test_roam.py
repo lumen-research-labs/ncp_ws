@@ -26,7 +26,9 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src", "rm_policy"))
 
 from rm_policy.roam import (  # noqa: E402
+    free_depth,
     nearest_return,
+    recovery_bearing,
     ARRIVED,
     HOLD_RETRY_S,
     KEYS,
@@ -67,7 +69,8 @@ def _limits(**overrides) -> RoamLimits:
                 self_radius_m=0.25, retreat_vx=0.12, retreat_m=0.3,
                 retreat_timeout_s=8.0, retreat_cooldown_s=20.0,
                 retreat_pinned_range_m=0.30, turn_wz=0.5, turn_tolerance_deg=15.0,
-                turn_timeout_s=12.0, turn_clear_m=0.30)
+                turn_timeout_s=12.0, turn_clear_m=0.0,
+                recovery_turn_min_deg=0.0, recovery_turn_max_deg=180.0)
     base.update(overrides)
     return RoamLimits(**base)
 
@@ -212,6 +215,34 @@ def test_nearest_return_ignores_the_body_and_no_returns():
     assert nearest_return(body, 0.25) == pytest.approx(0.9)
     assert nearest_return(_UNKNOWN, 0.25) == math.inf
     assert nearest_return(Scan([], _AMIN, _INC, 0.01), 0.25) == math.inf
+
+
+def test_free_depth_is_the_nearest_return_in_the_strip_or_unknown():
+    lim = _limits()
+    # The depth is the along-strip component, so a ray a degree off the
+    # bearing reads a hair under its range.
+    assert free_depth(_OPEN, 0.0, lim) == pytest.approx(10.0, abs=0.01)
+    assert free_depth(_WALL_AHEAD, 0.0, lim) == pytest.approx(1.5, abs=0.05)
+    assert free_depth(_WALL_AHEAD, math.radians(90.0), lim) == pytest.approx(10.0, abs=0.01)
+    assert free_depth(_UNKNOWN, 0.0, lim) is None
+    assert free_depth(_BOXED, 0.0, lim) == pytest.approx(0.8, abs=0.05)
+
+
+def test_recovery_bearing_turns_toward_the_most_open_floor():
+    lim = _limits()
+    # Open only to the left: a 90 deg turn left.
+    left_open = _scan(lambda a: 10.0 if 75 <= a <= 105 else 0.9)
+    assert math.degrees(recovery_bearing(left_open, lim)) == pytest.approx(90.0)
+    # Open behind-right only.
+    back_right = _scan(lambda a: 6.0 if -150 <= a <= -120 else 0.9)
+    assert math.degrees(recovery_bearing(back_right, lim)) == pytest.approx(-135.0)
+    # Everything equal: the smaller turn, i.e. straight ahead.
+    assert recovery_bearing(_OPEN, lim) == pytest.approx(0.0)
+    # Nothing known anywhere: right round.
+    assert recovery_bearing(_UNKNOWN, lim) == pytest.approx(math.pi)
+    # A narrowed window is honoured.
+    narrow = _limits(recovery_turn_min_deg=90.0, recovery_turn_max_deg=180.0)
+    assert abs(math.degrees(recovery_bearing(_OPEN, narrow))) == pytest.approx(90.0)
 
 
 def test_draw_avoids_the_wall_and_holds_when_boxed_in():
@@ -495,6 +526,8 @@ def test_non_numeric_and_non_integer_seed_are_refused(key, value, fragment):
     (dict(turn_tolerance_deg=180.0), "turn_tolerance_deg"),
     (dict(turn_timeout_s=0.0), "turn_timeout_s"),
     (dict(turn_clear_m=-0.1), "turn_clear_m"),
+    (dict(recovery_turn_min_deg=100.0, recovery_turn_max_deg=90.0), "recovery_turn"),
+    (dict(recovery_turn_max_deg=181.0), "recovery_turn"),
 ])
 def test_incoherent_limits_are_rejected(overrides, fragment):
     reason = check_limits(_limits(**overrides))

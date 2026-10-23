@@ -121,9 +121,9 @@ roam:
   #      is wheels that did not move, dry_run, or an obstacle along the
   #      side. Then the node holds the goal and warns.
   retreat_timeout_s: 8.0
-  # 20 s between retreats, and at most one per goal: retreat, release,
-  # drive back into the same wall, retreat is the unattended loop
-  # rm_waypoint's "never retry" rule exists to prevent.
+  # 20 s between retreats: the bound on the retreat loop. A retreat always
+  # ends in a recovery turn away from what stopped the robot, so driving
+  # straight back into the same wall is not the expected next move.
   retreat_cooldown_s: 20.0
   # PINNED: the slow zone brakes a forward push to zero exactly at the stop
   # boundary, so under a forward push the latch never trips: on 2026-10-23
@@ -149,10 +149,21 @@ roam:
   #         goal nearly ahead.
   turn_tolerance_deg: 15.0
   turn_timeout_s: 12.0
-  # Turn only with nothing closer than this (outside the body radius): the
-  # chassis corners sweep 0.23 m from the lidar. Otherwise the policy gets
-  # the goal as drawn, and a pinned retreat follows if it cannot.
-  turn_clear_m: 0.30
+  # Turn only with nothing closer than this (outside the body radius).
+  # 0.0: Daniel, 2026-10-23: "if things are close it doesn't matter much
+  # since this can purely rotate". The chassis corners sweep 0.23 m from
+  # the lidar, so a turn beside something under that can touch it; the
+  # operator accepts that for a turn in place. Raise it to refuse turns
+  # near things (the policy then gets the goal as drawn).
+  turn_clear_m: 0.0
+  # After a retreat the robot turns toward the MOST OPEN floor before it
+  # draws: the bearing, any angle between these two either side, whose
+  # robot-width strip is deepest in the scan (the smaller turn on a tie;
+  # right round when nothing is known). Daniel, 2026-10-23: "turn to
+  # whatever angle will give it the most open space". The draw then looks
+  # ahead through the real scan, so a goal is usually free.
+  recovery_turn_min_deg: 0.0
+  recovery_turn_max_deg: 180.0
 
   # Seed for the node's own random generator. Every policy node seeds its own
   # generator from this, so two nodes draw the SAME sequence of candidates

@@ -11,7 +11,7 @@ Roam only moves the goal; the policy drives to it behind rm_safety's clamps, wat
   bash scripts/run_stack.sh stop_zone_enabled:=true slow_zone_enabled:=true
   ```
 - **A goal off the nose is faced first.** The node turns in place toward a goal more than `turn_tolerance_deg` off, only with nothing within `turn_clear_m`; M4 cannot steer to a goal beside or behind it.
-- **Stopped by the stop zone, or pinned at its boundary with no progress, the robot backs out by itself.** rm_safety passes one thing there, a straight reverse at `retreat_vx`, and releases a latch after half a second of it with a clear scan. The node reverses up to `retreat_m` or `retreat_timeout_s`, then draws the next goal. The rear is unmonitored: a blind reverse, KILL in hand, never unattended. One retreat per goal, with a cooldown.
+- **Stopped by the stop zone, or pinned at its boundary with no progress, the robot backs out by itself.** rm_safety passes one thing there, a straight reverse at `retreat_vx`, and releases a latch after half a second of it with a clear scan. The node reverses up to `retreat_m` or `retreat_timeout_s`, turns in place toward the most open floor (`recovery_turn_min_deg` to `max`), then draws the next goal. The rear is unmonitored: a blind reverse, KILL in hand, never unattended. `retreat_cooldown_s` between retreats.
 
 ## Turn it on
 
@@ -32,7 +32,7 @@ Roam only moves the goal; the policy drives to it behind rm_safety's clamps, wat
 | `dwell_s`, `timeout_s` | 1.0, 30 | Hold at the goal; the ceiling on one goal. |
 | `progress_window_s`, `progress_min_m` | 10, 0.05 | No progress for this long: `stalled`. |
 | `retreat_vx`, `retreat_m`, `retreat_timeout_s`, `retreat_cooldown_s` | 0.12, 0.3, 8, 20 | The reverse out of an e-stop. |
-| `turn_wz`, `turn_tolerance_deg`, `turn_timeout_s`, `turn_clear_m` | 0.5, 15, 12, 0.30 | The turn toward a goal off the nose. |
+| `turn_wz`, `turn_tolerance_deg`, `turn_timeout_s`, `turn_clear_m` | 0.5, 15, 12, 0 | Turning in place; 0 clearance: a pure rotation is accepted near things. |
 
 Read at startup; tune from a real run.
 

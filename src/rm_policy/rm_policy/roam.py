@@ -80,6 +80,7 @@ KEYS = (
     "retreat_vx", "retreat_m", "retreat_timeout_s", "retreat_cooldown_s",
     "retreat_pinned_range_m",
     "turn_wz", "turn_tolerance_deg", "turn_timeout_s", "turn_clear_m",
+    "recovery_turn_min_deg", "recovery_turn_max_deg",
 )
 _INT_KEYS = ("seed", "draw_attempts")
 
@@ -112,6 +113,10 @@ class RoamLimits:
     turn_tolerance_deg: float
     turn_timeout_s: float
     turn_clear_m: float
+    # After a retreat the robot turns between these two angles, toward the
+    # side with the deepest free strip, before it draws a goal ahead.
+    recovery_turn_min_deg: float
+    recovery_turn_max_deg: float
 
 
 @dataclass(frozen=True)
@@ -181,6 +186,10 @@ def check_limits(limits: RoamLimits) -> Optional[str]:
         return f"roam.turn_timeout_s must be > 0, got {limits.turn_timeout_s}"
     if limits.turn_clear_m < 0.0:
         return f"roam.turn_clear_m must be >= 0, got {limits.turn_clear_m}"
+    if not 0.0 <= limits.recovery_turn_min_deg <= limits.recovery_turn_max_deg <= 180.0:
+        return (f"roam.recovery_turn_min_deg ({limits.recovery_turn_min_deg}) and "
+                f"recovery_turn_max_deg ({limits.recovery_turn_max_deg}) must satisfy "
+                f"0 <= min <= max <= 180")
     return None
 
 
@@ -237,6 +246,68 @@ def nearest_return(scan: Scan, self_radius_m: float) -> float:
         if math.isfinite(r) and r >= floor and r > 0.0 and r < nearest:
             nearest = r
     return nearest
+
+
+# How far the depth search looks: the TG30's reach. A strip with no return
+# inside it over this distance is as open as the lidar can say.
+DEPTH_REACH_M = 30.0
+
+
+def free_depth(scan: Scan, bearing: float, limits: RoamLimits,
+               sector_half_deg: float = 7.5) -> Optional[float]:
+    """How far the strip along `bearing` (corridor_half_width_m wide) is
+    clear of returns, metres, up to DEPTH_REACH_M; None when too few rays in
+    the +-sector_half_deg sector are valid to say (the blind rear, heavy
+    dropout). Body returns ignored."""
+    if (not scan.ranges or not math.isfinite(scan.angle_increment)
+            or scan.angle_increment <= 0.0 or not math.isfinite(scan.angle_min)):
+        return None
+    half_width = limits.corridor_half_width_m
+    half_sector = math.radians(sector_half_deg)
+    floor = max(scan.range_min, limits.self_radius_m)
+    in_sector = valid_in_sector = 0
+    depth = DEPTH_REACH_M
+    for i, r in enumerate(scan.ranges):
+        delta = _wrap(scan.angle_min + i * scan.angle_increment - bearing)
+        sectored = abs(delta) <= half_sector
+        if sectored:
+            in_sector += 1
+        if not (math.isfinite(r) and r >= floor and r > 0.0):
+            continue
+        if sectored:
+            valid_in_sector += 1
+        along = r * math.cos(delta)
+        if along >= 0.0 and abs(r * math.sin(delta)) <= half_width and along < depth:
+            depth = along
+    if in_sector == 0 or valid_in_sector < limits.min_valid_fraction * in_sector:
+        return None
+    return depth
+
+
+def recovery_bearing(scan: Scan, limits: RoamLimits, step_deg: float = 15.0) -> float:
+    """The bearing (radians, +left) to turn to after a retreat: between
+    recovery_turn_min_deg and recovery_turn_max_deg either side, whichever
+    strip is deepest (the most open floor), the smaller turn on a tie. With
+    nothing known, turn right round (180 deg, the way the robot came)."""
+    best_bearing, best_depth = math.pi, -1.0
+    lo, hi = limits.recovery_turn_min_deg, limits.recovery_turn_max_deg
+    candidates = []
+    deg = lo
+    while deg <= hi + 1e-9:
+        candidates.append(deg)
+        deg += step_deg
+    if candidates[-1] < hi - 1e-9:
+        candidates.append(hi)
+    for deg in candidates:
+        for sign in ((1.0,) if deg in (0.0, 180.0) else (1.0, -1.0)):
+            bearing = math.radians(sign * deg)
+            depth = free_depth(scan, bearing, limits)
+            if depth is None:
+                continue
+            if depth > best_depth + 1e-9 or (abs(depth - best_depth) <= 1e-9
+                                             and abs(bearing) < abs(best_bearing)):
+                best_bearing, best_depth = bearing, depth
+    return best_bearing
 
 
 def strip_is_free(scan: Scan, bearing: float, distance: float, limits: RoamLimits) -> Optional[bool]:

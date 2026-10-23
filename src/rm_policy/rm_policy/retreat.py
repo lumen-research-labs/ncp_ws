@@ -145,7 +145,6 @@ class RetreatController:
         self._start_xy: Tuple[float, float] = (0.0, 0.0)
         self._start_at = 0.0
         self._last_end: Optional[float] = None
-        self._used_for_goal = False
         self._retreats = 0
         self._aborts = 0
         self._timeouts = 0
@@ -173,8 +172,9 @@ class RetreatController:
         return self._hold_reason
 
     def goal_fixed(self) -> None:
-        """Every goal fix: the new goal gets one retreat of its own."""
-        self._used_for_goal = False
+        """Every goal fix. Nothing to reset since the recovery turn: the
+        cooldown alone bounds repeated retreats (a retreat always ends in a
+        turn away from what stopped the robot)."""
 
     def abort(self, why: str, now: float) -> Optional[Step]:
         """The node reports a condition the status cannot carry (a pose jump)."""
@@ -230,9 +230,6 @@ class RetreatController:
         if last_cmd_vx < 0.0:
             self._hold_reason = "last request was already a reverse"
             return None
-        if self._used_for_goal:
-            self._hold_reason = "this goal already had its retreat"
-            return None
         if (self._last_end is not None
                 and now - self._last_end < self._limits.retreat_cooldown_s):
             self._hold_reason = (
@@ -242,7 +239,6 @@ class RetreatController:
         self._active = True
         self._start_xy = (float(pose_xy[0]), float(pose_xy[1]))
         self._start_at = now
-        self._used_for_goal = True
         self._retreats += 1
         self._last_reason = STARTED
         self._start_cause = "latched" if fresh_latch else "pinned"

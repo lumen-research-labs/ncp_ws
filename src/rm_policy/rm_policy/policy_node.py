@@ -171,7 +171,9 @@ from rm_policy.retreat import (
     ABORTED, DISTANCE, NOT_CLEAR, RELEASED, STARTED, TIMEOUT as RETREAT_TIMEOUT,
     TURNED, RetreatController, RetreatLimits, SafetyView, TurnController, TurnLimits,
 )
-from rm_policy.roam import RoamSequencer, Scan, load_roam_limits, nearest_return
+from rm_policy.roam import (
+    RoamSequencer, Scan, load_roam_limits, nearest_return, recovery_bearing,
+)
 from rm_policy.vendor import ncp_policy
 
 # ---------------------------------------------------------------------------
@@ -439,6 +441,9 @@ class PolicyNode(rclpy.node.Node):
             turn_wz=roam_limits.turn_wz, turn_tolerance_deg=roam_limits.turn_tolerance_deg,
             turn_timeout_s=roam_limits.turn_timeout_s, turn_clear_m=roam_limits.turn_clear_m,
         ))
+        # The recovery turn's target yaw after a retreat; None while the turn
+        # (if any) is a face-the-goal turn.
+        self._turn_target_yaw: Optional[float] = None
         self._cmd_vel_topic = cmd_vel_topic
         # The last /safety/status: state, reason, the forwarded input topic,
         # and the monotonic time it arrived. None until the first message.
@@ -1096,6 +1101,7 @@ class PolicyNode(rclpy.node.Node):
             if not step.done:
                 if step.reason == STARTED:
                     self._turn.cancel("retreat")
+                    self._turn_target_yaw = None
                     lim = self._retreat.limits
                     self.get_logger().warn(
                         f"policy_node: retreat START ({self._retreat.start_cause}: "
@@ -1107,21 +1113,19 @@ class PolicyNode(rclpy.node.Node):
                 self._publish_reverse(step.vx)
                 return
             if step.reason in (RELEASED, DISTANCE):
-                handoff = self._roam.retreated(now, scan)
-                if handoff is not None:
-                    self._fix_goal(
-                        handoff.offset_x, handoff.offset_y,
-                        why=f"roam #{handoff.n} {handoff.reason} ({step.reason}) "
-                            f"after {handoff.elapsed_s:.0f} s, free on draw "
-                            f"{handoff.attempts}; totals {self._roam.n} hand-offs",
-                    )
-                    self._after_roam_handoff(now)
-                else:
-                    self.get_logger().warn(
-                        f"policy_node: retreat ended ({step.reason}) but no "
-                        f"candidate goal is in free space; holding the current "
-                        f"goal."
-                    )
+                # RECOVERY TURN: away from what stopped the robot, between
+                # recovery_turn_min_deg and max, toward the deepest free
+                # strip; the goal is drawn once the robot faces that way.
+                bearing = recovery_bearing(scan, self._roam.limits)
+                self._turn_target_yaw = self._robot_yaw + bearing
+                self._turn.start(now)
+                self.get_logger().warn(
+                    f"policy_node: retreat ended ({step.reason}); turn START "
+                    f"(recovery): {math.degrees(bearing):+.0f} deg toward the "
+                    f"deepest free strip, then a new goal ahead."
+                )
+                self._publish_zero(reason="turning")
+                return
             elif step.reason == RETREAT_TIMEOUT:
                 self.get_logger().warn(
                     "policy_node: retreat TIMEOUT with the latch still held: "
@@ -1153,11 +1157,39 @@ class PolicyNode(rclpy.node.Node):
         if self._turn.active and self._goal_world_x is not None:
             clear = nearest_return(scan, self._roam.limits.self_radius_m) >= \
                 self._turn.limits.turn_clear_m
-            turn = self._turn.step(now, self._goal_bearing(), clear)
+            recovering = self._turn_target_yaw is not None
+            error = (math.atan2(math.sin(self._turn_target_yaw - self._robot_yaw),
+                                math.cos(self._turn_target_yaw - self._robot_yaw))
+                     if recovering else self._goal_bearing())
+            turn = self._turn.step(now, error, clear)
             if not turn.done:
                 self._publish_turn(turn.wz)
                 return
-            if turn.reason == TURNED:
+            self._turn_target_yaw = None
+            if recovering:
+                # Facing away now: draw the next goal from here. A hold
+                # (nothing free even here) keeps the old goal and warns.
+                self.get_logger().info(
+                    f"policy_node: recovery turn ended ({turn.reason}); drawing a goal ahead."
+                )
+                handoff = self._roam.retreated(now, scan)
+                if handoff is not None:
+                    self._fix_goal(
+                        handoff.offset_x, handoff.offset_y,
+                        why=f"roam #{handoff.n} {handoff.reason} after "
+                            f"{handoff.elapsed_s:.0f} s, free on draw {handoff.attempts}; "
+                            f"totals {self._roam.n} hand-offs",
+                    )
+                    self._after_roam_handoff(now)
+                    if self._turn.active:
+                        self._publish_zero(reason="turning")
+                        return
+                else:
+                    self.get_logger().warn(
+                        "policy_node: recovery turn done but no candidate goal is in "
+                        "free space; holding the current goal."
+                    )
+            elif turn.reason == TURNED:
                 self.get_logger().info(
                     f"policy_node: turn DONE: goal {math.degrees(self._goal_bearing()):+.0f} "
                     f"deg off the nose; the policy takes over, roam clocks restarted."
