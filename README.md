@@ -20,7 +20,7 @@ with a frozen observation/action interface and full logging.
 | work on one package | `src/rm_*/README.md` |
 | see the phase plan and sign-off gates | [`BUILD-PLAN.md`](BUILD-PLAN.md) |
 | **bring the base up on a NEW robot** — the per-robot calibration procedure | [`docs/calibration.md`](docs/calibration.md) |
-| set up the dev workstation | [`docs/dev_env_setup.md`](docs/dev_env_setup.md) |
+| set up a workstation (fresh PC) | [`docs/workstation_setup.md`](docs/workstation_setup.md) |
 | check the safety sign-off record | [`docs/safety_validation.md`](docs/safety_validation.md) |
 
 `BUILD-PLAN.md` is the authority on scope and phase gates.
@@ -176,7 +176,7 @@ config/         interface.yaml (THE contract), safety_limits.yaml,
                 base_calibration.yaml, waypoint.yaml, roam.yaml,
                 slam_toolbox.yaml, topics.yaml, fastdds_unicast_peers.xml
 docs/           architecture, operating_guide, roam, interface_contract,
-                safety_validation, deployment, dev_env_setup
+                safety_validation, deployment, workstation_setup
 src/            the seven rm_* packages (see the table above)
 scripts/        deploy_to_robot.sh, deploy_upstream.sh, prep_robot.sh,
                 run_stack.sh, stack_down.sh, bench_up/down.sh,

@@ -9,7 +9,7 @@
 | [`lidar_sampling.md`](lidar_sampling.md) | Why the 720-beam lidar block is reduced the way it is: the search window, the self-occlusion zones and the `0.0` no-return mapping, with the measurements behind each. | current |
 | [`calibration.md`](calibration.md) | **How to bring `rm_base` up on a NEW robot.** The per-robot measurement procedure, in order, wheels-up before wheels-down. The numbers in `config/base_calibration.yaml` are bernard-1's and do not transfer. | current |
 | [`safety_validation.md`](safety_validation.md) | The Phase 2 sign-off record: which test tiers have passed, what is still operator-only, and which limits are running above their signed values. | current |
-| [`dev_env_setup.md`](dev_env_setup.md) | Workstation ROS2 setup (containerised). | mostly current |
+| [`workstation_setup.md`](workstation_setup.md) | **Set up a fresh PC.** Packages, the two clones side by side, tests, the workstation build, SSH and the wired link to the robot, deploy. | current |
 | [`deployment.md`](deployment.md) | Historical cold-start runbook and the measured rate/TF tables. | **partly superseded** — see its banner |
 | [`../archive/docs/phase1_session_2026-08-08.md`](../archive/docs/phase1_session_2026-08-08.md) | Phase 1 session log. | archived |
 
