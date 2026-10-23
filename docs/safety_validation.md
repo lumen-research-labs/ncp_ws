@@ -297,6 +297,35 @@ The slow zone keeps scaling `vx` alone so the robot can turn away from an
 obstacle. Unit tests pin: curvature preserved, never looser, non-finite axes
 zeroed. Hardware rows for this change are unsigned like the rest of §3.
 
+### 3e. STOP-ZONE RETREAT AND SCOPED AUTO-RELEASE (2026-10-23) — NOT SIGNED OFF
+
+Operator decision for ROAM (the policy node draws its own goals and keeps
+going): a robot latched in the stop zone may back itself out. Two Phase 2
+properties change, deliberately and in writing:
+
+- **A latched e-stop is no longer always zero.** A fresh, pure, straight
+  reverse command (`vx < 0`, `vy` and `wz` exactly 0, within
+  `command_timeout_ms`) passes at `<= retreat_max_vx` (0.12 m/s, the only
+  tape-measured reverse speed), ramped, as `SLOW` / `stop_zone_retreat`,
+  with the latch kept. Every other command stays zero. Every source gets it,
+  the dashboard jog included (S backs a latched robot out without RESET).
+- **The latch releases without `/safety/reset`, in one case only:** after
+  `retreat_release_ticks` (10, 0.5 s) consecutive ticks on which that reverse
+  is being passed AND the wide-arc `min_range` reads at least
+  `retreat_release_range_m` (0.30 m). An obstacle that leaves the zone while
+  the robot sits, or while a source publishes zeros, still needs RESET. Unit
+  tests pin every clause; the replay tier shows the baseline bag (object at
+  0.21 m) never releases and the roam hold scan releases after exactly the
+  look.
+
+Accepted risk, operator's: the rear ~60 degrees of the scan is
+chassis-blocked, so the reverse is blind. The basis is a static scene, a path
+the robot has just driven, and the operator present with KILL. Never
+unattended. The pre-existing finding that a yaw at the 0.15 m stop radius can
+sweep a chassis corner into the obstacle (the `safety_logic` comment that
+justifies unscaled yaw was written for 0.35 m) is recorded as open and is why
+no yaw is tolerated here.
+
 ## 4. Acceptance criteria
 
 - [ ] Every test above passes, recorded with date and operator.

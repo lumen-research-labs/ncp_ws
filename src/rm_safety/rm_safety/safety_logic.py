@@ -33,6 +33,10 @@ Reason vocabulary (returned in Decision.reason and published in SafetyStatus):
     "odom_stale"      — /odom not received within odom_timeout_ms; proprioception
                         lost; cannot safely apply acceleration limiting
     "stop_zone"       — lidar stop-zone latched (obstacle < stop_zone_m)
+    "stop_zone_retreat" — latched, but a fresh pure straight reverse is being
+                        passed at <= retreat_max_vx (state SLOW); the latch
+                        releases after retreat_release_ticks such ticks with
+                        the wide-arc min_range >= retreat_release_range_m
     "command_timeout" — active command source has not published within
                         command_timeout_ms
     "slow_zone"       — obstacle in slow zone; velocity scaled proportionally
@@ -144,6 +148,22 @@ class EstopLimits:
     # when the stack is brought up, not one a browser can make mid-run.
     slow_zone_enabled: bool = True
     stop_zone_enabled: bool = True
+    # ------------------------------------------------------------------
+    # STOP-ZONE RETREAT (2026-10-23). While latched, a fresh, pure, straight
+    # reverse command passes capped to retreat_max_vx (0.0 = the provision
+    # is OFF, and an absent key reads 0.0: this adds motion, so absence must
+    # never enable it). The latch releases only after retreat_release_ticks
+    # consecutive ticks on which that reverse is being passed AND the
+    # wide-arc min_range is at least retreat_release_range_m. See
+    # safety_limits.yaml for the reasoning and docs/safety_validation.md 3e.
+    # ------------------------------------------------------------------
+    retreat_max_vx: float = 0.0
+    retreat_release_range_m: float = 0.30
+    retreat_release_ticks: int = 10
+
+    @property
+    def retreat_enabled(self) -> bool:
+        return self.stop_zone_enabled and self.retreat_max_vx > 0.0
 
     @property
     def any_zone_enabled(self) -> bool:
@@ -296,6 +316,11 @@ class Limits:
                 # e-stop. Absence must never read as "disabled".
                 slow_zone_enabled=bool(e.get("slow_zone_enabled", True)),
                 stop_zone_enabled=bool(e.get("stop_zone_enabled", True)),
+                # .get with 0.0: the opposite default from the zone switches,
+                # because this key ADDS motion. Absence is "off".
+                retreat_max_vx=float(e.get("retreat_max_vx", 0.0)),
+                retreat_release_range_m=float(e.get("retreat_release_range_m", 0.30)),
+                retreat_release_ticks=int(e.get("retreat_release_ticks", 10)),
                 self_occlusion_zones_deg=tuple(
                     (float(lo), float(hi))
                     for lo, hi in e.get("self_occlusion_zones_deg", [])
@@ -331,6 +356,24 @@ class Limits:
                 f"slow_lateral_arc_deg ({es.effective_slow_lateral_arc_deg}) "
                 f"must not exceed lateral_arc_deg ({es.lateral_arc_deg}): the "
                 f"slow zone must sit inside the stop zone's coverage."
+            )
+        if not (math.isfinite(es.retreat_max_vx) and 0.0 <= es.retreat_max_vx
+                <= limits.velocity.max_vx):
+            raise ValueError(
+                f"retreat_max_vx ({es.retreat_max_vx}) must be finite, >= 0 and "
+                f"no faster than max_vx ({limits.velocity.max_vx}): a retreat "
+                f"under the latch may never be faster than driving."
+            )
+        if not (math.isfinite(es.retreat_release_range_m)
+                and es.retreat_release_range_m > es.stop_zone_m):
+            raise ValueError(
+                f"retreat_release_range_m ({es.retreat_release_range_m}) must "
+                f"exceed stop_zone_m ({es.stop_zone_m}): the latch may only "
+                f"release once the scan reads clear of the stop zone with margin."
+            )
+        if es.retreat_release_ticks < 1:
+            raise ValueError(
+                f"retreat_release_ticks ({es.retreat_release_ticks}) must be >= 1."
             )
         return limits
 
@@ -411,6 +454,10 @@ class EvalInputs:
     # a zeroed STOPPED decision with reason="odom_stale" at precedence 2.5
     # (after scan-stale, before stop-zone/command-stale).
     odom_stale: bool = False
+    # Ticks in a row on which a pure reverse was passed under the latch with
+    # the wide-arc min_range at or above retreat_release_range_m. Held by the
+    # node like consecutive_stop_count; evaluate returns the updated value.
+    retreat_clear_count: int = 0
 
 
 @dataclass
@@ -448,6 +495,9 @@ class Decision:
     min_range: float
     estop_latched: bool
     consecutive_stop_count: int
+    # Updated retreat release counter for the node to store (0 on every
+    # tick that is not a passed reverse under the latch).
+    retreat_clear_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -921,7 +971,13 @@ def evaluate(inputs: EvalInputs, limits: Limits) -> Decision:
     3. STOP ZONE     — either the estop is already latched (and reset_latch is
                        False), or the consecutive counter reaches the trigger
                        threshold this cycle.  Latch is set; output zero, state
-                       STOPPED.
+                       STOPPED. ONE EXCEPTION (2026-10-23): a fresh, pure,
+                       straight reverse command passes capped to
+                       retreat_max_vx and ramped, state SLOW, reason
+                       "stop_zone_retreat", latch kept; after
+                       retreat_release_ticks such ticks with the wide-arc
+                       min_range >= retreat_release_range_m the latch clears
+                       and the cycle continues below.
     4. COMMAND STALE — command_age_ms > command_timeout_ms; output zero,
                        state STOPPED.
     5. SLOW ZONE     — obstacle in slow zone, OR in the stop zone but not yet
@@ -1124,19 +1180,75 @@ def _evaluate_inner(inputs: EvalInputs, limits: Limits) -> Decision:
 
     # ------------------------------------------------------------------
     # Precedence 3: STOP ZONE (latched)
+    #
+    # RETREAT (2026-10-23): the one exception to "latched means zero". A
+    # FRESH, PURE, STRAIGHT reverse (vx < 0, vy and wz exactly 0) passes,
+    # capped to retreat_max_vx and ramped, as SLOW / stop_zone_retreat with
+    # the latch kept. Reversing is the one motion that moves away from what
+    # the forward and lateral arcs fired on. Straight only: the stop radius
+    # sits inside the chassis corners, so any yaw sweeps a corner through
+    # the obstacle, and the actor's own output can be vx < 0, so a yaw
+    # tolerance would pass a network tick through a latched e-stop. The
+    # command-timeout check is repeated here because this branch returns
+    # before precedence 4: a reverse that outlives its source must not keep
+    # passing. The release counter climbs only on a passed reverse with the
+    # wide-arc min_range at or above retreat_release_range_m; it resets on
+    # any other tick; at retreat_release_ticks the latch clears and this
+    # tick falls through to the normal pipeline. A clear scan with no
+    # reverse commanded never releases: Phase 2's "no auto-resume" holds for
+    # everything but a commanded retreat. See docs/safety_validation.md 3e.
     # ------------------------------------------------------------------
     if new_latched:
-        return Decision(
-            state=State.STOPPED,
-            reason="stop_zone",
-            out_vx=0.0,
-            out_vy=0.0,
-            out_wz=0.0,
-            clamping_active=False,
-            min_range=min_r,
-            estop_latched=True,
-            consecutive_stop_count=new_count,
+        es = limits.estop
+        pure_reverse = (
+            es.retreat_enabled
+            and inputs.command_age_ms <= limits.timeouts.command_timeout_ms
+            and math.isfinite(inputs.cmd_vx) and inputs.cmd_vx < 0.0
+            and math.isfinite(inputs.cmd_vy) and abs(inputs.cmd_vy) <= _POLICY_VY_EPSILON
+            and math.isfinite(inputs.cmd_wz) and abs(inputs.cmd_wz) <= _POLICY_VY_EPSILON
         )
+        if not pure_reverse:
+            return Decision(
+                state=State.STOPPED,
+                reason="stop_zone",
+                out_vx=0.0,
+                out_vy=0.0,
+                out_wz=0.0,
+                clamping_active=False,
+                min_range=min_r,
+                estop_latched=True,
+                consecutive_stop_count=new_count,
+                retreat_clear_count=0,
+            )
+        clear_count = (
+            inputs.retreat_clear_count + 1
+            if min_r >= es.retreat_release_range_m else 0
+        )
+        if clear_count >= es.retreat_release_ticks:
+            # RELEASE: the commanded retreat has carried the robot clear for
+            # the whole look. The latch and both counters clear, and this
+            # tick continues down the normal pipeline with new_latched False.
+            new_latched = False
+            new_count = 0
+        else:
+            vx = max(inputs.cmd_vx, -es.retreat_max_vx)
+            vx, _vy, _wz, _limited = apply_accel_limit(
+                vx, 0.0, 0.0,
+                inputs.last_vx, inputs.last_vy, inputs.last_wz,
+                inputs.dt, limits,
+            )
+            return Decision(
+                state=State.SLOW,
+                reason="stop_zone_retreat",
+                out_vx=vx,
+                out_vy=0.0,
+                out_wz=0.0,
+                clamping_active=(vx != inputs.cmd_vx),
+                min_range=min_r,
+                estop_latched=True,
+                consecutive_stop_count=new_count,
+                retreat_clear_count=clear_count,
+            )
 
     # ------------------------------------------------------------------
     # Precedence 4: COMMAND STALE
@@ -1224,6 +1336,11 @@ def _evaluate_inner(inputs: EvalInputs, limits: Limits) -> Decision:
         # see safety_limits.yaml self_occlusion_zones_deg), so the circle swept
         # by a pure yaw sits entirely inside the 0.35 m stop zone. There is no
         # clearance to buy by slowing it down.
+        # OPEN ITEM (safety review, 2026-10-23): that geometry was written for
+        # the 0.35 m stop radius. At today's 0.15 m the chassis corners
+        # (0.19-0.23 m from the lidar) lie OUTSIDE the stop circle, so a yaw
+        # with an obstacle at the stop boundary can sweep a corner into it.
+        # Not changed here; recorded in CLAUDE.md.
         #
         # There IS a large cost. Yaw is the only escape manoeuvre this robot
         # has, and scaling it suppressed that manoeuvre exactly when it was

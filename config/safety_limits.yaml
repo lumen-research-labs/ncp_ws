@@ -252,6 +252,48 @@ estop:
   latching: true        # once stopped, stays stopped until /safety/reset
 
   # ------------------------------------------------------------------------
+  # STOP-ZONE RETREAT (2026-10-23, operator decision for ROAM; NOT SIGNED
+  # OFF, docs/safety_validation.md 3e). THE ONE EXCEPTION TO "LATCHED MEANS
+  # ZERO": while the stop zone holds the robot, a FRESH, PURE, STRAIGHT
+  # reverse command (vx < 0, vy and wz exactly 0) passes, capped to
+  # retreat_max_vx and ramped by the acceleration limiter, as SLOW /
+  # stop_zone_retreat. Reversing is the one motion that moves away from what
+  # the forward and lateral arcs fired on; the rear is unmonitored
+  # (chassis-occluded), so this is a BLIND reverse the operator accepts for
+  # a static scene with KILL in hand, never unattended. Straight only: the
+  # stop radius (0.15 m) is INSIDE the chassis corners (0.19-0.23 m from the
+  # lidar), so any yaw while latched sweeps a corner through the obstacle,
+  # and the trained actor's own output can be vx < 0, so a yaw tolerance
+  # would let a network tick through a latched e-stop with no retreat
+  # involved. Every source gets it, the dashboard jog included (S backs a
+  # latched robot out without RESET).
+  #
+  # THE LATCH RELEASES ITSELF ONLY DURING SUCH A RETREAT: on each tick the
+  # reverse is being passed AND the wide-arc min_range reads at least
+  # retreat_release_range_m, a counter climbs; any other tick resets it; at
+  # retreat_release_ticks the latch clears and the tick continues down the
+  # normal pipeline. A clear scan with no reverse commanded never releases
+  # (an obstacle walking away still needs /safety/reset: Phase 2's
+  # "no auto-resume" holds for everything but a commanded retreat).
+  #
+  # 0.12: the only tape-measured reverse speed (0.959 at 0.12 m/s,
+  #       2026-08-29 s3). 0.08 sits at back-left's reverse dead band (PWM
+  #       14.6 asked against ~16 to break loose) and would not move. Must
+  #       not exceed max_vx. An ABSENT key reads as 0.0 = provision OFF: this
+  #       key adds motion, so absence must never enable it.
+  retreat_max_vx: 0.12
+  # 0.30: twice the stop radius, inside the slow band so the policy resumes
+  #       throttled. NOT slow_zone_m (0.55): measured over the wide arcs in
+  #       the room roam runs in, min_range sits at 0.41 m with objects beside
+  #       the robot (tests/fixtures/tg30_roam_hold_scan.yaml), so a release
+  #       at 0.55 would never fire. Refused if not above stop_zone_m.
+  retreat_release_range_m: 0.30
+  # 10 ticks at 20 Hz = 0.5 s = five distinct 10 Hz scans. The latch's own
+  # filter (3 ticks) is for ENTERING a stop and is deliberately quick;
+  # leaving one earns a longer look.
+  retreat_release_ticks: 10
+
+  # ------------------------------------------------------------------------
   # ZONE MASTER SWITCHES — both must stay `true` for the e-stop to be whole.
   #
   # Added 2026-08-30 at operator request: the slow zone's velocity scaling

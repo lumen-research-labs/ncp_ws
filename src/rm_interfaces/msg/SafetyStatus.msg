@@ -39,3 +39,10 @@ float32 min_range
 # True if the safety node altered the outgoing /cmd_vel command via clamping
 # (linear or angular velocity, or lateral zeroing) this cycle.
 bool clamping_active
+
+# The input topic rm_safety is forwarding this cycle (the `topic` of the
+# config/topics.yaml row named by its command_source parameter). A policy
+# node compares it with its own cmd_vel_topic to know whether it is the
+# selected source; the dashboard shows it. Added 2026-10-23 for ROAM's
+# stop-zone retreat.
+string command_topic

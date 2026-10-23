@@ -306,6 +306,7 @@ class SafetyNode(rclpy.node.Node):
         # ------------------------------------------------------------------
         self._estop_latched: bool = False
         self._consecutive_stop_count: int = 0
+        self._retreat_clear_count: int = 0  # ticks of passed reverse with a clear scan
         self._reset_latch: bool = False  # consumed once per tick
 
         # Last published velocity (for acceleration-limit context)
@@ -501,10 +502,16 @@ class SafetyNode(rclpy.node.Node):
         the dashboard and every recorded bag.
         """
         es = self._limits.estop
+        retreat = (
+            f" Retreat under the latch: pure straight reverse at <= "
+            f"{es.retreat_max_vx} m/s, release after {es.retreat_release_ticks} "
+            f"ticks clear to {es.retreat_release_range_m} m."
+            if es.retreat_enabled else " Retreat under the latch: OFF."
+        )
         if es.slow_zone_enabled and es.stop_zone_enabled:
             self.get_logger().info(
                 f"safety_node: lidar e-stop ACTIVE — "
-                f"slow {es.slow_zone_m} m / stop {es.stop_zone_m} m."
+                f"slow {es.slow_zone_m} m / stop {es.stop_zone_m} m.{retreat}"
             )
             return
 
@@ -848,6 +855,7 @@ class SafetyNode(rclpy.node.Node):
             consecutive_stop_count=self._consecutive_stop_count,
             reset_latch=self._reset_latch,
             odom_stale=self._odom_stale,
+            retreat_clear_count=self._retreat_clear_count,
         )
 
         # Consume the reset_latch flag — it is a one-shot per reset service call.
@@ -872,8 +880,21 @@ class SafetyNode(rclpy.node.Node):
         # ------------------------------------------------------------------
         # Update carried state
         # ------------------------------------------------------------------
+        if (self._estop_latched and not decision.estop_latched
+                and not inputs.reset_latch):
+            # The only way a latch clears without /safety/reset is the
+            # retreat release (safety_logic precedence 3). Say so loudly:
+            # the robot resumes under its source's command from here.
+            self.get_logger().warn(
+                f"safety_node: stop-zone latch RELEASED by retreat — "
+                f"{inputs.retreat_clear_count + 1} ticks of passed reverse "
+                f"with min_range >= {self._limits.estop.retreat_release_range_m} m "
+                f"(now {decision.min_range:.2f} m). Driving resumes under "
+                f"'{source.name}'."
+            )
         self._estop_latched = decision.estop_latched
         self._consecutive_stop_count = decision.consecutive_stop_count
+        self._retreat_clear_count = decision.retreat_clear_count
         self._last_vx = decision.out_vx
         self._last_vy = decision.out_vy
         self._last_wz = decision.out_wz
@@ -906,6 +927,7 @@ class SafetyNode(rclpy.node.Node):
             # float32 saturates at +inf; math.inf is a valid IEEE-754 float32 inf.
             status.min_range = float(decision.min_range)
             status.clamping_active = decision.clamping_active
+            status.command_topic = source.topic
             self._status_pub.publish(status)
 
 

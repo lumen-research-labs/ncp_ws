@@ -94,6 +94,7 @@ def _make_inputs(
     consecutive_stop_count: int = 0,
     reset_latch: bool = False,
     odom_stale: bool = False,
+    retreat_clear_count: int = 0,
 ) -> EvalInputs:
     """Helper: build an EvalInputs with a clear 360-deg scan by default."""
     if scan_ranges is None:
@@ -123,6 +124,7 @@ def _make_inputs(
         consecutive_stop_count=consecutive_stop_count,
         reset_latch=reset_latch,
         odom_stale=odom_stale,
+        retreat_clear_count=retreat_clear_count,
     )
 
 
@@ -1246,3 +1248,222 @@ class TestSlowZoneDoesNotScaleYaw:
         )
         d = evaluate(inputs, real_limits)
         assert abs(d.out_wz) <= real_limits.velocity.max_wz + 1e-9
+
+
+# ===========================================================================
+# Stop-zone RETREAT (2026-10-23): the one exception to "latched means zero".
+# A fresh, pure, straight reverse passes capped and ramped under the latch;
+# the latch releases only after N such ticks with a clear wide-arc scan.
+# ===========================================================================
+
+import dataclasses as _dc
+
+
+def _close_scan(limits: Limits, n: int = 360) -> List[float]:
+    """A clear 360-deg scan with one return inside the stop zone dead ahead."""
+    scan = [5.0] * n
+    idx = round((0.0 - (-math.pi)) / math.radians(1.0))
+    scan[idx] = limits.estop.stop_zone_m * 0.8
+    return scan
+
+
+def _latched_inputs(limits: Limits, **overrides) -> EvalInputs:
+    """Latched, close scan, TG30 floor, pure reverse unless overridden."""
+    kwargs = dict(
+        cmd_vx=-0.2, cmd_vy=0.0, cmd_wz=0.0,
+        scan_ranges=_close_scan(limits), scan_range_min=0.01,
+        estop_latched=True,
+        consecutive_stop_count=limits.estop.consecutive_scans_to_trigger,
+        dt=0.05,
+    )
+    kwargs.update(overrides)
+    return _make_inputs(limits, **kwargs)
+
+
+def _with_estop(limits: Limits, **fields) -> Limits:
+    return _dc.replace(limits, estop=_dc.replace(limits.estop, **fields))
+
+
+class TestStopZoneRetreat:
+
+    def test_shipped_config_enables_the_retreat_within_the_clamp(self, real_limits):
+        es = real_limits.estop
+        assert es.retreat_enabled
+        assert 0.0 < es.retreat_max_vx <= real_limits.velocity.max_vx
+        assert es.retreat_release_range_m > es.stop_zone_m
+        assert es.retreat_release_ticks >= 1
+
+    def test_latched_pure_reverse_is_passed_capped_and_ramped(self, real_limits):
+        inp = _latched_inputs(real_limits)
+        dec = evaluate(inp, real_limits)
+        assert dec.state == State.SLOW and dec.reason == "stop_zone_retreat"
+        # First tick from rest: the ramp bounds it before the cap does.
+        ramp = real_limits.acceleration.max_ax * inp.dt
+        assert dec.out_vx == pytest.approx(-min(real_limits.estop.retreat_max_vx, ramp))
+        assert dec.out_vy == 0.0 and dec.out_wz == 0.0
+        assert dec.estop_latched is True
+        assert dec.clamping_active is True
+        assert dec.min_range == pytest.approx(real_limits.estop.stop_zone_m * 0.8)
+        assert dec.retreat_clear_count == 0      # the scan is not clear
+
+    def test_retreat_never_exceeds_retreat_max_vx_in_steady_state(self, real_limits):
+        last = 0.0
+        for _ in range(40):
+            dec = evaluate(_latched_inputs(real_limits, last_vx=last), real_limits)
+            assert dec.reason == "stop_zone_retreat"
+            assert abs(dec.out_vx) <= real_limits.estop.retreat_max_vx + 1e-12
+            last = dec.out_vx
+        assert last == pytest.approx(-real_limits.estop.retreat_max_vx)
+
+    @pytest.mark.parametrize("field, value", [
+        ("cmd_wz", 1e-3), ("cmd_wz", 0.35), ("cmd_wz", -0.35),
+        ("cmd_vy", 1e-3), ("cmd_vy", -0.05),
+        ("cmd_vx", 0.0), ("cmd_vx", 0.1), ("cmd_vx", float("nan")),
+    ])
+    def test_anything_but_pure_straight_reverse_stays_zero(self, real_limits, field, value):
+        dec = evaluate(_latched_inputs(real_limits, **{field: value}), real_limits)
+        assert dec.state == State.STOPPED and dec.reason == "stop_zone"
+        assert (dec.out_vx, dec.out_vy, dec.out_wz) == (0.0, 0.0, 0.0)
+        assert dec.estop_latched is True and dec.retreat_clear_count == 0
+
+    def test_a_stale_reverse_stays_zero(self, real_limits):
+        stale = real_limits.timeouts.command_timeout_ms + 1.0
+        dec = evaluate(_latched_inputs(real_limits, command_age_ms=stale), real_limits)
+        assert dec.state == State.STOPPED and dec.reason == "stop_zone"
+        assert dec.out_vx == 0.0
+
+    def test_a_bad_dt_gives_zero(self, real_limits):
+        dec = evaluate(_latched_inputs(real_limits, dt=0.0), real_limits)
+        assert dec.reason == "stop_zone_retreat" and dec.out_vx == 0.0
+
+    def test_the_teleop_source_gets_it_too(self, real_limits):
+        dec = evaluate(_latched_inputs(real_limits, is_policy_source=False), real_limits)
+        assert dec.reason == "stop_zone_retreat" and dec.out_vx < 0.0
+
+    def test_absent_or_zero_key_keeps_todays_behaviour(self, real_limits):
+        with open(_CONFIG_PATH, "r") as fh:
+            raw = yaml.safe_load(fh)
+        del raw["estop"]["retreat_max_vx"]
+        absent = Limits.from_dict(raw)
+        assert absent.estop.retreat_max_vx == 0.0 and not absent.estop.retreat_enabled
+        for limits in (absent, _with_estop(real_limits, retreat_max_vx=0.0)):
+            dec = evaluate(_latched_inputs(limits), limits)
+            assert dec.state == State.STOPPED and dec.reason == "stop_zone"
+            assert dec.out_vx == 0.0
+
+    @pytest.mark.parametrize("fields, fragment", [
+        (dict(retreat_max_vx=-0.1), "retreat_max_vx"),
+        (dict(retreat_max_vx=float("inf")), "retreat_max_vx"),
+        (dict(retreat_max_vx=9.0), "retreat_max_vx"),
+        (dict(retreat_release_range_m=0.10), "retreat_release_range_m"),
+        (dict(retreat_release_ticks=0), "retreat_release_ticks"),
+    ])
+    def test_incoherent_retreat_keys_are_refused(self, fields, fragment):
+        with open(_CONFIG_PATH, "r") as fh:
+            raw = yaml.safe_load(fh)
+        raw["estop"].update(fields)
+        with pytest.raises(ValueError, match=fragment):
+            Limits.from_dict(raw)
+
+    @pytest.mark.parametrize("override", [
+        dict(is_killed=True), dict(scan_age_ms=1e6), dict(odom_stale=True),
+    ])
+    def test_kill_and_staleness_win_over_the_retreat(self, real_limits, override):
+        dec = evaluate(_latched_inputs(real_limits, **override), real_limits)
+        assert (dec.out_vx, dec.out_vy, dec.out_wz) == (0.0, 0.0, 0.0)
+        assert dec.reason in ("killed", "scan_stale", "odom_stale")
+        assert dec.estop_latched is True
+
+    def test_a_prelatch_reverse_is_zeroed_not_retreated(self, real_limits):
+        inp = _latched_inputs(real_limits, estop_latched=False, consecutive_stop_count=0)
+        dec = evaluate(inp, real_limits)
+        assert dec.state == State.SLOW and dec.reason == "stop_zone_prelatch"
+        assert dec.out_vx == 0.0
+
+    def test_unreachable_with_the_stop_zone_disabled(self, real_limits):
+        limits = _with_estop(real_limits, stop_zone_enabled=False)
+        dec = evaluate(_latched_inputs(limits), limits)
+        assert dec.reason != "stop_zone_retreat"
+        assert dec.estop_latched is False
+
+    # ---- the release ------------------------------------------------------
+
+    def _release_run(self, limits, *, reverse_each_tick=True, clear=True, ticks=None):
+        """Drive the latch with a reverse command and a scan that is clear to
+        the release range (or not); return the decisions."""
+        scan = [5.0] * 360 if clear else _close_scan(limits)
+        if clear:
+            scan[180] = limits.estop.retreat_release_range_m  # exactly at the range: clear
+        decisions = []
+        latched, count, clear_count, last = True, limits.estop.consecutive_scans_to_trigger, 0, 0.0
+        for _ in range(ticks or limits.estop.retreat_release_ticks + 2):
+            inp = _latched_inputs(
+                limits, scan_ranges=scan, estop_latched=latched,
+                consecutive_stop_count=count, retreat_clear_count=clear_count,
+                last_vx=last, cmd_vx=(-0.2 if reverse_each_tick else 0.0),
+            )
+            dec = evaluate(inp, limits)
+            decisions.append(dec)
+            latched, count, clear_count, last = (
+                dec.estop_latched, dec.consecutive_stop_count, dec.retreat_clear_count, dec.out_vx,
+            )
+        return decisions
+
+    def test_release_needs_n_clear_ticks_with_an_active_reverse(self, real_limits):
+        n = real_limits.estop.retreat_release_ticks
+        decs = self._release_run(real_limits)
+        for k, dec in enumerate(decs[:n - 1]):
+            assert dec.estop_latched is True and dec.reason == "stop_zone_retreat", k
+            assert dec.retreat_clear_count == k + 1
+        released = decs[n - 1]
+        assert released.estop_latched is False
+        assert released.reason != "stop_zone_retreat" and released.state in (State.OK, State.SLOW)
+        assert released.consecutive_stop_count == 0 and released.retreat_clear_count == 0
+        # ... and the reverse command itself continues under the normal clamp.
+        assert released.out_vx < 0.0
+
+    def test_a_clear_scan_without_reverse_never_releases(self, real_limits):
+        decs = self._release_run(real_limits, reverse_each_tick=False, ticks=50)
+        assert all(d.estop_latched and d.reason == "stop_zone" and d.out_vx == 0.0 for d in decs)
+
+    def test_a_reverse_into_an_unclear_scan_never_releases(self, real_limits):
+        decs = self._release_run(real_limits, clear=False, ticks=50)
+        assert all(d.estop_latched and d.reason == "stop_zone_retreat" for d in decs)
+        assert all(d.retreat_clear_count == 0 for d in decs)
+
+    def test_the_release_counter_resets_when_the_reverse_pauses(self, real_limits):
+        n = real_limits.estop.retreat_release_ticks
+        scan = [5.0] * 360
+        latched, count, clear_count = True, 3, 0
+        for k in range(n - 1):
+            dec = evaluate(_latched_inputs(real_limits, scan_ranges=scan, estop_latched=latched,
+                                           consecutive_stop_count=count, retreat_clear_count=clear_count),
+                           real_limits)
+            latched, count, clear_count = dec.estop_latched, dec.consecutive_stop_count, dec.retreat_clear_count
+        assert clear_count == n - 1 and latched
+        pause = evaluate(_latched_inputs(real_limits, scan_ranges=scan, estop_latched=True,
+                                         consecutive_stop_count=count, retreat_clear_count=clear_count,
+                                         cmd_vx=0.0), real_limits)
+        assert pause.estop_latched is True and pause.retreat_clear_count == 0
+
+    def test_an_obstacle_returning_after_release_relatches(self, real_limits):
+        latched, count = False, 0
+        for _ in range(real_limits.estop.consecutive_scans_to_trigger):
+            dec = evaluate(_latched_inputs(real_limits, estop_latched=latched,
+                                           consecutive_stop_count=count, cmd_vx=0.1), real_limits)
+            latched, count = dec.estop_latched, dec.consecutive_stop_count
+        assert latched is True and dec.reason == "stop_zone"
+
+    def test_stopped_state_always_means_zero_output(self, real_limits):
+        cases = [
+            _latched_inputs(real_limits, cmd_vx=0.1),
+            _latched_inputs(real_limits, is_killed=True),
+            _latched_inputs(real_limits, scan_age_ms=1e6),
+            _latched_inputs(real_limits, odom_stale=True),
+            _latched_inputs(real_limits, command_age_ms=1e6),
+            _make_inputs(real_limits, cmd_vx=-0.2, command_age_ms=1e6),
+        ]
+        for inp in cases:
+            dec = evaluate(inp, real_limits)
+            if dec.state == State.STOPPED:
+                assert (dec.out_vx, dec.out_vy, dec.out_wz) == (0.0, 0.0, 0.0)

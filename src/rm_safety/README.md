@@ -73,6 +73,7 @@ Every one of them produces **zero velocity** except the last two.
 | 2 | `/scan` older than `scan_timeout_ms`, **or** no valid return anywhere in the monitored arcs | `STOPPED` | `scan_stale` |
 | 3 | `/odom` older than `odom_timeout_ms` | `STOPPED` | `odom_stale` |
 | 4 | Obstacle inside `stop_zone_m` for `consecutive_scans_to_trigger` scans — **latches** | `STOPPED` | `stop_zone` |
+| 4a | Latched, and the source sends a fresh, pure, straight reverse: passed at `<= retreat_max_vx`, ramped, latch kept (see "Stop-zone retreat") | `SLOW` | `stop_zone_retreat` |
 | 5 | Active command source silent for `command_timeout_ms` | `STOPPED` | `command_timeout` |
 | 6 | Obstacle inside `slow_zone_m` | `SLOW` | `slow_zone` / `stop_zone_prelatch` |
 | 7 | Nominal — clamp, acceleration-limit, pass through | `OK` | `ok` |
@@ -237,6 +238,29 @@ Twist best-effort.
   real `evaluate()` with the real `safety_limits.yaml`, ROS-free.
 - Hardware tier: `docs/safety_validation.md` §3. **Operator only** — never run
   by an agent.
+
+## Stop-zone retreat (2026-10-23, not signed off)
+
+The one exception to "latched means zero", added for ROAM so a robot that
+creeps to within `stop_zone_m` of a wall can back itself out instead of
+waiting for a human. While the stop zone holds the robot, a command that is
+**fresh** (within `command_timeout_ms`), **pure** (`vy` and `wz` exactly
+zero) and **reverse** (`vx < 0`) passes, capped to `retreat_max_vx` and
+ramped by the acceleration limiter, as `SLOW` / `stop_zone_retreat`. Anything
+else stays zero. Straight only: the stop radius sits inside the chassis
+corners, so any yaw sweeps a corner through the obstacle, and the trained
+actor's own output can be `vx < 0`, so a yaw tolerance would pass a network
+tick through a latched e-stop. Every source gets it, the jog included.
+
+**The latch releases itself only during such a retreat.** A counter climbs on
+each tick the reverse is passed with the wide-arc `min_range` at or above
+`retreat_release_range_m`, resets on any other tick, and at
+`retreat_release_ticks` the latch clears; `safety_node` logs the edge. A clear
+scan with no reverse commanded never releases: Phase 2's "no auto-resume"
+holds for everything but a commanded retreat. The rear is unmonitored, so this
+is a blind reverse the operator accepts for a static scene with KILL in hand.
+`retreat_max_vx: 0` (or the key absent) switches the provision off. Recorded
+in `docs/safety_validation.md` §3e as unsigned.
 
 ## Clamps scale the whole command (2026-10-09)
 

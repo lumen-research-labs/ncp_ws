@@ -133,6 +133,10 @@ more"**:
 
 **Never "simplify" this into a start/stop pair.**
 
+Since 2026-10-23 a pure straight reverse also passes rm_safety's stop-zone
+latch at a capped speed (the S key backs a latched robot out without RESET);
+see `rm_safety/README.md`, "Stop-zone retreat".
+
 Unlike an autonomous waypoint, jog **allows reverse** — backing out of a corner
 is exactly what repositioning needs, and a human is watching. A jog cancels an
 active waypoint.

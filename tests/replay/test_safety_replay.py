@@ -389,3 +389,66 @@ def _forward_arc_min(scan: Dict, limits: Limits) -> float:
         if abs(a) <= half_fwd and r < best:
             best = r
     return best
+
+
+# ---------------------------------------------------------------------------
+# 5. Stop-zone retreat and its release, against real scans (2026-10-23)
+# ---------------------------------------------------------------------------
+
+_HOLD_SCAN = os.path.join(_FIXTURES, "tg30_roam_hold_scan.yaml")
+
+
+def _retreat_tick(scan: Dict, limits: Limits, *, latched: bool, count: int,
+                  clear_count: int, last_vx: float):
+    inp = EvalInputs(
+        cmd_vx=-0.12, cmd_vy=0.0, cmd_wz=0.0,
+        is_policy_source=True, command_age_ms=0.0,
+        last_vx=last_vx, last_vy=0.0, last_wz=0.0, dt=0.05,
+        scan_ranges=[float(r) for r in scan["ranges"]],
+        scan_angle_min=scan["angle_min"],
+        scan_angle_increment=scan["angle_increment"],
+        scan_range_min=scan["range_min"],
+        scan_range_max=scan["range_max"],
+        scan_age_ms=0.0,
+        is_killed=False, estop_latched=latched,
+        consecutive_stop_count=count, reset_latch=False, odom_stale=False,
+        retreat_clear_count=clear_count,
+    )
+    return evaluate(inp, limits)
+
+
+def test_a_reverse_against_the_baseline_bag_never_releases_the_latch(limits):
+    """The bag has a real object ~0.21 m dead ahead: inside the stop zone and
+    under the release range on every scan, so a commanded retreat is passed
+    (slowly) but the latch never clears."""
+    latched, count, clear_count, last = True, limits.estop.consecutive_scans_to_trigger, 0, 0.0
+    reasons = set()
+    for scan in read_scans(_BAG_DB3, "/scan", expect_points=_TG30_POINTS, expect_frame=_TG30_FRAME):
+        dec = _retreat_tick(scan, limits, latched=latched, count=count,
+                            clear_count=clear_count, last_vx=last)
+        reasons.add(dec.reason)
+        assert dec.estop_latched is True
+        assert dec.retreat_clear_count == 0
+        latched, count, clear_count, last = (
+            dec.estop_latched, dec.consecutive_stop_count, dec.retreat_clear_count, dec.out_vx)
+    assert reasons == {"stop_zone_retreat"}
+    assert last == pytest.approx(-limits.estop.retreat_max_vx)
+
+
+def test_a_reverse_into_the_roam_hold_scan_releases_after_the_look(limits):
+    """The scan captured where roam held (nearest real returns 0.41 m in the
+    arcs) is clear to the release range: a sustained reverse releases the
+    latch after exactly retreat_release_ticks ticks, and not one earlier."""
+    scan = _load_echo_yaml_scan(_HOLD_SCAN)
+    n = limits.estop.retreat_release_ticks
+    latched, count, clear_count, last = True, limits.estop.consecutive_scans_to_trigger, 0, 0.0
+    for k in range(n):
+        dec = _retreat_tick(scan, limits, latched=latched, count=count,
+                            clear_count=clear_count, last_vx=last)
+        if k < n - 1:
+            assert dec.estop_latched is True and dec.reason == "stop_zone_retreat", k
+            assert dec.retreat_clear_count == k + 1
+        latched, count, clear_count, last = (
+            dec.estop_latched, dec.consecutive_stop_count, dec.retreat_clear_count, dec.out_vx)
+    assert dec.estop_latched is False and dec.reason != "stop_zone_retreat"
+    assert dec.out_vx < 0.0            # the reverse continues under the normal clamp
