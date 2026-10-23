@@ -1874,7 +1874,18 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     reverse like forward. Fixed the same day: a pure straight reverse in the
     slow band passes capped to retreat_max_vx instead of scaled, and the
     retreat also starts when SLOW with min_range < retreat_pinned_range_m
-    (0.30) and no goal progress for progress_window_s (`pinned`).
+    (0.30) and no goal progress for progress_window_s (`pinned`). Second
+    live try: retreat, then forward into the same wall, again and again.
+    The log shows why: every stall drew its goal on draw 56 of the sweep,
+    i.e. BEHIND the robot (nothing ahead was free), and M4 cannot steer to
+    a goal off its nose, so it pushed forward and stalled. Daniel: "maybe
+    it needs to turn around". Added a TURN phase (`TurnController`): after
+    any roam hand-off whose goal is more than turn_tolerance_deg (15) off
+    the nose the node turns in place at turn_wz (0.5 rad/s, above the
+    dead band) until the goal is within tolerance, only with nothing
+    within turn_clear_m (0.30, the corners sweep 0.23 m), then the policy
+    starts with the goal ahead; a retreat cancels a turn; the roam clocks
+    restart when the turn is done.
   * **Second live run (zones on): the robot reached its first goal and HELD
     there** ("no candidate goal in free space"). The captured scan
     (`tests/fixtures/tg30_roam_hold_scan.yaml`, 2020 rays, 29 % no-returns)

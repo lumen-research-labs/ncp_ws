@@ -26,6 +26,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src", "rm_policy"))
 
 from rm_policy.roam import (  # noqa: E402
+    nearest_return,
     ARRIVED,
     HOLD_RETRY_S,
     KEYS,
@@ -65,7 +66,8 @@ def _limits(**overrides) -> RoamLimits:
                 draw_attempts=32, progress_window_s=10.0, progress_min_m=0.05,
                 self_radius_m=0.25, retreat_vx=0.12, retreat_m=0.3,
                 retreat_timeout_s=8.0, retreat_cooldown_s=20.0,
-                retreat_pinned_range_m=0.30)
+                retreat_pinned_range_m=0.30, turn_wz=0.5, turn_tolerance_deg=15.0,
+                turn_timeout_s=12.0, turn_clear_m=0.30)
     base.update(overrides)
     return RoamLimits(**base)
 
@@ -203,6 +205,13 @@ def test_the_scan_that_held_the_robot_at_its_first_goal_has_free_bearings():
     naive = dataclasses.replace(lim, self_radius_m=0.0)
     assert all(strip_is_free(scan, math.radians(b), 1.0, naive) is False
                for b in range(-180, 181, 15))
+
+
+def test_nearest_return_ignores_the_body_and_no_returns():
+    body = _scan(lambda a: 0.07 if abs(abs(a) - 105) < 1 else 0.0 if abs(a) > 150 else 0.9)
+    assert nearest_return(body, 0.25) == pytest.approx(0.9)
+    assert nearest_return(_UNKNOWN, 0.25) == math.inf
+    assert nearest_return(Scan([], _AMIN, _INC, 0.01), 0.25) == math.inf
 
 
 def test_draw_avoids_the_wall_and_holds_when_boxed_in():
@@ -482,6 +491,10 @@ def test_non_numeric_and_non_integer_seed_are_refused(key, value, fragment):
     (dict(retreat_timeout_s=0.0), "retreat_timeout_s"),
     (dict(retreat_cooldown_s=-1.0), "retreat_cooldown_s"),
     (dict(retreat_pinned_range_m=0.0), "retreat_pinned_range_m"),
+    (dict(turn_wz=0.0), "turn_wz"),
+    (dict(turn_tolerance_deg=180.0), "turn_tolerance_deg"),
+    (dict(turn_timeout_s=0.0), "turn_timeout_s"),
+    (dict(turn_clear_m=-0.1), "turn_clear_m"),
 ])
 def test_incoherent_limits_are_rejected(overrides, fragment):
     reason = check_limits(_limits(**overrides))

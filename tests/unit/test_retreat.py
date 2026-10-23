@@ -9,6 +9,7 @@ node's source. Pure stdlib + yaml. Workstation tier.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import sys
@@ -22,6 +23,10 @@ sys.path.insert(0, os.path.join(_REPO_ROOT, "src", "rm_policy"))
 from rm_policy.retreat import (  # noqa: E402
     ABORTED,
     DISTANCE,
+    NOT_CLEAR,
+    TURNED,
+    TurnController,
+    TurnLimits,
     RELEASED,
     STARTED,
     STATE_KILLED,
@@ -286,4 +291,65 @@ def test_the_retreat_step_sits_after_the_pose_block_and_before_the_goal_block():
     assert 'self._retreat.abort("pose_jump", now)' in src
     assert "self._roam.retreated(now, scan)" in src
     assert "self._retreat.goal_fixed()" in src[src.index("def _fix_goal("):src.index("def _safety_cb(")]
-    assert '{**self._roam.status(time.monotonic()), **self._retreat.status()}' in src
+    assert '{**self._roam.status(time.monotonic()), **self._retreat.status(),' in src
+    assert '**self._turn.status()}' in src
+
+
+# ---------------------------------------------------------------------------
+# the turn in place
+# ---------------------------------------------------------------------------
+
+def _turn(**overrides) -> TurnController:
+    base = dict(turn_wz=0.5, turn_tolerance_deg=15.0, turn_timeout_s=12.0, turn_clear_m=0.30)
+    base.update(overrides)
+    return TurnController(TurnLimits(**base))
+
+
+def test_turn_is_needed_only_beyond_the_tolerance():
+    t = _turn()
+    assert not t.needed(math.radians(14.0)) and not t.needed(math.radians(-14.0))
+    assert t.needed(math.radians(16.0)) and t.needed(math.radians(-170.0))
+
+
+def test_turn_yaws_toward_the_goal_until_within_tolerance():
+    t = _turn()
+    t.start(0.0)
+    assert t.active and t.status()["turns"] == 1
+    left = t.step(0.2, math.radians(120.0), clear=True)
+    assert (left.vx, left.wz, left.done) == (0.0, 0.5, False)
+    right = t.step(0.4, math.radians(-40.0), clear=True)   # the bearing is re-read each tick
+    assert (right.vx, right.wz, right.done) == (0.0, -0.5, False)
+    done = t.step(0.6, math.radians(10.0), clear=True)
+    assert done.done and done.reason == TURNED and not t.active
+
+
+def test_turn_refuses_when_anything_is_close_and_gives_up_on_timeout():
+    t = _turn()
+    t.start(0.0)
+    refused = t.step(0.2, math.radians(90.0), clear=False)
+    assert refused.done and refused.reason == NOT_CLEAR and refused.wz == 0.0
+    assert t.status()["turn_refused"] == 1
+    t.start(10.0)
+    assert t.step(21.9, math.radians(90.0), clear=True).done is False
+    timed = t.step(22.0, math.radians(90.0), clear=True)
+    assert timed.done and timed.reason == "timeout" and t.status()["turn_timeouts"] == 1
+
+
+def test_a_retreat_cancels_a_turn():
+    t = _turn()
+    t.start(0.0)
+    t.cancel("retreat")
+    assert not t.active and t.status()["turn_last"] == "aborted:retreat"
+
+
+def test_the_node_turns_after_roam_hand_offs_only_with_clear_floor():
+    src = _read(_POLICY_NODE)
+    assert src.count("self._after_roam_handoff(now)") == 2     # the stall/arrival hand-off and the retreated one
+    block = src[src.index("if self._turn.active and self._goal_world_x is not None:"):]
+    block = block[:block.index("# Goal must be defined")]
+    assert "nearest_return(scan, self._roam.limits.self_radius_m)" in block
+    assert "self._publish_turn(turn.wz)" in block and "self._roam.goal_fixed(now)" in block
+    assert src.index("self._retreat.step(") < src.index("if self._turn.active and") < src.index('reason="goal_undefined"')
+    turn_pub = src[src.index("def _publish_turn("):src.index("def _publish_reverse(")]
+    assert "cmd.linear.x = 0.0" in turn_pub and "_prev_action" not in turn_pub
+    assert 'self._turn.cancel("retreat")' in src and 'self._turn.cancel("new goal")' in src

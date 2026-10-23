@@ -1,6 +1,6 @@
 # Roam: the robot picks its own goals
 
-Roam makes each running policy node draw its next goal at random, in free space the lidar can see. A goal is finished when the robot arrives and has stood there for `dwell_s`, when it has been current for `timeout_s`, or when the distance to it has not shrunk by `progress_min_m` within `progress_window_s`. The node then draws a new robot-frame offset within `config/roam.yaml`, fixes it from its current pose, resets the recurrent state and keeps going. A finished goal is never retried.
+Roam makes each running policy node draw its next goal at random, in free space the lidar can see. A goal is finished when the robot arrives and has stood there for `dwell_s`, after `timeout_s`, or when the distance to it has not shrunk by `progress_min_m` within `progress_window_s`. The node then draws a new offset within `config/roam.yaml`, fixes it from its current pose, resets the recurrent state and keeps going.
 
 Roam only moves the goal; the policy drives to it behind rm_safety's clamps, watchdogs and kill. It reads the lidar only to keep the next goal out of walls. It arms nothing.
 
@@ -10,14 +10,15 @@ Roam only moves the goal; the policy drives to it behind rm_safety's clamps, wat
   ```bash
   bash scripts/run_stack.sh stop_zone_enabled:=true slow_zone_enabled:=true
   ```
-- **On a stop-zone e-stop, or pinned at the stop boundary by the slow zone with no progress, the robot backs out by itself.** rm_safety passes one thing there, a straight reverse at `retreat_vx`, and releases a latch after half a second of it with a clear scan. The node reverses up to `retreat_m` or `retreat_timeout_s`, then draws the next goal. The rear is unmonitored: a blind reverse, KILL in hand, never unattended. One retreat per goal, `retreat_cooldown_s` between retreats.
+- **A goal off the nose is faced first.** The node turns in place toward a goal more than `turn_tolerance_deg` off, only with nothing within `turn_clear_m`; M4 cannot steer to a goal beside or behind it.
+- **Stopped by the stop zone, or pinned at its boundary with no progress, the robot backs out by itself.** rm_safety passes one thing there, a straight reverse at `retreat_vx`, and releases a latch after half a second of it with a clear scan. The node reverses up to `retreat_m` or `retreat_timeout_s`, then draws the next goal. The rear is unmonitored: a blind reverse, KILL in hand, never unattended. One retreat per goal, with a cooldown.
 
 ## Turn it on
 
 1. Press ROAM on the dashboard and confirm, or from a robot shell `ros2 param set /policy_node_m4 roam true`. The current goal is kept.
-2. Select the policy and ARM. A robot already at its goal sets off after the dwell.
+2. Select the policy and ARM.
 3. Each hand-off is a `goal fixed (roam #n ...)` log line: reason (`arrived`, `timeout`, `stalled`, `retreated`), seconds the goal lasted, draws tried, totals.
-4. `ros2 topic echo /ncp_debug/m4 --once` carries a `roam` block: the switch, the counters, `holding`, `retreating`, `goal_age_s`.
+4. `ros2 topic echo /ncp_debug/m4 --once` carries a `roam` block: the switch, the counters, `holding`, `retreating`, `turning`.
 
 ## The limits
 
@@ -31,13 +32,12 @@ Roam only moves the goal; the policy drives to it behind rm_safety's clamps, wat
 | `dwell_s`, `timeout_s` | 1.0, 30 | Hold at the goal; the ceiling on one goal. |
 | `progress_window_s`, `progress_min_m` | 10, 0.05 | No progress for this long: `stalled`. |
 | `retreat_vx`, `retreat_m`, `retreat_timeout_s`, `retreat_cooldown_s` | 0.12, 0.3, 8, 20 | The reverse out of an e-stop. |
-| `seed` | 0 | Every node draws the same sequence. |
+| `turn_wz`, `turn_tolerance_deg`, `turn_timeout_s`, `turn_clear_m` | 0.5, 15, 12, 0.30 | The turn toward a goal off the nose. |
 
 Read at startup; tune from a real run.
 
 ## What will look like a bug
 
-- ROAM off keeps the current goal; the robot drives there and latches. KILL is the stop. ROAM off during a retreat ends the reverse.
+- ROAM off keeps the current goal; the robot drives there and latches. KILL is the stop. ROAM off ends a retreat or a turn.
 - **No candidate goal is in free space.** Boxed in; the draw retries once a second. Jog it into open floor.
-- **`retreat TIMEOUT`.** The latch did not release: wheels that did not move, `dry_run`, or an obstacle beside the robot. KILL, reset and jog it out.
-- Counters climb while the robot is KILLED or the node is not the selected source; read them over an armed window.
+- **`retreat TIMEOUT`.** Wheels that did not move, `dry_run`, or an obstacle beside the robot. KILL, reset and jog it out.

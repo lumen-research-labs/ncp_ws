@@ -134,6 +134,26 @@ roam:
   # the same range the latch releases at.
   retreat_pinned_range_m: 0.30
 
+  # ---- the turn: face a goal the policy cannot steer to ------------------
+  # The draw's fallback puts a goal beside or behind when nothing ahead is
+  # free, and M4 cannot steer to a goal off its nose: on 2026-10-23 every
+  # stall redrew a goal behind the robot (draw 56 of the sweep) and it
+  # pushed forward into the same obstacle. After any roam hand-off whose
+  # goal is more than turn_tolerance_deg off the nose, the node turns in
+  # place toward it first and the policy starts with the goal ahead.
+  # 0.5 rad/s: well above the 0.107 rad/s rotational dead band and under
+  #            max_wz 0.8; a 180 deg turn takes ~6 s (the measured ~20 %
+  #            under-rotation at low wz is tolerated by the tolerance).
+  turn_wz: 0.5
+  # 15 deg: inside the +-45 deg cone the draw uses, so the policy sees the
+  #         goal nearly ahead.
+  turn_tolerance_deg: 15.0
+  turn_timeout_s: 12.0
+  # Turn only with nothing closer than this (outside the body radius): the
+  # chassis corners sweep 0.23 m from the lidar. Otherwise the policy gets
+  # the goal as drawn, and a pinned retreat follows if it cannot.
+  turn_clear_m: 0.30
+
   # Seed for the node's own random generator. Every policy node seeds its own
   # generator from this, so two nodes draw the SAME sequence of candidates
   # (their goals still differ: each hands off at its own moments and sees its

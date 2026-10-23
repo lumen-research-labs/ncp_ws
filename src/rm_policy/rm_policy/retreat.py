@@ -1,6 +1,19 @@
 """
-retreat.py — the pure half of ROAM's retreat: back straight out of a
-stop-zone e-stop, then let roam draw a new goal.
+retreat.py — the pure half of ROAM's manoeuvres: back straight out of a
+stop-zone e-stop, and turn in place to face a goal the policy cannot.
+
+The TURN (added the same day, after the first pinned run): the free-space
+draw's fallback puts a goal beside or behind the robot when nothing ahead
+is free, and M4 cannot steer to a goal that is not ahead (it pushes forward
+into whatever stopped it, stalls, and the next draw lands behind again).
+So after every roam hand-off whose goal lies more than `turn_tolerance_deg`
+off the nose, `TurnController` turns the robot in place at `turn_wz` until
+the goal is within tolerance, then the policy gets a goal ahead. It turns
+only when the nearest lidar return (outside the robot's own body) is at
+least `turn_clear_m` away: the chassis corners sweep 0.23 m from the lidar.
+A retreat starting mid-turn cancels it; the turn ends on tolerance, on a
+timeout, or when the scan stops reading clear (the node then lets the
+policy try, and a pinned retreat follows if it cannot).
 
 What it does:
     When rm_safety's stop zone latches while roam is on, the robot is stuck:
@@ -70,6 +83,8 @@ REASON_RETREAT = "stop_zone_retreat"
 _ABORT_REASONS = ("scan_stale", "odom_stale", "command_timeout", "internal_error")
 
 STARTED = "started"
+TURNED = "turned"
+NOT_CLEAR = "not_clear"
 RELEASED = "released"
 DISTANCE = "distance"
 TIMEOUT = "timeout"
@@ -240,4 +255,77 @@ class RetreatController:
             "retreat_aborts": self._aborts,
             "retreat_timeouts": self._timeouts,
             "retreat_last": self._last_reason,
+        }
+
+
+@dataclass(frozen=True)
+class TurnLimits:
+    turn_wz: float             # rad/s, above the measured 0.107 rad/s dead band
+    turn_tolerance_deg: float  # done when the goal is within this of the nose
+    turn_timeout_s: float      # give up turning after this
+    turn_clear_m: float        # turn only with no return closer than this
+
+
+class TurnController:
+    """Turn in place toward a goal the policy cannot reach from here."""
+
+    def __init__(self, limits: TurnLimits) -> None:
+        self._limits = limits
+        self._active = False
+        self._start_at = 0.0
+        self._turns = 0
+        self._timeouts = 0
+        self._refused = 0
+        self._last_reason: Optional[str] = None
+
+    @property
+    def limits(self) -> TurnLimits:
+        return self._limits
+
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    def needed(self, bearing_rad: float) -> bool:
+        return abs(math.degrees(bearing_rad)) > self._limits.turn_tolerance_deg
+
+    def start(self, now: float) -> None:
+        self._active = True
+        self._start_at = now
+        self._turns += 1
+        self._last_reason = STARTED
+
+    def cancel(self, reason: str) -> None:
+        if self._active:
+            self._active = False
+            self._last_reason = f"{ABORTED}:{reason}"
+
+    def step(self, now: float, bearing_rad: float, clear: bool) -> Step:
+        """Once per tick while active: the goal's bearing in the robot frame
+        and whether the scan reads clear around the body."""
+        lim = self._limits
+        if not clear:
+            self._active = False
+            self._refused += 1
+            self._last_reason = NOT_CLEAR
+            return Step(0.0, 0.0, True, NOT_CLEAR)
+        if not self.needed(bearing_rad):
+            self._active = False
+            self._last_reason = TURNED
+            return Step(0.0, 0.0, True, TURNED)
+        if now - self._start_at >= lim.turn_timeout_s:
+            self._active = False
+            self._timeouts += 1
+            self._last_reason = TIMEOUT
+            return Step(0.0, 0.0, True, TIMEOUT)
+        wz = math.copysign(lim.turn_wz, bearing_rad)
+        return Step(0.0, wz, False, None)
+
+    def status(self) -> dict:
+        return {
+            "turning": self._active,
+            "turns": self._turns,
+            "turn_timeouts": self._timeouts,
+            "turn_refused": self._refused,
+            "turn_last": self._last_reason,
         }

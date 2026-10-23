@@ -79,6 +79,7 @@ KEYS = (
     "progress_window_s", "progress_min_m", "self_radius_m",
     "retreat_vx", "retreat_m", "retreat_timeout_s", "retreat_cooldown_s",
     "retreat_pinned_range_m",
+    "turn_wz", "turn_tolerance_deg", "turn_timeout_s", "turn_clear_m",
 )
 _INT_KEYS = ("seed", "draw_attempts")
 
@@ -106,6 +107,11 @@ class RoamLimits:
     retreat_timeout_s: float
     retreat_cooldown_s: float
     retreat_pinned_range_m: float
+    # The turn in place toward a goal off the nose (rm_policy/retreat.py).
+    turn_wz: float
+    turn_tolerance_deg: float
+    turn_timeout_s: float
+    turn_clear_m: float
 
 
 @dataclass(frozen=True)
@@ -167,6 +173,14 @@ def check_limits(limits: RoamLimits) -> Optional[str]:
         return f"roam.retreat_cooldown_s must be >= 0, got {limits.retreat_cooldown_s}"
     if limits.retreat_pinned_range_m <= 0.0:
         return f"roam.retreat_pinned_range_m must be > 0, got {limits.retreat_pinned_range_m}"
+    if limits.turn_wz <= 0.0:
+        return f"roam.turn_wz must be > 0, got {limits.turn_wz}"
+    if not 0.0 < limits.turn_tolerance_deg < 180.0:
+        return f"roam.turn_tolerance_deg must be within (0, 180), got {limits.turn_tolerance_deg}"
+    if limits.turn_timeout_s <= 0.0:
+        return f"roam.turn_timeout_s must be > 0, got {limits.turn_timeout_s}"
+    if limits.turn_clear_m < 0.0:
+        return f"roam.turn_clear_m must be >= 0, got {limits.turn_clear_m}"
     return None
 
 
@@ -210,6 +224,19 @@ def load_roam_limits(path: str) -> RoamLimits:
 
 def _wrap(angle: float) -> float:
     return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def nearest_return(scan: Scan, self_radius_m: float) -> float:
+    """The closest valid return outside the robot's own body, any bearing;
+    inf when there is none (or the scan cannot be read)."""
+    if not scan.ranges:
+        return math.inf
+    floor = max(scan.range_min, self_radius_m)
+    nearest = math.inf
+    for r in scan.ranges:
+        if math.isfinite(r) and r >= floor and r > 0.0 and r < nearest:
+            nearest = r
+    return nearest
 
 
 def strip_is_free(scan: Scan, bearing: float, distance: float, limits: RoamLimits) -> Optional[bool]:

@@ -168,10 +168,10 @@ from rm_policy.policy_runner import PolicyRunner
 from rm_policy.pose_source import Pose2D, detect_pose_jump, pose_is_usable
 from rm_interfaces.msg import SafetyStatus
 from rm_policy.retreat import (
-    ABORTED, DISTANCE, RELEASED, STARTED, TIMEOUT as RETREAT_TIMEOUT,
-    RetreatController, RetreatLimits, SafetyView,
+    ABORTED, DISTANCE, NOT_CLEAR, RELEASED, STARTED, TIMEOUT as RETREAT_TIMEOUT,
+    TURNED, RetreatController, RetreatLimits, SafetyView, TurnController, TurnLimits,
 )
-from rm_policy.roam import RoamSequencer, Scan, load_roam_limits
+from rm_policy.roam import RoamSequencer, Scan, load_roam_limits, nearest_return
 from rm_policy.vendor import ncp_policy
 
 # ---------------------------------------------------------------------------
@@ -435,6 +435,10 @@ class PolicyNode(rclpy.node.Node):
             ),
             status_max_age_s=self._odom_timeout_ms / 1000.0,
         )
+        self._turn = TurnController(TurnLimits(
+            turn_wz=roam_limits.turn_wz, turn_tolerance_deg=roam_limits.turn_tolerance_deg,
+            turn_timeout_s=roam_limits.turn_timeout_s, turn_clear_m=roam_limits.turn_clear_m,
+        ))
         self._cmd_vel_topic = cmd_vel_topic
         # The last /safety/status: state, reason, the forwarded input topic,
         # and the monotonic time it arrived. None until the first message.
@@ -790,6 +794,7 @@ class PolicyNode(rclpy.node.Node):
         self._runner.reset()
         self._roam.goal_fixed(time.monotonic())
         self._retreat.goal_fixed()
+        self._turn.cancel("new goal")
         frame = _MAP_FRAME if self._pose_source == _POSE_SOURCE_MAP else "odom"
         self.get_logger().info(
             f"policy_node: goal fixed ({why}) at ({self._goal_world_x:.3f}, "
@@ -809,6 +814,38 @@ class PolicyNode(rclpy.node.Node):
         age = math.inf if self._safety_stamp is None else now - self._safety_stamp
         return SafetyView(self._safety_state, self._safety_reason, age,
                           self._safety_topic, self._safety_min_range)
+
+    def _goal_bearing(self) -> float:
+        """The fixed goal's bearing in the robot frame, radians, +left."""
+        dx = self._goal_world_x - self._robot_x
+        dy = self._goal_world_y - self._robot_y
+        lx, ly = _rotate_2d(dx, dy, -self._robot_yaw)
+        return math.atan2(ly, lx)
+
+    def _after_roam_handoff(self, now: float) -> None:
+        """A roam hand-off just fixed a goal: if it lies off the nose, turn
+        toward it first. The policy cannot steer to a goal beside or behind
+        it (M4 pushes forward instead), and the draw's fallback puts goals
+        there whenever nothing ahead is free."""
+        bearing = self._goal_bearing()
+        if self._turn.needed(bearing):
+            self._turn.start(now)
+            self.get_logger().info(
+                f"policy_node: turn START: the new goal is "
+                f"{math.degrees(bearing):+.0f} deg off the nose; turning in place at "
+                f"{self._turn.limits.turn_wz} rad/s to within "
+                f"{self._turn.limits.turn_tolerance_deg} deg."
+            )
+
+    def _publish_turn(self, wz: float) -> None:
+        """The turn's command: yaw only, through the one publisher;
+        `previous_action` untouched, as for the retreat."""
+        cmd = Twist()
+        cmd.linear.x = 0.0
+        cmd.linear.y = 0.0
+        cmd.angular.z = float(wz)
+        self._cmd_pub.publish(cmd)
+        self._publish_debug(fault=None, action=(0.0, float(wz)))
 
     def _publish_reverse(self, vx: float) -> None:
         """The retreat's command: straight reverse, nothing else, through the
@@ -905,7 +942,8 @@ class PolicyNode(rclpy.node.Node):
             # What roam is doing: on/off, hand-offs, timeouts, the last
             # reason and the age of the current goal, so the timeout is
             # visible before it fires.
-            "roam": {**self._roam.status(time.monotonic()), **self._retreat.status()},
+            "roam": {**self._roam.status(time.monotonic()), **self._retreat.status(),
+                     **self._turn.status()},
             "weights": self._runner.weights_path or None,
             # Short hash is enough to tell two checkpoints apart at a glance
             # while keeping this message small at 5 Hz; the full hash is in
@@ -1057,6 +1095,7 @@ class PolicyNode(rclpy.node.Node):
         if step is not None:
             if not step.done:
                 if step.reason == STARTED:
+                    self._turn.cancel("retreat")
                     lim = self._retreat.limits
                     self.get_logger().warn(
                         f"policy_node: retreat START ({self._retreat.start_cause}: "
@@ -1076,6 +1115,7 @@ class PolicyNode(rclpy.node.Node):
                             f"after {handoff.elapsed_s:.0f} s, free on draw "
                             f"{handoff.attempts}; totals {self._roam.n} hand-offs",
                     )
+                    self._after_roam_handoff(now)
                 else:
                     self.get_logger().warn(
                         f"policy_node: retreat ended ({step.reason}) but no "
@@ -1103,6 +1143,31 @@ class PolicyNode(rclpy.node.Node):
                 f"{self._retreat.hold_reason}. KILL, reset and jog it out.",
                 throttle_duration_sec=_WARN_THROTTLE_SEC,
             )
+
+        # ------------------------------------------------------------------
+        # TURN in place toward a roam goal off the nose (retreat.py). After
+        # the retreat (which cancels it) and before the goal block: the
+        # network does not run and previous_action is untouched while the
+        # robot turns. Only with nothing within turn_clear_m of the body.
+        # ------------------------------------------------------------------
+        if self._turn.active and self._goal_world_x is not None:
+            clear = nearest_return(scan, self._roam.limits.self_radius_m) >= \
+                self._turn.limits.turn_clear_m
+            turn = self._turn.step(now, self._goal_bearing(), clear)
+            if not turn.done:
+                self._publish_turn(turn.wz)
+                return
+            if turn.reason == TURNED:
+                self.get_logger().info(
+                    f"policy_node: turn DONE: goal {math.degrees(self._goal_bearing()):+.0f} "
+                    f"deg off the nose; the policy takes over, roam clocks restarted."
+                )
+                self._roam.goal_fixed(now)
+            else:
+                self.get_logger().warn(
+                    f"policy_node: turn ended ({turn.reason}); the policy gets the goal "
+                    f"as drawn, {math.degrees(self._goal_bearing()):+.0f} deg off the nose."
+                )
 
         # ------------------------------------------------------------------
         # Goal must be defined. No default is ever substituted (interface.yaml
@@ -1180,6 +1245,11 @@ class PolicyNode(rclpy.node.Node):
                     f"totals {self._roam.n} hand-offs, {self._roam.timeouts} "
                     f"timeouts, {self._roam.stalls} stalls, {self._roam.held} held",
             )
+            self._after_roam_handoff(now)
+            if self._turn.active:
+                # Face it first; the turn block above runs from the next tick.
+                self._publish_zero(reason="turning")
+                return
         elif self._roam.holding:
             self.get_logger().warn(
                 "policy_node: roam: a hand-off is due but no candidate goal is "
