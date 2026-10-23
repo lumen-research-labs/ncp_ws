@@ -19,6 +19,7 @@ observation, runs the network, and publishes a *candidate* command.
 | `observation_builder.py` | pure module | Assembles the 724-element observation. Thin — all normalization is done by the vendored module. |
 | `policy_runner.py` | pure module | Loads the checkpoint, owns the recurrent state, runs one inference tick. No ROS. |
 | `pose_source.py` | pure module | Validates a pose sample and detects discontinuities (SLAM loop closures). |
+| `roam.py` | pure module | ROAM mode: the limits in `config/roam.yaml` and the hand-off clock that draws the next random goal on arrival or timeout. See [`docs/roam.md`](../../docs/roam.md). |
 | `policy_node.py` | ROS2 node | The control loop. The production path. |
 | `lidar_contract.py` | pure module | Reads the lidar block of `config/interface.yaml` (bins, arc, range bounds, search window, self-occlusion zones) for both nodes. |
 | `scan_bridge_node.py` | ROS2 node | `/scan` → `/ncp/scan`, 720 beams. Exists only so the *upstream* node can run unmodified. |
@@ -177,7 +178,8 @@ once observed sitting at a goal.
 **latches**. The latch is not optional — unlatched, drift or a SLAM correction
 could carry the goal back outside the threshold and re-engage the policy, which
 is exactly the drive-past-turn-back oscillation. Arrival is one-way, as in
-training. Re-targeting clears it.
+training. Re-targeting clears it, and so does [roam mode](../../docs/roam.md),
+which draws the next goal after a dwell at the goal or after a timeout.
 
 ---
 

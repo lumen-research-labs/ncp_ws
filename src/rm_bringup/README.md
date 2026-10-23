@@ -54,6 +54,7 @@ the live one is a parameter set, never a restart.
 | `pose_source` | follows `with_slam` | Set explicitly to `odom` **with** `with_slam:=true` to run SLAM while still driving on odometry — the safe way to watch a map build before trusting it. |
 | `with_dashboard` | `true` | `dashboard_controls:=false` serves a read-only page. |
 | `with_waypoint` | **`false`** | The only autonomous motion path here that is not the policy. |
+| (roam) | runtime | Not a launch argument. Every policy node reads `config/roam.yaml`; `roam` is switched from the dashboard or `ros2 param set`. See [`docs/roam.md`](../../docs/roam.md). |
 | `obstacle_dist` | `0.9` | Debug rule only, overriding upstream's 1.5. |
 
 ### The threshold ordering that must be preserved

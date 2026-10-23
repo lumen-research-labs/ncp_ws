@@ -1,0 +1,68 @@
+# roam.yaml — limits for policy_node's ROAM mode: the node draws its own next
+# goal, at random, each time it reaches the current one or gives up on it.
+# THE AUTHORITY for every number roam uses. A missing key refuses to start.
+#
+# WHAT THIS IS FOR: "set waypoints at random and let it run". A policy is
+# exercised leg after leg without an operator clicking a goal each time, and
+# a goal the robot never reaches is dropped after a timeout instead of being
+# held forever.
+#
+# WHAT IT IS NOT: roam only moves the goal. The policy proposes exactly as it
+# does for an operator goal, behind the same clamps, watchdogs and kill. Roam
+# adds no obstacle logic, no retry and no command authority. /safety/kill is
+# the stop. Read with docs/roam.md.
+#
+# Policy-agnostic: M4 steers to the goal, so these are real waypoints. M8-v2
+# ignores the goal, so for it roam only keeps the arrival latch from ending
+# the run and resets the recurrent state at each hand-off.
+
+roam:
+
+  # ---- where the next goal is drawn: ROBOT frame at the hand-off instant ----
+  # Distance, metres, uniform in [range_min_m, range_max_m].
+  # 1.0: the arrival latch is goal_reached_dist (0.4 m, the training
+  #      SUCCESS_DIST). A leg must be well over that or "arrived" would mean
+  #      the robot barely moved. policy_node refuses to start with
+  #      range_min_m <= goal_reached_dist: such a goal would hand off every
+  #      dwell_s without driving.
+  range_min_m: 1.0
+  # 2.5: the static default goal (interface.yaml goal_default_m, operator
+  #      decision 2026-08-27), chosen to sit inside the odometry drift budget.
+  #      Pinned <= goal_default_m by a test.
+  range_max_m: 2.5
+
+  # Bearing, degrees, uniform in [-cap, +cap]; 0 is dead ahead, + is left.
+  # 45: both trained policies only ever saw goals AHEAD (BARN's goal is 10 m
+  #     straight down the corridor), and M4 goes off-distribution once the
+  #     goal is behind. At the shortest leg and widest bearing (1.0 m, 45 deg)
+  #     the normalised goal x is 0.71/5 - 1 = -0.86, inside the -0.92 floor
+  #     BARN produced (CLAUDE.md 2026-10-13). A wider cap is for a policy
+  #     trained on random goal bearings.
+  bearing_cap_deg: 45.0
+
+  # ---- when the next goal is drawn --------------------------------------
+  # Seconds to hold zero after arrival before the next goal. rm_safety's
+  # acceleration limiter (max_ax 0.75) brings 0.25 m/s to rest in ~0.33 s;
+  # 1 s means the robot is physically stopped and the arrival is visible on
+  # the dashboard and in a bag (5 ticks of goal_reached), so an "arrived"
+  # hand-off is distinguishable from an operator re-target.
+  dwell_s: 1.0
+
+  # Give up on a goal this old and draw the next one, whatever the reason
+  # (blocked, stuck, the policy ignores it, killed). The policy-agnostic
+  # bound on an excursion: M4 misses the 0.4 m latch by ~0.5 m and lets the
+  # goal fall behind (off-distribution); M8-v2 never aims at it at all. The
+  # farthest leg is 2.5 m, 10 s at the 0.25 m/s clamp, and M4's heading
+  # converges ~4x slower than its dynamics expect under the uniform clamp,
+  # so 30 s is a starting value. Every hand-off log line carries the elapsed
+  # seconds: set this from the arrival-time distribution of a real run.
+  # Counted as `timeouts` on the debug stream. NOT a recovery: a robot held
+  # by rm_safety or by an obstacle does not move toward a new goal either.
+  timeout_s: 30.0
+
+  # Seed for the node's own random generator. Every policy node seeds its own
+  # generator from this, so two nodes draw the SAME sequence of offsets (the
+  # world goals still differ, because each hands off at its own moments) and
+  # a run is reproducible: same seed, same relative course. Change it for a
+  # different course.
+  seed: 0

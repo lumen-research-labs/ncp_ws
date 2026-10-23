@@ -179,6 +179,14 @@ Launch arguments:
                   armed. Its pose_source follows this file's, so a waypoint is
                   always in the frame the policy is driving in.
 
+    (roam)        NOT a launch argument. Every policy node reads
+                  config/roam.yaml at startup, and roam is switched at
+                  runtime (the dashboard's ROAM button, or `ros2 param set
+                  /policy_node_m4 roam true`): an operator act after
+                  bring-up, like arming. On, each policy node draws its own
+                  next goal on arrival or timeout and keeps going; it arms
+                  nothing. See docs/roam.md.
+
 Bringing the WHOLE stack up:
     This file now starts everything ROS-side, so it is the one command. It
     does NOT do the host-level cleanup that must happen first — killing the
@@ -253,6 +261,7 @@ _LAUNCH_DIR = pathlib.Path(__file__).resolve().parent
 _REPO_ROOT = _LAUNCH_DIR.parents[2]
 _DEFAULT_LIMITS_PATH = str(_REPO_ROOT / "config" / "safety_limits.yaml")
 _DEFAULT_TOPICS_PATH = str(_REPO_ROOT / "config" / "topics.yaml")
+_DEFAULT_ROAM_PATH = str(_REPO_ROOT / "config" / "roam.yaml")
 
 # The command-source table: every policy node's name, command topic and debug
 # stream come from here, and rm_safety and the dashboard read the same file
@@ -571,6 +580,10 @@ def _policy_consumer(context):
             ),
             "interface_config_path": interface,
             "safety_limits_path": _DEFAULT_LIMITS_PATH,
+            # Read at startup whether or not roam is on, so a bad file fails
+            # the launch. `roam` itself is a runtime parameter, not a launch
+            # argument (see the docstring).
+            "roam_config_path": _DEFAULT_ROAM_PATH,
         }
         # An empty `weights` must be OMITTED, not passed: rclpy aborts on
         # `-p weights:=` (see _upstream_process). Empty is the default

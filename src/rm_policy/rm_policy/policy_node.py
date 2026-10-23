@@ -17,6 +17,13 @@ What it does:
          goal does not exist and this node MUST NOT drive — no default goal
          vector is ever substituted (interface.yaml `goal_local.failure_mode`
          is explicit that a plausible-looking goal is worse than no goal).
+         With `roam` on (a runtime parameter) a finished goal is replaced:
+         `dwell_s` after arrival, or `timeout_s` after a fix with no
+         arrival, the node draws a random robot-frame offset within
+         `config/roam.yaml` and fixes it from the current pose, exactly as
+         a re-target would (`rm_policy/roam.py`). A goal the robot takes
+         too long to reach switches anyway; a timed-out goal is never
+         retried.
       3. Calls `rm_policy.observation_builder` to assemble the 724-element
          observation (720 lidar + 2 dynamic robot-frame goal + 2 previous
          action), with the lidar geometry, search window and self-occlusion
@@ -80,6 +87,13 @@ Parameters:  pose_source      (str, "odom") — "odom" reads the pose from /odom
                               MAP frame on the first usable pose, so it stops
                               migrating with odometry drift. Read once at
                               startup; a runtime set is REJECTED.
+Parameters:  roam             (bool, false) — SETTABLE AT RUNTIME. On: the
+                              node draws its own next goal on arrival (after
+                              a dwell) or on a timeout. Off: the current goal
+                              is kept; nothing stops. Arms nothing.
+Parameters:  roam_config_path (str, <repo-relative default>) — path to
+                              config/roam.yaml, read once at startup whether
+                              or not roam is on.
 Failure mode:
     - Node refuses to construct (raises, never starts spinning) if:
         * `config/interface.yaml` cannot be read, or its `interface_version`
@@ -89,6 +103,8 @@ Failure mode:
         * `config/safety_limits.yaml` cannot be read.
         * `cmd_vel_topic` resolves to `/cmd_vel`.
         * `weights` is non-empty and fails to load (see policy_runner.py).
+        * `config/roam.yaml` is missing, lacks a key, is incoherent, or its
+          `range_min_m` does not exceed `goal_reached_dist` (see roam.py).
     - Before the first `/odom` message: goal undefined -> publish zero every
       tick, throttled warning. No motion is possible on startup.
     - `pose_source:="map"` and the map -> base_footprint transform missing,
@@ -137,6 +153,7 @@ from rm_policy.lidar_contract import lidar_contract_from
 from rm_policy.observation_builder import build_observation
 from rm_policy.policy_runner import PolicyRunner
 from rm_policy.pose_source import Pose2D, detect_pose_jump, pose_is_usable
+from rm_policy.roam import RoamSequencer, load_roam_limits
 from rm_policy.vendor import ncp_policy
 
 # ---------------------------------------------------------------------------
@@ -159,6 +176,7 @@ _SUPPORTED_INTERFACE_VERSIONS = ("3.0.0", "4.0.0")
 _THIS_DIR = pathlib.Path(__file__).parent.resolve()
 _DEFAULT_INTERFACE_CONFIG_PATH = str(_THIS_DIR.parents[2] / "config" / "interface.yaml")
 _DEFAULT_SAFETY_LIMITS_PATH = str(_THIS_DIR.parents[2] / "config" / "safety_limits.yaml")
+_DEFAULT_ROAM_CONFIG_PATH = str(_THIS_DIR.parents[2] / "config" / "roam.yaml")
 
 # ---------------------------------------------------------------------------
 # Default topic names.
@@ -251,6 +269,8 @@ class PolicyNode(rclpy.node.Node):
         self.declare_parameter("safety_limits_path", _DEFAULT_SAFETY_LIMITS_PATH)
         self.declare_parameter("pose_source", _POSE_SOURCE_ODOM)
         self.declare_parameter("goal_reached_dist", ncp_policy.SUCCESS_DIST)
+        self.declare_parameter("roam", False)
+        self.declare_parameter("roam_config_path", _DEFAULT_ROAM_CONFIG_PATH)
 
         scan_topic = self._get_str_param("scan_topic")
         odom_topic = self._get_str_param("odom_topic")
@@ -262,6 +282,8 @@ class PolicyNode(rclpy.node.Node):
         interface_config_path = self._get_str_param("interface_config_path")
         safety_limits_path = self._get_str_param("safety_limits_path")
         self._goal_reached_dist = self._get_double_param("goal_reached_dist")
+        roam_config_path = self._get_str_param("roam_config_path")
+        roam_on = bool(self.get_parameter("roam").get_parameter_value().bool_value)
         self._pose_source = self._get_str_param("pose_source")
         if self._pose_source not in (_POSE_SOURCE_ODOM, _POSE_SOURCE_MAP):
             raise ValueError(
@@ -352,6 +374,24 @@ class PolicyNode(rclpy.node.Node):
         self._pose_max_age_s: float = self._odom_timeout_ms / 1000.0
 
         # ------------------------------------------------------------------
+        # Roam limits — read whether or not roam is on, so a bad file refuses
+        # the node here rather than failing the first ROAM press. A goal drawn
+        # inside the arrival radius would hand off every dwell without
+        # driving, so the shortest leg must clear goal_reached_dist.
+        # ------------------------------------------------------------------
+        try:
+            roam_limits = load_roam_limits(roam_config_path)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"policy_node: {exc}") from exc
+        if roam_limits.range_min_m <= self._goal_reached_dist:
+            raise RuntimeError(
+                f"policy_node: {roam_config_path!r} range_min_m "
+                f"{roam_limits.range_min_m} must exceed goal_reached_dist "
+                f"{self._goal_reached_dist}: a goal drawn inside the arrival "
+                f"radius would hand off every dwell without driving."
+            )
+
+        # ------------------------------------------------------------------
         # Policy runner — constructed (and weights loaded, if given) before
         # any subscription/timer exists, so a bad weights file prevents the
         # node from starting at all.
@@ -359,6 +399,12 @@ class PolicyNode(rclpy.node.Node):
         self._runner = PolicyRunner(
             weights_path=weights_path, obs_dim=self._lidar.obs_dim,
         )
+
+        # The roam sequencer owns the hand-off clocks and the next-goal draw.
+        # Built before any subscription: the first /odom callback can fix a
+        # goal, and every fix tells the sequencer.
+        self._roam = RoamSequencer(roam_limits)
+        self._roam.set_on(roam_on, time.monotonic())
 
         # ------------------------------------------------------------------
         # Sensor state — everything starts "never received" (infinitely
@@ -453,6 +499,13 @@ class PolicyNode(rclpy.node.Node):
             f"rate={self._control_rate_hz} Hz, weights={weights_path or '<random>'!r}, "
             f"goal_offset=({self._goal_offset_x}, {self._goal_offset_y}) m — "
             f"NOT YET APPLIED (undefined until the first /odom message)."
+        )
+        self.get_logger().info(
+            f"policy_node: roam {'ON' if roam_on else 'off'}; limits from "
+            f"{roam_config_path!r}: {roam_limits.range_min_m}-"
+            f"{roam_limits.range_max_m} m within +-{roam_limits.bearing_cap_deg} "
+            f"deg, dwell {roam_limits.dwell_s} s, timeout {roam_limits.timeout_s} s, "
+            f"seed {roam_limits.seed}."
         )
         # Provenance, logged once at full length. The short form goes out on
         # /ncp_debug every tick; this is the line to grep when asking months
@@ -573,7 +626,7 @@ class PolicyNode(rclpy.node.Node):
         """Runtime re-targeting: setting `goal_x`/`goal_y` re-fixes the goal
         from the robot's CURRENT pose.
 
-        Only the goal offsets are settable. Topics, the weights path and the
+        Only the goal offsets and `roam` are settable. Topics, the weights path and the
         config paths are structural — changing them at runtime would mean a
         half-reconfigured node, so a set is REJECTED rather than accepted and
         ignored (the failure mode this project already hit once with
@@ -592,7 +645,14 @@ class PolicyNode(rclpy.node.Node):
         goal that no longer exists.
         """
         offsets = {}
+        roam: Optional[bool] = None
         for param in params:
+            if param.name == "roam":
+                # Declared bool: rclpy refuses a set of another type before
+                # this callback runs. Applied after the goal, below, so a
+                # mixed atomic set starts both clocks at the same instant.
+                roam = bool(param.value)
+                continue
             if param.name not in ("goal_x", "goal_y"):
                 return SetParametersResult(
                     successful=False,
@@ -608,22 +668,48 @@ class PolicyNode(rclpy.node.Node):
                 )
             offsets[param.name] = value
 
-        self._goal_offset_x = offsets.get("goal_x", self._goal_offset_x)
-        self._goal_offset_y = offsets.get("goal_y", self._goal_offset_y)
-
-        if self._odom_stamp is None:
-            # No pose yet, so there is nothing to re-fix against. The offsets
-            # are stored and the normal first-/odom path will apply them —
-            # this is not an error, and it must NOT invent a pose.
-            self.get_logger().warn(
-                "policy_node: goal offset updated to "
-                f"({self._goal_offset_x}, {self._goal_offset_y}) but no /odom "
-                "has arrived — goal stays UNDEFINED until it does."
-            )
-            return SetParametersResult(successful=True)
-
-        self._fix_goal(self._goal_offset_x, self._goal_offset_y, why="parameter set")
+        if offsets:
+            self._goal_offset_x = offsets.get("goal_x", self._goal_offset_x)
+            self._goal_offset_y = offsets.get("goal_y", self._goal_offset_y)
+            if self._odom_stamp is None:
+                # No pose yet, so there is nothing to re-fix against. The
+                # offsets are stored and the normal first-/odom path will
+                # apply them — this is not an error, and it must NOT invent
+                # a pose.
+                self.get_logger().warn(
+                    "policy_node: goal offset updated to "
+                    f"({self._goal_offset_x}, {self._goal_offset_y}) but no /odom "
+                    "has arrived — goal stays UNDEFINED until it does."
+                )
+            else:
+                self._fix_goal(self._goal_offset_x, self._goal_offset_y,
+                               why="parameter set")
+        if roam is not None:
+            self._set_roam(roam)
         return SetParametersResult(successful=True)
+
+    def _set_roam(self, on: bool) -> None:
+        """Switch roam. Logged either way; the current goal is always kept.
+
+        Switching off never stops the robot: it drives to the current goal
+        and latches there as it always did. KILL is the stop.
+        """
+        changed = self._roam.set_on(on, time.monotonic())
+        lim = self._roam.limits
+        if on:
+            self.get_logger().info(
+                f"policy_node: roam ON{'' if changed else ' (already on)'}: "
+                f"next goal drawn {lim.dwell_s} s after arrival or "
+                f"{lim.timeout_s} s after a fix with no arrival, "
+                f"{lim.range_min_m}-{lim.range_max_m} m within "
+                f"+-{lim.bearing_cap_deg} deg, seed {lim.seed}; current goal kept."
+            )
+        else:
+            self.get_logger().info(
+                f"policy_node: roam OFF{'' if changed else ' (already off)'} after "
+                f"{self._roam.n} hand-off(s), {self._roam.timeouts} timeout(s); "
+                f"current goal kept, the robot stops there."
+            )
 
     def _fix_goal(self, offset_x: float, offset_y: float, why: str) -> None:
         """Fix the goal from the CURRENT pose. The ONE place the goal is written.
@@ -653,6 +739,7 @@ class PolicyNode(rclpy.node.Node):
         self._prev_action_v = 0.0
         self._prev_action_w = 0.0
         self._runner.reset()
+        self._roam.goal_fixed(time.monotonic())
         frame = _MAP_FRAME if self._pose_source == _POSE_SOURCE_MAP else "odom"
         self.get_logger().info(
             f"policy_node: goal fixed ({why}) at ({self._goal_world_x:.3f}, "
@@ -742,6 +829,10 @@ class PolicyNode(rclpy.node.Node):
             "interface_version": self._interface_version,
             "n_beams": self._lidar.n_beams,
             "goal_reached": self._goal_reached,
+            # What roam is doing: on/off, hand-offs, timeouts, the last
+            # reason and the age of the current goal, so the timeout is
+            # visible before it fires.
+            "roam": self._roam.status(time.monotonic()),
             "weights": self._runner.weights_path or None,
             # Short hash is enough to tell two checkpoints apart at a glance
             # while keeping this message small at 5 Hz; the full hash is in
@@ -926,6 +1017,19 @@ class PolicyNode(rclpy.node.Node):
                 f"(< {self._goal_reached_dist} m) — holding zero. This is the "
                 f"episode ending, as it would in training. Re-target to start "
                 f"another."
+            )
+        # ROAM. Sits here and nowhere earlier: every return above this line
+        # is a tick without a trusted pose, and a goal can only be fixed from
+        # one. One decision per tick. A hand-off is a re-target, so it clears
+        # the latch and this same tick drives toward the new goal. With roam
+        # off the sequencer only records the arrival edge and returns None.
+        handoff = self._roam.step(now, self._goal_reached)
+        if handoff is not None:
+            self._fix_goal(
+                handoff.offset_x, handoff.offset_y,
+                why=f"roam #{handoff.n} {handoff.reason} after "
+                    f"{handoff.elapsed_s:.0f} s; totals {self._roam.n} hand-offs, "
+                    f"{self._roam.timeouts} timeouts",
             )
         if self._goal_reached:
             self._publish_zero(reason="goal_reached")
