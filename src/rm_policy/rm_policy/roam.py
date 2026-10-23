@@ -27,10 +27,11 @@ What it does:
     goal plus `clearance_m`, `corridor_half_width_m` wide, must hold no
     return. No-return rays are UNKNOWN, not free, so a candidate needs at
     least `min_valid_fraction` of the rays over its strip to be valid. Up to
-    `draw_attempts` random candidates are tried, then `draw_attempts`
-    bearings at the shortest leg; if none is free the sequencer HOLDS the
-    current goal (`holding`, counted in `held`) and retries once a second, so
-    a boxed-in robot waits instead of being sent through a wall.
+    `draw_attempts` random candidates are tried inside the cone, then the
+    shortest leg at `draw_attempts` bearings all round, nearest heading
+    first; if none is free the sequencer HOLDS the current goal (`holding`,
+    counted in `held`) and retries once a second, so a boxed-in robot waits
+    instead of being sent through a wall.
 
     The node calls `goal_fixed(now)` on EVERY goal fix, `set_on(on, now)` on
     the switch and `step(now, reached, goal_dist, scan)` once per tick after
@@ -74,7 +75,7 @@ HOLD_RETRY_S = 1.0
 KEYS = (
     "range_min_m", "range_max_m", "bearing_cap_deg", "dwell_s", "timeout_s", "seed",
     "corridor_half_width_m", "clearance_m", "min_valid_fraction", "draw_attempts",
-    "progress_window_s", "progress_min_m",
+    "progress_window_s", "progress_min_m", "self_radius_m",
 )
 _INT_KEYS = ("seed", "draw_attempts")
 
@@ -93,6 +94,7 @@ class RoamLimits:
     draw_attempts: int
     progress_window_s: float
     progress_min_m: float
+    self_radius_m: float
 
 
 @dataclass(frozen=True)
@@ -141,6 +143,9 @@ def check_limits(limits: RoamLimits) -> Optional[str]:
         return f"roam.progress_window_s must be > 0, got {limits.progress_window_s}"
     if limits.progress_min_m < 0.0:
         return f"roam.progress_min_m must be >= 0, got {limits.progress_min_m}"
+    if not 0.0 <= limits.self_radius_m < limits.range_min_m:
+        return (f"roam.self_radius_m must be >= 0 and below roam.range_min_m "
+                f"({limits.range_min_m}), got {limits.self_radius_m}")
     return None
 
 
@@ -194,6 +199,12 @@ def strip_is_free(scan: Scan, bearing: float, distance: float, limits: RoamLimit
     False: a return lies inside the strip.
     None: unknown, too few valid rays over the strip (no-returns), or the
     scan cannot be read.
+
+    Returns closer than `self_radius_m` are the robot's own body (the
+    lidar's standoffs at 0.07 m, the chassis corners at 0.19-0.23 m on the
+    TG30) and are unknown, never obstacles: a 0.07 m return lies inside the
+    strip of every bearing within 90 degrees of it, so counting it blocked
+    the whole circle on 2026-10-23 and held the robot at its first goal.
     """
     if (not scan.ranges or not math.isfinite(scan.angle_increment)
             or scan.angle_increment <= 0.0 or not math.isfinite(scan.angle_min)):
@@ -201,6 +212,7 @@ def strip_is_free(scan: Scan, bearing: float, distance: float, limits: RoamLimit
     reach = distance + limits.clearance_m
     half_width = limits.corridor_half_width_m
     half_angle = math.atan2(half_width, reach)
+    floor = max(scan.range_min, limits.self_radius_m)
     in_window = 0
     valid_in_window = 0
     for i, r in enumerate(scan.ranges):
@@ -208,7 +220,7 @@ def strip_is_free(scan: Scan, bearing: float, distance: float, limits: RoamLimit
         windowed = abs(delta) <= half_angle
         if windowed:
             in_window += 1
-        if not (math.isfinite(r) and r >= scan.range_min and r > 0.0):
+        if not (math.isfinite(r) and r >= floor and r > 0.0):
             continue
         if windowed:
             valid_in_window += 1
@@ -312,12 +324,18 @@ class RoamSequencer:
             bearing = self._rng.uniform(-cap, cap)
             if scan is None or strip_is_free(scan, bearing, distance, lim):
                 return (*self._candidate(distance, bearing), attempts)
-        # Nothing free at random: the shortest leg across the cone, which
-        # needs the least clear floor, before giving up.
-        n = lim.draw_attempts
-        for k in range(n):
+        # Nothing free at random inside the cone: the shortest leg, which
+        # needs the least clear floor, at evenly spaced bearings ALL ROUND,
+        # nearest heading first. A robot that has just arrived usually faces
+        # whatever it drove up to, and a goal beside or behind it (the
+        # policy's weak side) beats holding forever. The stall watchdog
+        # re-draws from the new heading if the policy cannot turn to it.
+        n = max(lim.draw_attempts, 2)
+        bearings = sorted(
+            (-math.pi + 2.0 * math.pi * (k + 0.5) / n for k in range(n)), key=abs,
+        )
+        for bearing in bearings:
             attempts += 1
-            bearing = -cap + (2.0 * cap) * (k + 0.5) / n if n > 1 else 0.0
             if strip_is_free(scan, bearing, lim.range_min_m, lim):
                 return (*self._candidate(lim.range_min_m, bearing), attempts)
         return None

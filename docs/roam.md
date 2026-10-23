@@ -10,7 +10,6 @@ Roam only moves the goal; the policy drives to it behind rm_safety's clamps, wat
   ```bash
   bash scripts/run_stack.sh stop_zone_enabled:=true slow_zone_enabled:=true
   ```
-- `m4` steers to the goal. `m8v2` ignores it (measured 2026-10-09), so with `m8v2` roam only advances the counters.
 
 ## Turn it on
 
@@ -23,11 +22,12 @@ Roam only moves the goal; the policy drives to it behind rm_safety's clamps, wat
 
 | key | starting value | what it does |
 |---|---|---|
-| `range_min_m`, `range_max_m` | 1.0, 2.5 | Leg length. The shortest must exceed `goal_reached_dist` (0.4 m). |
+| `range_min_m`, `range_max_m` | 0.6, 2.5 | Leg length. The shortest must exceed `goal_reached_dist` (0.4 m). |
 | `bearing_cap_deg` | 45 | The draw stays within this of straight ahead. |
-| `corridor_half_width_m`, `clearance_m` | 0.20, 0.5 | The strip to the goal plus the clearance must hold no return. |
+| `corridor_half_width_m`, `clearance_m` | 0.20, 0.3 | The strip to the goal plus the clearance must hold no return. |
 | `min_valid_fraction` | 0.5 | No-return rays are unknown; a strip needs this share of valid rays. |
-| `draw_attempts` | 32 | Random candidates, then as many at the shortest leg, before holding. |
+| `self_radius_m` | 0.25 | Returns closer than this are the robot's own body, not obstacles. |
+| `draw_attempts` | 32 | Random candidates in the cone, then the shortest leg all round, nearest heading first, before holding. |
 | `dwell_s` | 1.0 | Hold at the goal before the next draw. |
 | `progress_window_s`, `progress_min_m` | 10, 0.05 | No progress for this long: `stalled`, the goal switches. |
 | `timeout_s` | 30 | The hard ceiling on one goal. |
@@ -38,7 +38,6 @@ The file is read at startup. Set the two windows from the elapsed seconds the ha
 ## Turn it off, and what will look like a bug
 
 - ROAM off keeps the current goal. The robot drives there and latches. KILL is the stop.
-- The pause at each goal is the dwell.
 - **The robot stops and the log says no candidate goal is in free space.** It is boxed in: `holding` is true and the draw retries once a second. Jog it into open floor.
 - Timeouts and stalls keep counting while the robot is KILLED or the node is not the selected source. Read the counters over an armed window.
 - A manual re-target during roam is accepted; the clocks restart.

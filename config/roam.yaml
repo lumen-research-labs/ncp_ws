@@ -25,12 +25,15 @@ roam:
 
   # ---- where the next goal is drawn: ROBOT frame at the hand-off instant ----
   # Distance, metres, uniform in [range_min_m, range_max_m].
-  # 1.0: the arrival latch is goal_reached_dist (0.4 m, the training
-  #      SUCCESS_DIST). A leg must be well over that or "arrived" would mean
-  #      the robot barely moved. policy_node refuses to start with
-  #      range_min_m <= goal_reached_dist: such a goal would hand off every
-  #      dwell_s without driving.
-  range_min_m: 1.0
+  # 0.6: the arrival latch is goal_reached_dist (0.4 m, the training
+  #      SUCCESS_DIST), so the shortest leg moves the robot at least 0.2 m.
+  #      policy_node refuses to start with range_min_m <= goal_reached_dist:
+  #      such a goal would hand off every dwell_s without driving. Short
+  #      legs are what get the robot out of clutter: at its first goal on
+  #      2026-10-23 it sat with objects 0.41 m to both sides and 1.0 m
+  #      ahead, and no 1.0 m leg was free in any direction
+  #      (tests/fixtures/tg30_roam_hold_scan.yaml); a 0.6 m leg ahead was.
+  range_min_m: 0.6
   # 2.5: the static default goal (interface.yaml goal_default_m, operator
   #      decision 2026-08-27), chosen to sit inside the odometry drift budget.
   #      Pinned <= goal_default_m by a test.
@@ -50,13 +53,21 @@ roam:
   # corridor_half_width_m wide, must hold no lidar return.
   # 0.20: the X3's half-width (~0.13 m) plus margin for the policy's wander.
   corridor_half_width_m: 0.20
-  # 0.5: keeps the goal itself out of the stop zone and lets the 0.4 m latch
-  #      close before the wall does.
-  clearance_m: 0.5
+  # 0.3: enough for the 0.4 m latch to close before a wall does, with the
+  #      stop zone (0.15 m, ON for roam) behind it. 0.5 left the robot above
+  #      with no free leg at all.
+  clearance_m: 0.3
   # No-return rays (the TG30's 0.0 sentinel, ~30% of rays) are UNKNOWN, not
   # free: a candidate needs at least this fraction of the rays over its strip
   # to be valid, or it is refused.
   min_valid_fraction: 0.5
+  # Returns closer than this are the robot's OWN BODY, not obstacles: the
+  # lidar's standoffs at 0.07 m and the chassis corners at 0.19-0.23 m show
+  # in every TG30 scan (tests/fixtures/tg30_roam_hold_scan.yaml). A 0.07 m
+  # return lies inside the strip of every bearing within 90 deg of it, so
+  # counting them blocked the whole circle on 2026-10-23. A real object this
+  # close is touching the robot, and the stop zone owns that.
+  self_radius_m: 0.25
   # Random candidates per hand-off, then as many bearings at the shortest
   # leg. If none is free the node HOLDS the current goal (last_reason
   # no_free_goal, counted in held) and retries once a second: a boxed-in

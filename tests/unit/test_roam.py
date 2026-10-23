@@ -59,10 +59,11 @@ def _read(path: str) -> str:
 
 
 def _limits(**overrides) -> RoamLimits:
-    base = dict(range_min_m=1.0, range_max_m=2.5, bearing_cap_deg=45.0,
+    base = dict(range_min_m=0.6, range_max_m=2.5, bearing_cap_deg=45.0,
                 dwell_s=1.0, timeout_s=30.0, seed=0,
-                corridor_half_width_m=0.20, clearance_m=0.5, min_valid_fraction=0.5,
-                draw_attempts=32, progress_window_s=10.0, progress_min_m=0.05)
+                corridor_half_width_m=0.20, clearance_m=0.3, min_valid_fraction=0.5,
+                draw_attempts=32, progress_window_s=10.0, progress_min_m=0.05,
+                self_radius_m=0.25)
     base.update(overrides)
     return RoamLimits(**base)
 
@@ -89,6 +90,11 @@ _BOXED = _scan(lambda a: 0.8)                                   # walls all roun
 _UNKNOWN = _scan(lambda a: 0.0)                                 # nothing but no-returns
 
 
+# The geometry tests below were written against a 1.0 m shortest leg and
+# 0.5 m clearance; the shipped file is tighter.
+_GEOM = dict(range_min_m=1.0, clearance_m=0.5)
+
+
 def _polar(offset):
     return math.hypot(offset[0], offset[1]), math.degrees(math.atan2(offset[1], offset[0]))
 
@@ -98,7 +104,7 @@ def _polar(offset):
 # ---------------------------------------------------------------------------
 
 def test_draws_stay_inside_the_configured_range_and_cone():
-    seq = _seq()
+    seq = _seq(**_GEOM)
     for _ in range(2000):
         x, y, attempts = seq.draw()
         assert attempts == 1          # no scan: the first candidate is taken
@@ -123,7 +129,7 @@ def test_same_seed_draws_the_same_sequence_and_different_seeds_differ():
 # ---------------------------------------------------------------------------
 
 def test_strip_is_free_reads_the_scan_as_a_strip_to_the_goal_plus_clearance():
-    lim = _limits()
+    lim = _limits(**_GEOM)
     assert strip_is_free(_OPEN, 0.0, 2.0, lim) is True
     assert strip_is_free(_WALL_AHEAD, 0.0, 2.0, lim) is False
     # 1.0 m goal + 0.5 m clearance reaches the wall at 1.5 m exactly: blocked.
@@ -139,7 +145,7 @@ def test_strip_is_free_reads_the_scan_as_a_strip_to_the_goal_plus_clearance():
 
 
 def test_no_returns_are_unknown_not_free():
-    lim = _limits()
+    lim = _limits(**_GEOM)
     assert strip_is_free(_UNKNOWN, 0.0, 2.0, lim) is None
     # Half the rays over the strip valid and far: enough to call it free.
     half = _scan(lambda a: 10.0 if int(a) % 2 == 0 else 0.0)
@@ -152,8 +158,53 @@ def test_no_returns_are_unknown_not_free():
     assert strip_is_free(Scan([10.0] * 10, _AMIN, 0.0, 0.01), 0.0, 2.0, lim) is None
 
 
+def test_the_robots_own_body_never_blocks_a_strip():
+    lim = _limits(**_GEOM)
+    # The TG30's standoffs: 0.07 m at +-105 deg, chassis corners 0.2 m at +-135.
+    body = _scan(lambda a: 0.07 if abs(abs(a) - 105) < 1 else
+                 0.2 if abs(abs(a) - 135) < 1 else 10.0)
+    for b in range(-180, 181, 15):
+        assert strip_is_free(body, math.radians(b), 1.0, lim) is True, b
+    # A real object just outside the body radius still blocks.
+    close = _scan(lambda a: 0.3 if abs(a + 90) < 1 else 10.0)
+    assert strip_is_free(close, math.radians(-90.0), 1.0, lim) is False
+
+
+_HOLD_SCAN = os.path.join(_REPO_ROOT, "tests", "fixtures", "tg30_roam_hold_scan.yaml")
+
+
+def test_the_scan_that_held_the_robot_at_its_first_goal_has_free_bearings():
+    """Captured on bernard-1 (2026-10-23) while the node held with "no
+    candidate goal in free space": 29% no-returns, the body at 0.07-0.23 m,
+    the nearest real returns 0.4-1.7 m. With the body excluded the forward
+    cone has free legs at the shortest range."""
+    with open(_HOLD_SCAN, encoding="utf-8") as handle:
+        msg = next(yaml.safe_load_all(handle))
+    scan = Scan(msg["ranges"], msg["angle_min"], msg["angle_increment"], 0.01)
+    lim = load_roam_limits(_ROAM_YAML)
+    # The robot had driven up to clutter: objects 0.41 m to both sides and
+    # 1.0 m ahead. No 1.0 m leg with 0.5 m clearance is free anywhere
+    # around; the shipped 0.6 m leg with 0.3 m clearance is free ahead.
+    wide = dataclasses.replace(lim, range_min_m=1.0, clearance_m=0.5)
+    assert not any(strip_is_free(scan, math.radians(b), 1.0, wide) is True
+                   for b in range(-180, 181, 5))
+    ahead = {b: strip_is_free(scan, math.radians(b), lim.range_min_m, lim)
+             for b in range(-45, 46, 5)}
+    assert any(v is True for v in ahead.values()), ahead
+    # ... so the draw finds a leg rather than holding, and it is free.
+    seq = RoamSequencer(lim)
+    drawn = seq.draw(scan)
+    assert drawn is not None
+    d, b = _polar(drawn[:2])
+    assert strip_is_free(scan, math.radians(b), d, lim) is True
+    # Without the body exclusion every bearing reads blocked: the bug.
+    naive = dataclasses.replace(lim, self_radius_m=0.0)
+    assert all(strip_is_free(scan, math.radians(b), 1.0, naive) is False
+               for b in range(-180, 181, 15))
+
+
 def test_draw_avoids_the_wall_and_holds_when_boxed_in():
-    seq = _seq()
+    seq = _seq(**_GEOM)
     x, y, attempts = seq.draw(_WALL_AHEAD)
     d, b = _polar((x, y))
     assert attempts >= 1
@@ -162,16 +213,24 @@ def test_draw_avoids_the_wall_and_holds_when_boxed_in():
     assert seq.draw(_UNKNOWN) is None
 
 
-def test_draw_falls_back_to_the_shortest_leg_across_the_cone():
-    # A wall at 1.6 m everywhere in the cone: no random leg over 1.1 m is
-    # free, but the shortest leg (1.0 m + 0.5 m clearance) is.
+def test_draw_falls_back_to_the_shortest_leg_nearest_heading_first():
+    # A wall at 1.6 m everywhere: no random leg over 1.1 m is free, but the
+    # shortest leg (1.0 m + 0.5 m clearance) is, and it is taken ahead.
     near_wall = _scan(lambda a: 1.6)
-    seq = _seq(draw_attempts=4, seed=1)
+    seq = _seq(draw_attempts=4, seed=1, **_GEOM)
     x, y, attempts = seq.draw(near_wall)
     d, b = _polar((x, y))
     assert d == pytest.approx(1.0)
     assert abs(b) <= 45.0
     assert attempts > 4
+    # Boxed in ahead but open behind: the fallback goes all round and takes
+    # the free bearing nearest to straight ahead.
+    open_behind = _scan(lambda a: 10.0 if abs(a) >= 100 else 0.9)
+    fine = _seq(draw_attempts=16, seed=1, **_GEOM)     # bearings every 22.5 deg
+    x, y, _ = fine.draw(open_behind)
+    d, b = _polar((x, y))
+    assert d == pytest.approx(1.0)
+    assert 100 <= abs(b) <= 125
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +332,7 @@ def test_progress_smaller_than_the_minimum_does_not_count():
 
 
 def test_a_due_hand_off_with_no_free_goal_holds_and_retries_once_a_second():
-    seq = _seq()
+    seq = _seq(**_GEOM)
     seq.goal_fixed(0.0)
     assert seq.step(31.0, goal_reached=False, goal_dist=2.0, scan=_BOXED) is None
     assert seq.holding and seq.held == 1 and seq.last_reason == NO_FREE_GOAL
@@ -290,7 +349,7 @@ def test_a_due_hand_off_with_no_free_goal_holds_and_retries_once_a_second():
 
 
 def test_hand_off_offsets_are_free_in_the_scan_they_were_drawn_from():
-    seq = _seq()
+    seq = _seq(**_GEOM)
     seq.goal_fixed(0.0)
     h = seq.step(31.0, goal_reached=False, goal_dist=2.0, scan=_WALL_AHEAD)
     assert h is not None
@@ -400,6 +459,8 @@ def test_non_numeric_and_non_integer_seed_are_refused(key, value, fragment):
     (dict(draw_attempts=0), "draw_attempts"),
     (dict(progress_window_s=0.0), "progress_window_s"),
     (dict(progress_min_m=-0.01), "progress_min_m"),
+    (dict(self_radius_m=-0.1), "self_radius_m"),
+    (dict(self_radius_m=1.0), "self_radius_m"),
 ])
 def test_incoherent_limits_are_rejected(overrides, fragment):
     reason = check_limits(_limits(**overrides))
