@@ -2099,7 +2099,29 @@ Items 1, 2b, 3, 4 and 7 of the previous list are DONE. What remains:
 10. Check whether bernard-2 has the same firmware sign fault (if yes it is
    systemic).
 
-### Robot state at end of 2026-08-29 session 8 (LATEST)
+### Robot state at end of 2026-10-23 (LATEST)
+
+bernard-1 on `192.168.4.100` over the wired RobotLab link. `~/ncp_ws` on the
+robot is at `feat/roam-mode` **8738ef9**, colcon-built, **763 robot tests**.
+The stack was brought up by the agent with
+`bash scripts/run_stack.sh stop_zone_enabled:=true slow_zone_enabled:=true`
+(ROAM needs both zones on; the dashboard refuses it otherwise) and left
+KILLED, source `teleop`, ROAM off. To roam: dashboard, select `m4`, ROAM
+(confirm), ARM, KILL in hand. The robot dropped off the network twice during
+the day (battery suspected); it was back each time.
+
+What roam does now, in order, when it meets something: stalls the goal
+(10 s, no progress), backs straight out (rm_safety passes only that under the
+latch or pinned in the slow band), turns in place toward the deepest free
+strip the scan shows, draws a new goal ahead in free space, drives. Owed:
+the live run of that whole sequence (the retreat and the recovery turn have
+run their unit, replay and dry-run tests, not the floor), `retreat_m`,
+`timeout_s`, `progress_window_s` set from a real run, the yaw-at-0.15 m open
+item, M9's export (not deployed), and the Phase 2 sign-off rows for the
+retreat (safety_validation.md 3e). A fresh workstation: `docs/workstation_setup.md`
+and `scripts/setup_workstation.sh`.
+
+### Robot state at end of 2026-08-29 session 8
 
 bernard-1 on its static IP `192.168.4.100`, **fresh battery 12.1 V**, clock
 pushed from the workstation. `~/ncp_ws` is at the deployed branch, colcon-built

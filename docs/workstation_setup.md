@@ -4,6 +4,17 @@ The workstation is where you edit code, run the unit and replay tests, build `rm
 
 Verified 2026-10-23 on Pop!_OS 24.04 (an Ubuntu 24.04 base) with ROS 2 Jazzy, Python 3.12.3, numpy 1.26.4, PyYAML 6.0.1, pytest 7.4.4 and colcon 0.3.0, all from apt. Jazzy on the workstation and Humble on the robot have not been tested together over DDS, and nothing in this workflow needs them to be.
 
+## The short way
+
+With ROS 2 installed and this repo cloned (step 2), one script does steps 1, 2, 3 and 4 and checks step 5:
+
+```bash
+bash scripts/setup_workstation.sh          # install, clone the upstream beside, test, build
+bash scripts/setup_workstation.sh --check  # report only
+```
+
+It stops at the first thing it cannot do and names it. The steps below are what it does, for doing them by hand.
+
 ## 1. Install the packages
 
 ```bash

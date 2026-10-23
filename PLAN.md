@@ -1,6 +1,6 @@
 > Status: approved 2026-10-23 (Daniel); BUILT the same day on `feat/roam-mode` (commits 64f1bda, b6e2322, 9b39e6c, 97e77f2, 25152f9, 75aa34e, c53afba; 611 workstation tests; pushed to GitHub). DEPLOYED to bernard-1 (70f4b77) and dry-run verified 2026-10-23; the first LIVE run drove into a wall (blind draw, zones off), fixed the same day (free-space draw, progress watchdog, dashboard refuses ROAM on with the zones off; see Found during implementation). OPEN: the live run on `m4` with the zones on and KILL in hand; `timeout_s` and `progress_window_s` set from a real run. Revised in place as implementation finds things.
 
-> Status: the roam-mode plan (approved 2026-10-23) is BUILT and deployed; the retreat plan below (approved 2026-10-23 after a safety review) is BUILT (e3f758b + the rm_policy commit), awaiting deploy and the live run.
+> Status: the roam-mode plan (approved 2026-10-23) is BUILT and deployed. The retreat plan below (approved 2026-10-23 after a safety review) is BUILT and deployed (e3f758b, fd68947, 7b92dbd, 24ba505, 8738ef9), with two revisions found on the floor: a pure straight reverse also passes capped in the slow band and a retreat starts when pinned there without progress; and a retreat ends in a recovery turn toward the deepest free strip (any angle, operator's rule) before the next goal is drawn, with no per-goal retreat limit and no clearance gate on turning (operator's decisions). OPEN: the live run of the whole sequence.
 
 # Plan: retreat after an e-stop, then a new goal (roam)
 

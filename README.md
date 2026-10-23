@@ -8,6 +8,25 @@ with a frozen observation/action interface and full logging.
 > stop mechanism short of pulling the battery. Everything in this workspace is
 > shaped by that fact.
 
+## New to this repo? Do this first
+
+On an Ubuntu 24.04 (or Pop!_OS) machine with ROS 2 installed:
+
+```bash
+mkdir -p ~/lumen && cd ~/lumen
+git clone git@github.com:lumen-research-labs/ncp_ws.git
+cd ncp_ws && git checkout feat/roam-mode          # the branch the robot runs
+bash scripts/setup_workstation.sh                 # packages, the upstream checkout beside, tests, build
+```
+
+Then read, in order: [`docs/workstation_setup.md`](docs/workstation_setup.md)
+(what the script did, the robot SSH key and the wired lab link),
+[`docs/operating_guide.md`](docs/operating_guide.md) (bring the robot up, arm it,
+the dashboard at `http://192.168.4.100:8080`), and [`docs/roam.md`](docs/roam.md)
+(the robot picks its own goals). `CLAUDE.md` section 4 says where the robot and
+the code stand today. The training side lives in the
+[optomotive](https://github.com/lumen-research-labs/optomotive) repo.
+
 ---
 
 ## Start here
@@ -178,7 +197,8 @@ config/         interface.yaml (THE contract), safety_limits.yaml,
 docs/           architecture, operating_guide, roam, interface_contract,
                 safety_validation, deployment, workstation_setup
 src/            the seven rm_* packages (see the table above)
-scripts/        deploy_to_robot.sh, deploy_upstream.sh, prep_robot.sh,
+scripts/        setup_workstation.sh (a fresh PC), deploy_to_robot.sh,
+                deploy_upstream.sh, prep_robot.sh,
                 run_stack.sh, stack_down.sh, bench_up/down.sh,
                 record_run.sh, fetch_bags.sh + diagnostics/
 tests/          unit (no ROS runtime) -> replay (fixtures) -> hardware (human only)
