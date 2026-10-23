@@ -845,32 +845,31 @@ class DashboardNode(rclpy.node.Node):
             and self._policy_params[name].service_is_ready()
         ]
 
-    def _retarget(self, offsets: Dict[str, Any]) -> Dict[str, Any]:
-        """Set goal_x/goal_y on each named policy node and aggregate.
+    def _set_on_policies(self, requests: Dict[str, Any], did: str) -> Dict[str, Any]:
+        """Apply one parameter set per named policy node and aggregate.
 
-        `offsets` maps a row name to its robot-frame (x, y) offset, or to a
-        dict carrying a refusal (`{"ok": False, "error": ...}`) decided by
-        the caller, which is reported alongside the sets without being sent.
-        The result is ok when at least one node took the goal; every
-        per-policy outcome is in `policies`, so a half-applied goal is never
-        reported as a clean one.
+        `requests` maps a row name to the list of Parameters to set on it, or
+        to a dict carrying a refusal (`{"ok": False, "error": ...}`) decided
+        by the caller, which is reported alongside the sets without being
+        sent. The result is ok when at least one node took the set; every
+        per-policy outcome is in `policies`, so a half-applied set is never
+        reported as a clean one. `did` names the act in the messages
+        ("goal set", "roam on").
         """
         results: Dict[str, Any] = {}
         done: List[str] = []
-        for name, offset in offsets.items():
-            if isinstance(offset, dict):
-                results[name] = offset
+        for name, request in requests.items():
+            if isinstance(request, dict):
+                results[name] = request
                 continue
-            ox, oy = offset
             results[name] = self._set_params(
-                self._policy_params[name], self._sources[name].node,
-                [_double_param("goal_x", ox), _double_param("goal_y", oy)],
+                self._policy_params[name], self._sources[name].node, request,
             )
             if results[name].get("ok"):
                 done.append(name)
         failed = [n for n in results if n not in done]
         out: Dict[str, Any] = {
-            "ok": bool(done), "policies": results, "retargeted": done,
+            "ok": bool(done), "policies": results, "applied": done,
         }
         if not results:
             out["error"] = (
@@ -878,16 +877,29 @@ class DashboardNode(rclpy.node.Node):
                 "is a profile launched?"
             )
         elif not done:
-            out["error"] = "no policy re-targeted: " + "; ".join(
+            out["error"] = f"{did} on no policy: " + "; ".join(
                 f"{n}: {results[n].get('error')}" for n in failed
             )
         else:
-            out["message"] = f"goal set on {', '.join(done)}" + (
+            out["message"] = f"{did} on {', '.join(done)}" + (
                 f" (not on {', '.join(failed)}: "
                 + "; ".join(str(results[n].get("error")) for n in failed) + ")"
                 if failed else ""
             )
         return out
+
+    def _retarget(self, offsets: Dict[str, Any]) -> Dict[str, Any]:
+        """Set goal_x/goal_y on each named policy node (see _set_on_policies).
+
+        `offsets` maps a row name to its robot-frame (x, y) offset, or to a
+        caller-decided refusal dict.
+        """
+        return self._set_on_policies({
+            name: offset if isinstance(offset, dict) else [
+                _double_param("goal_x", offset[0]), _double_param("goal_y", offset[1]),
+            ]
+            for name, offset in offsets.items()
+        }, "goal set")
 
     # ------------------------------------------------------------------
     # Snapshot assembly (called on the broadcast thread)
@@ -1129,10 +1141,10 @@ class DashboardNode(rclpy.node.Node):
         if result.get("ok"):
             result["message"] = (
                 f"policy goal ({wx:.2f}, {wy:.2f}) set on "
-                f"{', '.join(result['retargeted'])}"
+                f"{', '.join(result['applied'])}"
                 + (
-                    f" (not on {', '.join(n for n in offsets if n not in result['retargeted'])})"
-                    if len(result["retargeted"]) < len(offsets) else ""
+                    f" (not on {', '.join(n for n in offsets if n not in result['applied'])})"
+                    if len(result["applied"]) < len(offsets) else ""
                 )
             )
             result["goal_world"] = [round(wx, 3), round(wy, 3)]
@@ -1262,7 +1274,7 @@ class DashboardNode(rclpy.node.Node):
         goal = self._retarget({name: (gx, gy) for name in self._retarget_targets()})
         goal_note = (
             f"goal re-fixed {gx:.2f} m ahead, {gy:.2f} m left of here on "
-            f"{', '.join(goal['retargeted'])}"
+            f"{', '.join(goal['applied'])}"
             if goal.get("ok") else f"goal NOT re-fixed ({goal.get('error')})"
         )
         message = (
