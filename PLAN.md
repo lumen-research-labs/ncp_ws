@@ -1,4 +1,4 @@
-> Status: approved 2026-10-23 (Daniel); BUILT the same day on `feat/roam-mode` (commits 64f1bda, b6e2322, 9b39e6c, 97e77f2, 25152f9, 75aa34e, c53afba; 611 workstation tests; pushed to GitHub). DEPLOYED to bernard-1 (70f4b77) and dry-run verified 2026-10-23 (timeout hand-off on a killed robot, no motion, one /cmd_vel publisher). OPEN: the live run on `m4` with KILL in hand, and `timeout_s` set from a real run. Revised in place as implementation finds things.
+> Status: approved 2026-10-23 (Daniel); BUILT the same day on `feat/roam-mode` (commits 64f1bda, b6e2322, 9b39e6c, 97e77f2, 25152f9, 75aa34e, c53afba; 611 workstation tests; pushed to GitHub). DEPLOYED to bernard-1 (70f4b77) and dry-run verified 2026-10-23; the first LIVE run drove into a wall (blind draw, zones off), fixed the same day (free-space draw, progress watchdog, dashboard refuses ROAM on with the zones off; see Found during implementation). OPEN: the live run on `m4` with the zones on and KILL in hand; `timeout_s` and `progress_window_s` set from a real run. Revised in place as implementation finds things.
 
 # Plan: roam mode (random waypoints, the robot keeps running)
 
@@ -83,9 +83,10 @@ Bring the robot stack up: `prep_robot.sh` (base-board serial trap, clock push) t
 - The `roam` launch argument proposed by the operator-side pass was dropped: roam is a runtime parameter only (no feature flags; switching it on is an operator act after bring-up).
 - `docs/dev_env_setup.md` was not rewritten in place but replaced by `docs/workstation_setup.md`, so the Docker recipe could be archived in its own commit with no dangling link in between.
 - The timeout starts at 30 s (not 60): the longest leg is 10 s at the clamp; the hand-off log line carries the elapsed seconds so the number is set from a real run.
+- **The first live run drove into a wall.** The draw was blind and the launch defaults both lidar zones off, so nothing stood between a goal behind a wall and the wall. Approved by Daniel and built the same day: (1) a candidate goal is accepted only if the strip to it plus `clearance_m`, `corridor_half_width_m` wide, holds no lidar return, with no-return rays unknown rather than free; `draw_attempts` random candidates, then the shortest leg across the cone, else the node holds the current goal and says so; (2) a progress watchdog (`progress_window_s` without `progress_min_m` closer gives `stalled`), the `rm_waypoint` rule; (3) the dashboard refuses ROAM on unless `safety_node` reports both zones on, and the docs say to launch with `stop_zone_enabled:=true slow_zone_enabled:=true`.
 
 ## Not in this plan
 
 - M9 on the robot (its export is a separate, known open item).
 - A matching roam episode mode in barn-gym.
-- Obstacle logic in roam (rm_safety owns it).
+- Obstacle avoidance in roam (rm_safety and the policy own it). Roam only checks that a goal is in free space when it is drawn.

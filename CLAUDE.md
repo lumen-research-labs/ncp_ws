@@ -1820,9 +1820,30 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   after 30 s; totals 1 hand-offs, 1 timeouts) at (2.083, 0.894) in map`
   (offset 2.26 m at 23 deg, inside the limits), `/cmd_vel` stayed at zero
   with exactly one publisher, and `roam false` logged `roam OFF after 1
-  hand-off(s), 1 timeout(s); current goal kept`. **The LIVE run on `m4`
-  (ARM with KILL in hand, watch an `arrived` hand-off, set `timeout_s` from
-  the elapsed seconds) is the operator's next act.**
+  hand-off(s), 1 timeout(s); current goal kept`.
+  * **THE FIRST LIVE RUN DROVE INTO A WALL** (same day, Daniel on `m4`).
+    The goal was drawn BLIND (a random distance and bearing with no look at
+    the lidar) and both lidar zones are OFF by default in `ncp.launch.py`,
+    so nothing stood between a goal behind a wall and the wall but KILL. My
+    design, and wrong for a mode whose point is to keep going: "open floor
+    all round" is not a precaution after the robot has turned twice. Fixed
+    the same day (b6e3f4c and the dashboard commit after it): (1) the draw
+    must land in free space the lidar sees: the strip to the goal plus
+    0.5 m clearance, 0.2 m half-width, must hold no return, no-return rays
+    are UNKNOWN not free (half the rays over the strip must be valid), up
+    to 32 random candidates then the shortest leg across the cone, and with
+    none free the node HOLDS the current goal, warns, and retries at 1 Hz
+    (`holding`, `held` on the debug stream; 26 ms worst case per draw on a
+    2020-ray scan); (2) a progress watchdog, rm_waypoint's rule: 10 s
+    without 5 cm closer and the goal is abandoned as `stalled`, `timeout_s`
+    30 s stays the ceiling; (3) the dashboard REFUSES ROAM on unless
+    `safety_node` reports both zones on, read live at the press, and
+    `roam.yaml` and `docs/roam.md` say to launch with
+    `stop_zone_enabled:=true slow_zone_enabled:=true`. A shell
+    `ros2 param set roam true` bypasses the dashboard guard; the node cannot
+    see the zones (settled: no safety state in policy_node), so the doc
+    carries the rule. **The live run with the zones on is the operator's
+    next act.**
   * Also this day: the M9 Gazebo fine-tune finished on the box 2026-10-17
     (best 0.52 in Gazebo vs 0.46 zero-shot; M9 still not exported to the
     robot), the three repos were pushed to GitHub (`lumen-research-labs/
@@ -2323,6 +2344,12 @@ Settled, do not re-open:
   odom pose, first map pose, parameter set, roam hand-off. A new goal clears
   the latch, resets the recurrent state and zeroes the fed-back previous
   action. Do not add a fifth writer.
+- **ROAM runs with BOTH lidar zones ON** (2026-10-23, after the wall). The
+  launch's zones-off default is for evaluating a policy on a corridor with
+  an operator's goal, not for an autonomous goal loop. The dashboard refuses
+  ROAM on otherwise and `roam.yaml` says why. The draw is free-space-checked
+  against the lidar, but that keeps the GOAL out of walls; the path to it
+  is still the policy's, and the policy's avoidance is what it is.
 
 ### Remote-command gotchas
 
