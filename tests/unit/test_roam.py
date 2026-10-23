@@ -342,6 +342,57 @@ def test_the_launch_passes_the_config_path_to_every_policy_node_and_has_no_roam_
 
 
 # ---------------------------------------------------------------------------
+# dashboard wiring
+# ---------------------------------------------------------------------------
+
+def test_roam_is_an_allowed_control():
+    src = _read(_DASHBOARD_NODE)
+    controls = re.search(r"_CONTROLS = \((.*?)\)", src, re.S).group(1)
+    assert '"roam"' in controls
+
+
+def test_roam_command_refuses_a_non_bool_before_any_set_and_shares_the_aggregation():
+    src = _read(_DASHBOARD_NODE)
+    body = src[src.index('if command == "roam":'):src.index('if command == "goal_map":')]
+    assert "isinstance(on, bool)" in body
+    assert body.index('"ok": False') < body.index("self._set_on_policies(")
+    assert "self._retarget_targets()" in body
+    assert '_bool_param("roam", on)' in body
+    for forbidden in ("_reset_client", "_safety_params", "/safety/reset", "command_source"):
+        assert forbidden not in body, forbidden
+    assert "def _bool_param(" in src and "PARAMETER_BOOL" in src
+    retarget = src[src.index("def _retarget("):src.index("def _snapshot(")]
+    assert "self._set_on_policies(" in retarget
+
+
+def test_page_has_the_roam_button_and_pill_fed_by_the_debug_stream():
+    page = _read(_INDEX)
+    assert 'id="roambtn"' in page and 'id="roamstat"' in page
+    body = page[page.index("function renderRoam(snap)"):]
+    body = body[:body.index("\n}\n") + 3]
+    for needle in ("ap.debug", "r.on", "r.n", "r.timeouts", "r.last_reason"):
+        assert needle in body, needle
+    render = page[page.index("function render(snap)"):]
+    assert "renderRoam(snap);" in render[:render.index("\n}\n")]
+    assert re.search(r'\$\("roambtn"\)\.disabled\s*=\s*!en \|\| !svc\.policy_params', page)
+    # The page reads the stream; the server adds no copy to the snapshot.
+    node = _read(_DASHBOARD_NODE)
+    start = node.index("def _snapshot(")
+    assert "roam" not in node[start:node.index("\n    def ", start + 10)]
+
+
+def test_roam_asks_before_enabling_only_and_the_stop_buttons_still_never_ask():
+    page = _read(_INDEX)
+    handler = page[page.index('$("roambtn").onclick'):]
+    handler = handler[:handler.index("\n};") + 3]
+    assert "if(on && !confirm(" in handler
+    assert handler.count("confirm(") == 1
+    assert 'post("roam",{on})' in handler
+    assert re.search(r'\$\("killbtn"\)\.onclick\s*=\s*\(\)\s*=>\s*post\("kill"\)', page)
+    assert '$("wpcancel").onclick = () => post("waypoint_cancel");' in page
+
+
+# ---------------------------------------------------------------------------
 # docs
 # ---------------------------------------------------------------------------
 
@@ -384,7 +435,7 @@ def test_every_relative_doc_link_resolves():
 
 
 def test_roam_is_reachable_from_the_package_readmes():
-    for pkg in ("rm_policy", "rm_bringup"):
+    for pkg in ("rm_policy", "rm_bringup", "rm_dashboard"):
         readme = os.path.join(_REPO_ROOT, "src", pkg, "README.md")
         targets = [
             os.path.normpath(os.path.join(os.path.dirname(readme), t))

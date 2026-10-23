@@ -65,7 +65,8 @@ Failure mode:
     the policy nodes, each of which is individually incapable of starting
     motion: kill only stops; a `command_source` change force-kills (see
     safety_node); a goal change only re-targets policies that must still be
-    armed separately. Arming therefore always remains an explicit, separate
+    armed separately; a roam switch only changes how those policies choose
+    their next goal. Arming therefore always remains an explicit, separate
     act.
 
     THE WAYPOINT CONTROL IS THE ONE ADDITION THAT CAN MOVE THE ROBOT, and it
@@ -223,9 +224,13 @@ _BATTERY_LOW_V = 10.5
 # /teleop/cmd_vel and reach the wheels only if rm_safety is already armed and
 # already set to the teleop source. Both of those are separate acts, and
 # neither is performed here. "waypoint_cancel" only ever stops. "reset_map"
-# begins by killing the robot and ends with it still killed.
+# begins by killing the robot and ends with it still killed. "roam" is a
+# parameter set on the same policy nodes a goal goes to; it cannot arm and
+# cannot select a source. It changes what an ARMED, SELECTED policy does
+# next (drive to goals nobody clicked), which is why the page confirms
+# before turning it on and never before turning it off.
 _CONTROLS = (
-    "kill", "reset", "source", "goal", "goal_map", "waypoint",
+    "kill", "reset", "source", "goal", "goal_map", "roam", "waypoint",
     "waypoint_cancel", "reset_odom", "jog", "reset_map",
 )
 
@@ -1032,6 +1037,19 @@ class DashboardNode(rclpy.node.Node):
                 if not odom.get("ok"):
                     result["odom_reset_error"] = odom.get("error")
             return result
+        if command == "roam":
+            on = payload.get("on")
+            # A JSON boolean, strictly. "false", 0 and "" are refused rather
+            # than coerced: a page bug sending the wrong type must never read
+            # as an operator turning roam on or off.
+            if not isinstance(on, bool):
+                return {"ok": False, "error": f"roam needs boolean 'on', got {on!r}"}
+            # Every running policy, like a goal: the policy you switch to
+            # should roam the same way as the one that is driving.
+            return self._set_on_policies(
+                {name: [_bool_param("roam", on)] for name in self._retarget_targets()},
+                f"roam {'on' if on else 'off'}",
+            )
         if command == "goal_map":
             return self._set_goal_from_world(payload)
         if command == "reset_odom":
@@ -1509,6 +1527,13 @@ def _double_param(name: str, value: float) -> Parameter:
     p = Parameter()
     p.name = name
     p.value = ParameterValue(type=ParameterType.PARAMETER_DOUBLE, double_value=value)
+    return p
+
+
+def _bool_param(name: str, value: bool) -> Parameter:
+    p = Parameter()
+    p.name = name
+    p.value = ParameterValue(type=ParameterType.PARAMETER_BOOL, bool_value=value)
     return p
 
 

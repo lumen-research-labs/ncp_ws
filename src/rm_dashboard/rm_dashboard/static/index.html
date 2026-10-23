@@ -360,6 +360,10 @@ input[type=range]{accent-color:var(--accent)}
       <label class="inline">y</label><input type="number" id="gy" value="0" step="0.1">
       <button class="act" id="setgoal">re-target from here</button>
     </div>
+    <div class="ctl" style="margin-bottom:10px">
+      <button class="act" id="roambtn">ROAM: —</button>
+      <span class="pill" id="roamstat">roam —</span>
+    </div>
     <div class="ctl">
       <button class="act danger" id="resetbtn">ARM (/safety/reset)</button>
     </div>
@@ -367,7 +371,9 @@ input[type=range]{accent-color:var(--accent)}
       Changing the source force-kills, so arming is always a separate act. A
       policy button is greyed until its node is publishing. Goals go to every
       running policy, so the one you switch to is already aimed. Re-targeting
-      also resets each CfC's recurrent state.
+      also resets each CfC's recurrent state. ROAM makes every running policy
+      draw its own next goal on arrival or timeout (config/roam.yaml); off
+      keeps the current goal and does not stop the robot.
     </div>
   </section>
 
@@ -641,6 +647,33 @@ function renderSources(snap){
 function askSource(v){
   if(confirm(`Set command_source to '${v}'?\n\nThis force-kills the robot; `+
              `you will need to ARM again afterwards.`)) post("source",{value:v});
+}
+
+/* ---------------- roam ---------------- */
+// The toggle and the pill follow the ACTIVE policy's own debug stream: the
+// node reports what it is doing; the page never remembers what it asked.
+function roamOf(snap, debugTopic){
+  if(!snap || !debugTopic) return null;
+  const d = val(snap, debugTopic);
+  return d && d.roam ? d.roam : null;
+}
+function renderRoam(snap){
+  const ap = activePolicy(snap), r = roamOf(snap, ap.debug);
+  const b = $("roambtn");
+  b.textContent = r ? (r.on ? "ROAM: on" : "ROAM: off") : "ROAM: —";
+  b.classList.toggle("on", !!(r && r.on));
+  // Each policy roams on its own. The command goes to every running one, so
+  // a disagreement means a node was restarted or set from a terminal: say so.
+  const differs = (snap.sources||[])
+    .filter(s => s.kind === "policy" && s.debug && s.name !== ap.name)
+    .map(s => ({name: s.name, roam: roamOf(snap, s.debug)}))
+    .filter(o => o.roam && !!o.roam.on !== !!(r && r.on))
+    .map(o => `${o.name} ${o.roam.on ? "on" : "off"}`);
+  $("roamstat").textContent = r
+    ? `${ap.name||"policy"} · roam ${r.on ? "on" : "off"} · goals ${r.n} · `+
+      `timeouts ${r.timeouts} · last ${r.last_reason || "—"}`+
+      (differs.length ? ` · differs: ${differs.join(", ")}` : "")
+    : `${ap.name||"policy"} · roam —`;
 }
 
 /* ---------------- command table ---------------- */
@@ -1079,6 +1112,7 @@ function renderHeader(snap){
   $("killbtn").disabled   = !en || !svc.kill;
   $("resetbtn").disabled  = !en || !svc.reset;
   $("setgoal").disabled   = !en || !svc.policy_params;
+  $("roambtn").disabled   = !en || !svc.policy_params;
   // Greyed out when rm_waypoint is not running, so the button is never a
   // control that silently does nothing.
   $("drivebtn").disabled  = !en || !svc.waypoint;
@@ -1101,7 +1135,7 @@ function renderHeader(snap){
 
 function render(snap){
   renderHeader(snap); renderSources(snap); renderChain(snap); renderScan(snap);
-  renderSafety(snap); renderCmd(snap); renderObs(snap);
+  renderSafety(snap); renderCmd(snap); renderObs(snap); renderRoam(snap);
   renderWheels(snap); renderRates(snap);
   renderSlam(snap); renderWaypoint(snap); renderMap(snap);
 
@@ -1142,6 +1176,22 @@ $("resetbtn").onclick = () => {
 };
 // Source buttons are built by renderSources; their handler is askSource.
 $("setgoal").onclick = () => post("goal",{x:+$("gx").value, y:+$("gy").value});
+// ROAM asks before turning ON: every running policy then picks its own next
+// goal, and one that is ARMED and selected moves at the next hand-off with no
+// further press. Turning it OFF never asks (like cancel, it only removes
+// autonomy) and does not stop the robot: the current goal stays, KILL is the
+// stop. The payload is explicit, never a toggle, so a stale page cannot flip
+// it the wrong way.
+$("roambtn").onclick = () => {
+  const ap = latest ? activePolicy(latest) : {};
+  const r = roamOf(latest, ap.debug), on = !(r && r.on);
+  if(on && !confirm("Turn ROAM on for every running policy?\n\nEach policy "+
+      "will pick its own next goal at random (config/roam.yaml) when it "+
+      "arrives or times out, and keep going. If the robot is ARMED on a "+
+      "policy source it will move at the next hand-off without another "+
+      "press. Keep the KILL button in reach.")) return;
+  post("roam",{on});
+};
 $("resetmap").onclick = () => {
   if(confirm("RESET the SLAM map?\n\nThis KILLS the robot, restarts slam_toolbox "+
              "with an empty map anchored on the odometry frame, cancels any waypoint "+
