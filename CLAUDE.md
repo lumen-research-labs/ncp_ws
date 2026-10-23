@@ -1842,8 +1842,23 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     `stop_zone_enabled:=true slow_zone_enabled:=true`. A shell
     `ros2 param set roam true` bypasses the dashboard guard; the node cannot
     see the zones (settled: no safety state in policy_node), so the doc
-    carries the rule. **The live run with the zones on is the operator's
-    next act.**
+    carries the rule.
+  * **Second live run (zones on): the robot reached its first goal and HELD
+    there** ("no candidate goal in free space"). The captured scan
+    (`tests/fixtures/tg30_roam_hold_scan.yaml`, 2020 rays, 29 % no-returns)
+    shows two things. (a) The lidar's own standoffs at 0.07 m and the
+    chassis corners at 0.19-0.23 m are in every scan, and a 0.07 m return
+    lies inside the strip of EVERY bearing within 90 deg of it, so the
+    whole circle read blocked: returns under `self_radius_m` (0.25 m) are
+    now the robot's own body, never obstacles (1645ff3). (b) The robot sat
+    in clutter (objects 0.41 m to both sides, 1.0 m ahead) where no 1.0 m
+    leg with 0.5 m clearance existed in ANY direction; the shortest leg is
+    now 0.6 m (above the 0.4 m latch), the clearance 0.3 m (the stop zone
+    is on for roam), and the fallback tries the shortest leg all round,
+    nearest heading first, before holding. Verified against a fresh scan
+    from the same spot: draws of 0.6-0.7 m ahead, free. Daniel is placing
+    physical obstacles along the glass wall (the lidar does not see glass),
+    so no map-frame fence was built. **The live run continues.**
   * Also this day: the M9 Gazebo fine-tune finished on the box 2026-10-17
     (best 0.52 in Gazebo vs 0.46 zero-shot; M9 still not exported to the
     robot), the three repos were pushed to GitHub (`lumen-research-labs/
