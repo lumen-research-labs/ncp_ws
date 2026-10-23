@@ -309,6 +309,9 @@ properties change, deliberately and in writing:
   tape-measured reverse speed), ramped, as `SLOW` / `stop_zone_retreat`,
   with the latch kept. Every other command stays zero. Every source gets it,
   the dashboard jog included (S backs a latched robot out without RESET).
+  The same reverse is capped, not scaled, in the slow band: the slow scale
+  reaches zero at the stop boundary, so a forward push pins the robot there
+  without ever latching.
 - **The latch releases without `/safety/reset`, in one case only:** after
   `retreat_release_ticks` (10, 0.5 s) consecutive ticks on which that reverse
   is being passed AND the wide-arc `min_range` reads at least

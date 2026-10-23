@@ -125,6 +125,14 @@ roam:
   # drive back into the same wall, retreat is the unattended loop
   # rm_waypoint's "never retry" rule exists to prevent.
   retreat_cooldown_s: 20.0
+  # PINNED: the slow zone brakes a forward push to zero exactly at the stop
+  # boundary, so under a forward push the latch never trips: on 2026-10-23
+  # the robot sat at min_range 0.20 m, the policy asking 0.84 m/s and
+  # rm_safety passing 0.009, with no latch and no retreat. A retreat also
+  # starts when rm_safety reports SLOW with the wide-arc min_range under
+  # this AND the goal has made no progress for progress_window_s. 0.30 m:
+  # the same range the latch releases at.
+  retreat_pinned_range_m: 0.30
 
   # Seed for the node's own random generator. Every policy node seeds its own
   # generator from this, so two nodes draw the SAME sequence of candidates

@@ -259,8 +259,11 @@ each tick the reverse is passed with the wide-arc `min_range` at or above
 scan with no reverse commanded never releases: Phase 2's "no auto-resume"
 holds for everything but a commanded retreat. The rear is unmonitored, so this
 is a blind reverse the operator accepts for a static scene with KILL in hand.
-`retreat_max_vx: 0` (or the key absent) switches the provision off. Recorded
-in `docs/safety_validation.md` §3e as unsigned.
+The same reverse passes capped, unscaled, in the slow band (precedence 6): the
+slow cone looks forward only, and the slow scale reaches zero exactly at the
+stop boundary, so a robot pinned there by a forward push would otherwise never
+back out. `retreat_max_vx: 0` (or the key absent) switches the provision off.
+Recorded in `docs/safety_validation.md` §3e as unsigned.
 
 ## Clamps scale the whole command (2026-10-09)
 

@@ -78,6 +78,7 @@ KEYS = (
     "corridor_half_width_m", "clearance_m", "min_valid_fraction", "draw_attempts",
     "progress_window_s", "progress_min_m", "self_radius_m",
     "retreat_vx", "retreat_m", "retreat_timeout_s", "retreat_cooldown_s",
+    "retreat_pinned_range_m",
 )
 _INT_KEYS = ("seed", "draw_attempts")
 
@@ -104,6 +105,7 @@ class RoamLimits:
     retreat_m: float
     retreat_timeout_s: float
     retreat_cooldown_s: float
+    retreat_pinned_range_m: float
 
 
 @dataclass(frozen=True)
@@ -163,6 +165,8 @@ def check_limits(limits: RoamLimits) -> Optional[str]:
         return f"roam.retreat_timeout_s must be > 0, got {limits.retreat_timeout_s}"
     if limits.retreat_cooldown_s < 0.0:
         return f"roam.retreat_cooldown_s must be >= 0, got {limits.retreat_cooldown_s}"
+    if limits.retreat_pinned_range_m <= 0.0:
+        return f"roam.retreat_pinned_range_m must be > 0, got {limits.retreat_pinned_range_m}"
     return None
 
 
@@ -432,6 +436,18 @@ class RoamSequencer:
         self._holding = False
         self._retry_at = None
         return Handoff(reason, offset_x, offset_y, self._n, elapsed, attempts)
+
+    def no_progress_s(self, now: float) -> float:
+        """Seconds since the goal distance last shrank by progress_min_m (or
+        since the goal was fixed or roam switched on, whichever is later).
+        0.0 with no goal, roam off, or the latch set."""
+        if self._fixed_at is None or not self._on or self._enabled_at is None:
+            return 0.0
+        if self._reached_at is not None:
+            return 0.0
+        start = max(self._fixed_at, self._enabled_at)
+        reference = start if self._best_at is None else max(self._best_at, start)
+        return max(0.0, now - reference)
 
     def status(self, now: float) -> dict:
         """The debug-stream block: what the node is doing, for the dashboard."""

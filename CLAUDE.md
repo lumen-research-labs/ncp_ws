@@ -1866,8 +1866,15 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     without the network until the latch releases or `retreat_m` (0.3) is
     covered, then roam draws (`retreated`); timeout 8 s holds and warns;
     kill, stale inputs, roam off, source change or a pose jump abort with
-    zero. One retreat per goal, 20 s cooldown. 665+ tests. Recorded as
-    UNSIGNED in docs/safety_validation.md 3e. NOT yet driven live.
+    zero. One retreat per goal, 20 s cooldown. Recorded as UNSIGNED in
+    docs/safety_validation.md 3e. First live try: the robot sat PINNED in the
+    slow band (min_range 0.20 m, policy asking 0.84, rm_safety passing 0.009)
+    with no latch and no retreat: the slow scale reaches zero exactly at the
+    stop boundary, so a forward push never latches, and the slow zone scaled
+    reverse like forward. Fixed the same day: a pure straight reverse in the
+    slow band passes capped to retreat_max_vx instead of scaled, and the
+    retreat also starts when SLOW with min_range < retreat_pinned_range_m
+    (0.30) and no goal progress for progress_window_s (`pinned`).
   * **Second live run (zones on): the robot reached its first goal and HELD
     there** ("no candidate goal in free space"). The captured scan
     (`tests/fixtures/tg30_roam_hold_scan.yaml`, 2020 rays, 29 % no-returns)

@@ -10,7 +10,7 @@ Roam only moves the goal; the policy drives to it behind rm_safety's clamps, wat
   ```bash
   bash scripts/run_stack.sh stop_zone_enabled:=true slow_zone_enabled:=true
   ```
-- **On a stop-zone e-stop the robot backs out by itself.** rm_safety passes one thing under its latch, a straight reverse at `retreat_vx`, and releases the latch after half a second of it with a clear scan. The node reverses up to `retreat_m` or `retreat_timeout_s`, then draws the next goal. The rear is unmonitored: a blind reverse, KILL in hand, never unattended. One retreat per goal, `retreat_cooldown_s` between retreats.
+- **On a stop-zone e-stop, or pinned at the stop boundary by the slow zone with no progress, the robot backs out by itself.** rm_safety passes one thing there, a straight reverse at `retreat_vx`, and releases a latch after half a second of it with a clear scan. The node reverses up to `retreat_m` or `retreat_timeout_s`, then draws the next goal. The rear is unmonitored: a blind reverse, KILL in hand, never unattended. One retreat per goal, `retreat_cooldown_s` between retreats.
 
 ## Turn it on
 
@@ -27,17 +27,17 @@ Roam only moves the goal; the policy drives to it behind rm_safety's clamps, wat
 | `bearing_cap_deg` | 45 | Draw within this of straight ahead. |
 | `corridor_half_width_m`, `clearance_m` | 0.20, 0.3 | The strip to the goal plus clearance holds no return. |
 | `min_valid_fraction`, `self_radius_m` | 0.5, 0.25 | No-returns are unknown; the robot's own body is not an obstacle. |
-| `draw_attempts` | 32 | Random candidates, then the shortest leg all round, before holding. |
+| `draw_attempts` | 32 | Random candidates, then the shortest leg all round. |
 | `dwell_s`, `timeout_s` | 1.0, 30 | Hold at the goal; the ceiling on one goal. |
 | `progress_window_s`, `progress_min_m` | 10, 0.05 | No progress for this long: `stalled`. |
 | `retreat_vx`, `retreat_m`, `retreat_timeout_s`, `retreat_cooldown_s` | 0.12, 0.3, 8, 20 | The reverse out of an e-stop. |
 | `seed` | 0 | Every node draws the same sequence. |
 
-Read at startup; tune from the logs of a real run.
+Read at startup; tune from a real run.
 
 ## What will look like a bug
 
 - ROAM off keeps the current goal; the robot drives there and latches. KILL is the stop. ROAM off during a retreat ends the reverse.
-- **No candidate goal is in free space.** Boxed in: `holding` is true, the draw retries once a second. Jog it into open floor.
+- **No candidate goal is in free space.** Boxed in; the draw retries once a second. Jog it into open floor.
 - **`retreat TIMEOUT`.** The latch did not release: wheels that did not move, `dry_run`, or an obstacle beside the robot. KILL, reset and jog it out.
 - Counters climb while the robot is KILLED or the node is not the selected source; read them over an armed window.

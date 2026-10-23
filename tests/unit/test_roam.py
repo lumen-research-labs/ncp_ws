@@ -64,7 +64,8 @@ def _limits(**overrides) -> RoamLimits:
                 corridor_half_width_m=0.20, clearance_m=0.3, min_valid_fraction=0.5,
                 draw_attempts=32, progress_window_s=10.0, progress_min_m=0.05,
                 self_radius_m=0.25, retreat_vx=0.12, retreat_m=0.3,
-                retreat_timeout_s=8.0, retreat_cooldown_s=20.0)
+                retreat_timeout_s=8.0, retreat_cooldown_s=20.0,
+                retreat_pinned_range_m=0.30)
     base.update(overrides)
     return RoamLimits(**base)
 
@@ -358,6 +359,20 @@ def test_hand_off_offsets_are_free_in_the_scan_they_were_drawn_from():
     assert strip_is_free(_WALL_AHEAD, math.radians(b), d, seq.limits) is True
 
 
+def test_no_progress_seconds_follow_the_progress_clock():
+    seq = _seq(on_at=None)
+    assert seq.no_progress_s(5.0) == 0.0            # roam off
+    seq.set_on(True, 0.0)
+    assert seq.no_progress_s(5.0) == 0.0            # no goal
+    seq.goal_fixed(0.0)
+    assert seq.no_progress_s(4.0) == pytest.approx(4.0)
+    seq.step(4.0, goal_reached=False, goal_dist=2.0)   # first sample
+    seq.step(6.0, goal_reached=False, goal_dist=1.9)   # progress at 6
+    assert seq.no_progress_s(9.0) == pytest.approx(3.0)
+    seq.step(9.5, goal_reached=True, goal_dist=0.3)    # arrived: not stuck
+    assert seq.no_progress_s(12.0) == 0.0
+
+
 def test_goal_fixed_clears_the_arrival_and_restarts_the_timeout():
     seq = _seq()
     seq.goal_fixed(0.0)
@@ -466,6 +481,7 @@ def test_non_numeric_and_non_integer_seed_are_refused(key, value, fragment):
     (dict(retreat_m=0.0), "retreat_m"),
     (dict(retreat_timeout_s=0.0), "retreat_timeout_s"),
     (dict(retreat_cooldown_s=-1.0), "retreat_cooldown_s"),
+    (dict(retreat_pinned_range_m=0.0), "retreat_pinned_range_m"),
 ])
 def test_incoherent_limits_are_rejected(overrides, fragment):
     reason = check_limits(_limits(**overrides))

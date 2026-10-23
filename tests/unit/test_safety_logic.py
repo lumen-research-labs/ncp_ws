@@ -1374,11 +1374,18 @@ class TestStopZoneRetreat:
         assert dec.reason in ("killed", "scan_stale", "odom_stale")
         assert dec.estop_latched is True
 
-    def test_a_prelatch_reverse_is_zeroed_not_retreated(self, real_limits):
+    def test_a_prelatch_reverse_passes_capped_while_a_forward_is_zeroed(self, real_limits):
+        """The pre-latch window is the same obstacle ahead: a pure straight
+        reverse passes capped (not latched, not scaled); a forward is braked
+        to zero as before."""
         inp = _latched_inputs(real_limits, estop_latched=False, consecutive_stop_count=0)
         dec = evaluate(inp, real_limits)
         assert dec.state == State.SLOW and dec.reason == "stop_zone_prelatch"
-        assert dec.out_vx == 0.0
+        assert -real_limits.estop.retreat_max_vx <= dec.out_vx < 0.0
+        assert dec.estop_latched is False
+        fwd = evaluate(_latched_inputs(real_limits, estop_latched=False,
+                                       consecutive_stop_count=0, cmd_vx=0.2), real_limits)
+        assert fwd.reason == "stop_zone_prelatch" and fwd.out_vx == 0.0
 
     def test_unreachable_with_the_stop_zone_disabled(self, real_limits):
         limits = _with_estop(real_limits, stop_zone_enabled=False)
@@ -1467,3 +1474,37 @@ class TestStopZoneRetreat:
             dec = evaluate(inp, real_limits)
             if dec.state == State.STOPPED:
                 assert (dec.out_vx, dec.out_vy, dec.out_wz) == (0.0, 0.0, 0.0)
+
+
+class TestSlowBandRetreat:
+    """A pure straight reverse in the slow band is capped, not scaled."""
+
+    def _slow_inputs(self, limits, **overrides):
+        scan = [5.0] * 360
+        scan[180] = limits.estop.stop_zone_m + 0.05      # ahead, inside the slow cone
+        kwargs = dict(cmd_vx=-0.2, cmd_vy=0.0, cmd_wz=0.0, scan_ranges=scan,
+                      scan_range_min=0.01, dt=0.05, last_vx=-0.12)
+        kwargs.update(overrides)
+        return _make_inputs(limits, **kwargs)
+
+    def test_pure_reverse_passes_at_the_retreat_speed(self, real_limits):
+        dec = evaluate(self._slow_inputs(real_limits), real_limits)
+        assert dec.state == State.SLOW and dec.reason == "slow_zone"
+        assert dec.out_vx == pytest.approx(-real_limits.estop.retreat_max_vx)
+        assert dec.out_vy == 0.0 and dec.out_wz == 0.0
+        assert dec.estop_latched is False
+
+    def test_forward_is_still_scaled_to_a_crawl(self, real_limits):
+        dec = evaluate(self._slow_inputs(real_limits, cmd_vx=0.84, last_vx=0.0), real_limits)
+        assert dec.reason == "slow_zone"
+        assert 0.0 <= dec.out_vx < 0.05
+
+    @pytest.mark.parametrize("field, value", [("cmd_wz", 0.2), ("cmd_vy", 0.05)])
+    def test_a_turning_or_strafing_reverse_is_scaled_like_anything_else(self, real_limits, field, value):
+        dec = evaluate(self._slow_inputs(real_limits, **{field: value}), real_limits)
+        assert abs(dec.out_vx) < 0.05
+
+    def test_off_key_scales_reverse_as_before(self, real_limits):
+        limits = _with_estop(real_limits, retreat_max_vx=0.0)
+        dec = evaluate(self._slow_inputs(limits), limits)
+        assert abs(dec.out_vx) < 0.05

@@ -430,6 +430,8 @@ class PolicyNode(rclpy.node.Node):
                 retreat_vx=roam_limits.retreat_vx, retreat_m=roam_limits.retreat_m,
                 retreat_timeout_s=roam_limits.retreat_timeout_s,
                 retreat_cooldown_s=roam_limits.retreat_cooldown_s,
+                retreat_pinned_range_m=roam_limits.retreat_pinned_range_m,
+                retreat_pinned_after_s=roam_limits.progress_window_s,
             ),
             status_max_age_s=self._odom_timeout_ms / 1000.0,
         )
@@ -439,6 +441,7 @@ class PolicyNode(rclpy.node.Node):
         self._safety_state: Optional[int] = None
         self._safety_reason: str = ""
         self._safety_topic: str = ""
+        self._safety_min_range: float = math.inf
         self._safety_stamp: Optional[float] = None
 
         # ------------------------------------------------------------------
@@ -799,11 +802,13 @@ class PolicyNode(rclpy.node.Node):
         self._safety_state = int(msg.state)
         self._safety_reason = str(msg.reason)
         self._safety_topic = str(msg.command_topic)
+        self._safety_min_range = float(msg.min_range)
         self._safety_stamp = time.monotonic()
 
     def _safety_view(self, now: float) -> SafetyView:
         age = math.inf if self._safety_stamp is None else now - self._safety_stamp
-        return SafetyView(self._safety_state, self._safety_reason, age, self._safety_topic)
+        return SafetyView(self._safety_state, self._safety_reason, age,
+                          self._safety_topic, self._safety_min_range)
 
     def _publish_reverse(self, vx: float) -> None:
         """The retreat's command: straight reverse, nothing else, through the
@@ -1047,16 +1052,18 @@ class PolicyNode(rclpy.node.Node):
         step = self._retreat.step(
             now, self._safety_view(now), (self._robot_x, self._robot_y),
             self._roam.on, self._cmd_vel_topic, self._prev_action_v,
+            stalled_s=self._roam.no_progress_s(now),
         )
         if step is not None:
             if not step.done:
                 if step.reason == STARTED:
                     lim = self._retreat.limits
                     self.get_logger().warn(
-                        f"policy_node: retreat START: stop-zone latched while "
-                        f"roaming; reversing straight at {lim.retreat_vx} m/s, up "
-                        f"to {lim.retreat_m} m or {lim.retreat_timeout_s} s, "
-                        f"until rm_safety releases the latch."
+                        f"policy_node: retreat START ({self._retreat.start_cause}: "
+                        f"{'stop-zone latched' if self._retreat.start_cause == 'latched' else 'pinned in the slow band with no progress'}"
+                        f" while roaming); reversing straight at {lim.retreat_vx} m/s, "
+                        f"up to {lim.retreat_m} m or {lim.retreat_timeout_s} s, until "
+                        f"rm_safety reports clear."
                     )
                 self._publish_reverse(step.vx)
                 return

@@ -51,7 +51,8 @@ def _read(path):
 
 
 def _limits(**overrides) -> RetreatLimits:
-    base = dict(retreat_vx=0.12, retreat_m=0.3, retreat_timeout_s=8.0, retreat_cooldown_s=20.0)
+    base = dict(retreat_vx=0.12, retreat_m=0.3, retreat_timeout_s=8.0, retreat_cooldown_s=20.0,
+                retreat_pinned_range_m=0.30, retreat_pinned_after_s=10.0)
     base.update(overrides)
     return RetreatLimits(**base)
 
@@ -60,8 +61,12 @@ def _ctl(**overrides) -> RetreatController:
     return RetreatController(_limits(**overrides), status_max_age_s=0.5)
 
 
-def _view(state=STATE_STOPPED, reason="stop_zone", age=0.0, topic=_MY) -> SafetyView:
-    return SafetyView(state, reason, age, topic)
+def _view(state=STATE_STOPPED, reason="stop_zone", age=0.0, topic=_MY,
+          min_range=float("inf")) -> SafetyView:
+    return SafetyView(state, reason, age, topic, min_range)
+
+
+_PINNED = _view(STATE_SLOW, "slow_zone", min_range=0.20)
 
 
 _LATCHED = _view()
@@ -89,6 +94,28 @@ def test_starts_only_on_a_fresh_latch_while_roaming_and_selected():
     assert _ctl().step(0.0, _DRIVING, (0, 0), True, _MY, 0.1) is None
     assert _ctl().step(0.0, _view(STATE_KILLED, "killed"), (0, 0), True, _MY, 0.1) is None
     assert _ctl().step(0.0, _RETREATING, (0, 0), True, _MY, 0.1) is None        # not a fresh latch
+
+
+def test_pinned_in_the_slow_band_starts_only_after_the_stall_window():
+    ctl = _ctl()
+    assert ctl.step(0.0, _PINNED, (0, 0), True, _MY, 0.1, stalled_s=9.9) is None
+    step = ctl.step(0.0, _PINNED, (0, 0), True, _MY, 0.1, stalled_s=10.0)
+    assert step is not None and step.reason == STARTED and ctl.start_cause == "pinned"
+    # Slow with the obstacle farther than the pinned range is driving, not stuck.
+    far = _view(STATE_SLOW, "slow_zone", min_range=0.45)
+    assert _ctl().step(0.0, far, (0, 0), True, _MY, 0.1, stalled_s=30.0) is None
+    # A latch starts at once, whatever the stall clock says.
+    assert _ctl().step(0.0, _LATCHED, (0, 0), True, _MY, 0.1, stalled_s=0.0) is not None
+    assert _ctl().start_cause is None
+
+
+def test_a_pinned_retreat_ends_when_the_obstacle_is_back_past_the_pinned_range():
+    ctl = _ctl()
+    ctl.step(0.0, _PINNED, (0, 0), True, _MY, 0.1, stalled_s=12.0)
+    still = _view(STATE_SLOW, "slow_zone", min_range=0.26)
+    assert ctl.step(0.5, still, (-0.05, 0.0), True, _MY, -0.12).done is False
+    done = ctl.step(1.0, _view(STATE_SLOW, "slow_zone", min_range=0.34), (-0.1, 0.0), True, _MY, -0.12)
+    assert done.done and done.reason == RELEASED
 
 
 def test_a_latch_after_the_nodes_own_reverse_is_refused_with_a_reason():

@@ -1324,11 +1324,35 @@ def _evaluate_inner(inputs: EvalInputs, limits: Limits) -> Decision:
         #   zone == "slow"  -> scale from min_r_slow, the narrow forward cone.
         #                      That is the entire point of the split: things
         #                      beside the robot no longer throttle it.
-        scale = slow_scale(min_r if zone == "stop" else min_r_slow, limits)
-        # TRANSLATION is scaled: moving the body through space is what closes
-        # the distance to an obstacle, so proximity must throttle it.
-        vx *= scale
-        vy *= scale
+        # RETREAT IN THE SLOW BAND (2026-10-23). The slow zone scales by
+        # magnitude, so without this a reverse would be braked to nothing
+        # exactly like a forward push, and a robot pinned at the stop
+        # boundary (the slow scale reaches zero there, so the latch never
+        # trips under a forward push) could never back out. The slow cone
+        # looks forward only, and the pre-latch stop window is the same
+        # obstacle ahead, so a pure straight reverse is passed capped to
+        # retreat_max_vx instead of scaled. Same predicate and same key as
+        # the latch branch; the command is already fresh here (precedence 4)
+        # and already clamped and ramped above.
+        es = limits.estop
+        pure_reverse = (
+            es.retreat_enabled
+            and math.isfinite(inputs.cmd_vx) and inputs.cmd_vx < 0.0
+            and math.isfinite(inputs.cmd_vy) and abs(inputs.cmd_vy) <= _POLICY_VY_EPSILON
+            and math.isfinite(inputs.cmd_wz) and abs(inputs.cmd_wz) <= _POLICY_VY_EPSILON
+        )
+        if pure_reverse:
+            if vx < -es.retreat_max_vx:
+                vx = -es.retreat_max_vx
+                clamping_active = True
+            vy = 0.0
+            wz = 0.0
+        else:
+            scale = slow_scale(min_r if zone == "stop" else min_r_slow, limits)
+            # TRANSLATION is scaled: moving the body through space is what closes
+            # the distance to an obstacle, so proximity must throttle it.
+            vx *= scale
+            vy *= scale
         # YAW IS DELIBERATELY *NOT* SCALED (operator finding, floor test
         # 2026-08-28). Rotating in place does not close the distance to
         # anything: the robot's own measured extent in the scan plane is
