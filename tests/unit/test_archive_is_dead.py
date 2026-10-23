@@ -73,7 +73,8 @@ def test_no_current_doc_links_to_an_archived_item_by_its_old_path() -> None:
             with open(path, "r", encoding="utf-8", errors="replace") as fh:
                 text = fh.read()
             for old in ("src/rm_tools/", "scripts/check_interface.py",
-                        "](interface_contract_2.0.0_superseded.md)", "](phase1_session_2026-08-08.md)"):
+                        "](interface_contract_2.0.0_superseded.md)", "](phase1_session_2026-08-08.md)",
+                        "](dev_env_setup.md)", "docs/dev_env_setup.md"):
                 if old in text:
                     offenders.append((os.path.relpath(path, _REPO_ROOT), old))
     assert offenders == [], offenders
