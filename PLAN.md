@@ -1,4 +1,4 @@
-> Status: approved 2026-10-23 (Daniel); BUILT the same day on `feat/roam-mode` (commits 64f1bda, b6e2322, 9b39e6c, 97e77f2, 25152f9, 75aa34e, c53afba; 611 workstation tests; pushed to GitHub). OPEN: the hardware verification below (deployed to bernard-1 for the dry run; the live run on `m4` is the operator's). Revised in place as implementation finds things.
+> Status: approved 2026-10-23 (Daniel); BUILT the same day on `feat/roam-mode` (commits 64f1bda, b6e2322, 9b39e6c, 97e77f2, 25152f9, 75aa34e, c53afba; 611 workstation tests; pushed to GitHub). DEPLOYED to bernard-1 (70f4b77) and dry-run verified 2026-10-23 (timeout hand-off on a killed robot, no motion, one /cmd_vel publisher). OPEN: the live run on `m4` with KILL in hand, and `timeout_s` set from a real run. Revised in place as implementation finds things.
 
 # Plan: roam mode (random waypoints, the robot keeps running)
 

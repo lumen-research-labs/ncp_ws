@@ -1811,10 +1811,18 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   `_retarget` loop generalised; result key `retargeted` -> `applied`), a
   ROAM button that confirms on enable only, and a pill from the active
   policy's debug stream. `docs/roam.md` is the how-to. 611 workstation
-  tests. **NOT yet driven on hardware**: the stack on bernard-1 still runs
-  6c5b102; deploy, dry-run with the source on teleop (hand-offs on timeouts
-  only), then live on `m4` with KILL in hand, and set `timeout_s` from the
-  elapsed seconds the hand-off lines report.
+  tests. **DEPLOYED to bernard-1 (70f4b77) and DRY-RUN VERIFIED the same
+  day** after the robot came back a second time: 7 packages built in 10 s,
+  stack up with 0 errors, both policy nodes log `roam off; limits from
+  config/roam.yaml: 1.0-2.5 m within +-45.0 deg`. With rm_safety KILLED and
+  the source on `teleop`: `ros2 param set /policy_node_m4 roam true` logged
+  `roam ON ...; current goal kept`, 30 s later `goal fixed (roam #1 timeout
+  after 30 s; totals 1 hand-offs, 1 timeouts) at (2.083, 0.894) in map`
+  (offset 2.26 m at 23 deg, inside the limits), `/cmd_vel` stayed at zero
+  with exactly one publisher, and `roam false` logged `roam OFF after 1
+  hand-off(s), 1 timeout(s); current goal kept`. **The LIVE run on `m4`
+  (ARM with KILL in hand, watch an `arrived` hand-off, set `timeout_s` from
+  the elapsed seconds) is the operator's next act.**
   * Also this day: the M9 Gazebo fine-tune finished on the box 2026-10-17
     (best 0.52 in Gazebo vs 0.46 zero-shot; M9 still not exported to the
     robot), the three repos were pushed to GitHub (`lumen-research-labs/
