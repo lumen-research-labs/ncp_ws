@@ -99,6 +99,33 @@ roam:
   # counters climb: read them over an armed window.
   timeout_s: 30.0
 
+  # ---- the retreat: back out of a stop-zone e-stop ------------------------
+  # With both zones on, a robot that creeps to within stop_zone_m of a wall
+  # is latched and, until 2026-10-23, stuck until a human moved it. Now
+  # rm_safety passes one thing under the latch, a fresh pure straight
+  # reverse (safety_limits.yaml estop.retreat_*), and releases the latch on
+  # its own after N ticks of that reverse with a clear scan. policy_node
+  # sends that reverse (rm_policy/retreat.py) when roam is on and it is the
+  # selected source, then roam draws the next goal from where the robot
+  # stands. The rear is unmonitored: a BLIND reverse the operator accepts
+  # for a static scene with KILL in hand, never unattended.
+  # 0.12: the reverse speed requested; rm_safety caps it at its own
+  #       retreat_max_vx (0.12, the only tape-measured reverse speed) and a
+  #       test pins this at or under both that and max_vx.
+  retreat_vx: 0.12
+  # 0.3: how far back counts as done even if the latch has not released
+  #      (a lateral obstacle keeps the wide arc busy). Twice the stop
+  #      radius, inside the corridor the forward leg was drawn through.
+  retreat_m: 0.3
+  # 8 s: 0.3 m takes 2.5 s at 0.12 m/s; a retreat still latched after 8 s
+  #      is wheels that did not move, dry_run, or an obstacle along the
+  #      side. Then the node holds the goal and warns.
+  retreat_timeout_s: 8.0
+  # 20 s between retreats, and at most one per goal: retreat, release,
+  # drive back into the same wall, retreat is the unattended loop
+  # rm_waypoint's "never retry" rule exists to prevent.
+  retreat_cooldown_s: 20.0
+
   # Seed for the node's own random generator. Every policy node seeds its own
   # generator from this, so two nodes draw the SAME sequence of candidates
   # (their goals still differ: each hands off at its own moments and sees its

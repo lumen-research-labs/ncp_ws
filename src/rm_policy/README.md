@@ -20,6 +20,7 @@ observation, runs the network, and publishes a *candidate* command.
 | `policy_runner.py` | pure module | Loads the checkpoint, owns the recurrent state, runs one inference tick. No ROS. |
 | `pose_source.py` | pure module | Validates a pose sample and detects discontinuities (SLAM loop closures). |
 | `roam.py` | pure module | ROAM mode: the limits in `config/roam.yaml` and the hand-off clock that draws the next random goal on arrival or timeout. See [`docs/roam.md`](../../docs/roam.md). |
+| `retreat.py` | pure module | ROAM's reverse out of a stop-zone e-stop: when to send the straight reverse rm_safety passes under its latch, and when to stop. |
 | `policy_node.py` | ROS2 node | The control loop. The production path. |
 | `lidar_contract.py` | pure module | Reads the lidar block of `config/interface.yaml` (bins, arc, range bounds, search window, self-occlusion zones) for both nodes. |
 | `scan_bridge_node.py` | ROS2 node | `/scan` → `/ncp/scan`, 720 beams. Exists only so the *upstream* node can run unmodified. |

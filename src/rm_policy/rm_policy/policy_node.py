@@ -25,7 +25,14 @@ What it does:
          current pose exactly as a re-target would (`rm_policy/roam.py`). A
          goal the robot takes too long to reach switches anyway; a finished
          goal is never retried; with no free candidate in view the current
-         goal is held and the node says so.
+         goal is held and the node says so. If rm_safety's stop zone
+         latches while roaming and this node is the selected source, it
+         backs STRAIGHT out at `retreat_vx` (the one command rm_safety
+         passes under its latch), without running the network, until the
+         latch releases or `retreat_m` is covered, then draws the next goal
+         (reason `retreated`). One retreat per goal, with a cooldown; a
+         timeout holds and warns; a kill, a stale input or a pose jump
+         aborts it with zero published.
       3. Calls `rm_policy.observation_builder` to assemble the 724-element
          observation (720 lidar + 2 dynamic robot-frame goal + 2 previous
          action), with the lidar geometry, search window and self-occlusion
@@ -59,6 +66,10 @@ What it does:
 
 Subscribes:  /scan   [sensor_msgs/LaserScan]   @ ~10.07 Hz (interface.yaml)
 Subscribes:  /odom   [nav_msgs/Odometry]       @ ~10.74 Hz (interface.yaml)
+Subscribes:  /safety/status [rm_interfaces/SafetyStatus] @ 10 Hz — read for
+                              ONE purpose: the retreat out of a stop-zone
+                              e-stop while roaming (rm_policy/retreat.py).
+                              Nothing else here acts on the safety state.
 Publishes:   /policy/cmd_vel  [geometry_msgs/Twist]  @ control.rate_hz (5 Hz)
 Publishes:   /ncp_debug       [std_msgs/String]      @ control.rate_hz (5 Hz)
 Parameters:  scan_topic       (str, "/scan")
@@ -155,6 +166,11 @@ from rm_policy.lidar_contract import lidar_contract_from
 from rm_policy.observation_builder import build_observation
 from rm_policy.policy_runner import PolicyRunner
 from rm_policy.pose_source import Pose2D, detect_pose_jump, pose_is_usable
+from rm_interfaces.msg import SafetyStatus
+from rm_policy.retreat import (
+    ABORTED, DISTANCE, RELEASED, STARTED, TIMEOUT as RETREAT_TIMEOUT,
+    RetreatController, RetreatLimits, SafetyView,
+)
 from rm_policy.roam import RoamSequencer, Scan, load_roam_limits
 from rm_policy.vendor import ncp_policy
 
@@ -407,6 +423,23 @@ class PolicyNode(rclpy.node.Node):
         # goal, and every fix tells the sequencer.
         self._roam = RoamSequencer(roam_limits)
         self._roam.set_on(roam_on, time.monotonic())
+        # The retreat out of a stop-zone e-stop (rm_policy/retreat.py). The
+        # safety status it reads is bounded by the same age as the pose.
+        self._retreat = RetreatController(
+            RetreatLimits(
+                retreat_vx=roam_limits.retreat_vx, retreat_m=roam_limits.retreat_m,
+                retreat_timeout_s=roam_limits.retreat_timeout_s,
+                retreat_cooldown_s=roam_limits.retreat_cooldown_s,
+            ),
+            status_max_age_s=self._odom_timeout_ms / 1000.0,
+        )
+        self._cmd_vel_topic = cmd_vel_topic
+        # The last /safety/status: state, reason, the forwarded input topic,
+        # and the monotonic time it arrived. None until the first message.
+        self._safety_state: Optional[int] = None
+        self._safety_reason: str = ""
+        self._safety_topic: str = ""
+        self._safety_stamp: Optional[float] = None
 
         # ------------------------------------------------------------------
         # Sensor state — everything starts "never received" (infinitely
@@ -476,6 +509,13 @@ class PolicyNode(rclpy.node.Node):
         # while the safety layer had already gone quiet, which is a confusing
         # disagreement to debug and buys nothing.
         self.create_subscription(Odometry, odom_topic, self._odom_cb, sensor_qos)
+        # /safety/status feeds EXACTLY ONE decision here: the retreat out of
+        # a stop-zone e-stop (retreat.py). Nothing else in this node reads
+        # it: no pause on KILLED, no arming, no source logic. The decision
+        # "policy_node reads no safety state" (2026-10-23) is re-opened for
+        # this one input and pinned to it by a test. Depth 10, the
+        # publisher's own profile.
+        self.create_subscription(SafetyStatus, "/safety/status", self._safety_cb, 10)
 
         # TF, only in map mode. Creating a TransformListener spawns a
         # subscription to /tf and /tf_static, so it is not free; in odom mode
@@ -746,6 +786,7 @@ class PolicyNode(rclpy.node.Node):
         self._prev_action_w = 0.0
         self._runner.reset()
         self._roam.goal_fixed(time.monotonic())
+        self._retreat.goal_fixed()
         frame = _MAP_FRAME if self._pose_source == _POSE_SOURCE_MAP else "odom"
         self.get_logger().info(
             f"policy_node: goal fixed ({why}) at ({self._goal_world_x:.3f}, "
@@ -753,6 +794,27 @@ class PolicyNode(rclpy.node.Node):
             f"({self._robot_x:.3f}, {self._robot_y:.3f}, yaw {self._robot_yaw:.3f}) "
             f"+ offset ({offset_x:.2f}, {offset_y:.2f}) m; recurrent state reset."
         )
+
+    def _safety_cb(self, msg: SafetyStatus) -> None:
+        self._safety_state = int(msg.state)
+        self._safety_reason = str(msg.reason)
+        self._safety_topic = str(msg.command_topic)
+        self._safety_stamp = time.monotonic()
+
+    def _safety_view(self, now: float) -> SafetyView:
+        age = math.inf if self._safety_stamp is None else now - self._safety_stamp
+        return SafetyView(self._safety_state, self._safety_reason, age, self._safety_topic)
+
+    def _publish_reverse(self, vx: float) -> None:
+        """The retreat's command: straight reverse, nothing else, through the
+        one publisher. `previous_action` is left alone: this is not the
+        policy's request and must not enter its fed-back history."""
+        cmd = Twist()
+        cmd.linear.x = float(vx)
+        cmd.linear.y = 0.0
+        cmd.angular.z = 0.0
+        self._cmd_pub.publish(cmd)
+        self._publish_debug(fault=None, action=(float(vx), 0.0))
 
     def _scan_cb(self, msg: LaserScan) -> None:
         self._scan_ranges = list(msg.ranges)
@@ -838,7 +900,7 @@ class PolicyNode(rclpy.node.Node):
             # What roam is doing: on/off, hand-offs, timeouts, the last
             # reason and the age of the current goal, so the timeout is
             # visible before it fires.
-            "roam": self._roam.status(time.monotonic()),
+            "roam": {**self._roam.status(time.monotonic()), **self._retreat.status()},
             "weights": self._runner.weights_path or None,
             # Short hash is enough to tell two checkpoints apart at a glance
             # while keeping this message small at 5 Hz; the full hash is in
@@ -948,6 +1010,11 @@ class PolicyNode(rclpy.node.Node):
         jump = detect_pose_jump(self._prev_pose, pose)
         if jump is not None:
             self._runner.reset()
+            if self._retreat.abort("pose_jump", now) is not None:
+                self.get_logger().warn(
+                    "policy_node: retreat ABORTED: the pose jumped mid-reverse, "
+                    "so the start pose is in another frame. Current goal kept."
+                )
             self.get_logger().warn(
                 f"policy_node: pose discontinuity ({jump}) — recurrent state "
                 f"reset. Expected on a SLAM loop closure; investigate if it "
@@ -964,6 +1031,71 @@ class PolicyNode(rclpy.node.Node):
         if self._goal_world_x is None and self._pose_source == _POSE_SOURCE_MAP:
             self._fix_goal(self._goal_offset_x, self._goal_offset_y,
                            why=f"first {_MAP_FRAME} pose")
+
+        # The raw scan as the roam draw reads it (the scan watchdog above
+        # guarantees it is fresh); built once for the retreat and for roam.
+        scan = Scan(self._scan_ranges, self._scan_angle_min,
+                    self._scan_angle_increment, self._lidar.range_min_m)
+
+        # ------------------------------------------------------------------
+        # RETREAT out of a stop-zone e-stop (2026-10-23, retreat.py). Sits
+        # after the pose checks (a retreat measures its own displacement)
+        # and before the goal block (it is not the policy; the network does
+        # not run and previous_action is untouched while it reverses). The
+        # safety status feeds this and nothing else in the node.
+        # ------------------------------------------------------------------
+        step = self._retreat.step(
+            now, self._safety_view(now), (self._robot_x, self._robot_y),
+            self._roam.on, self._cmd_vel_topic, self._prev_action_v,
+        )
+        if step is not None:
+            if not step.done:
+                if step.reason == STARTED:
+                    lim = self._retreat.limits
+                    self.get_logger().warn(
+                        f"policy_node: retreat START: stop-zone latched while "
+                        f"roaming; reversing straight at {lim.retreat_vx} m/s, up "
+                        f"to {lim.retreat_m} m or {lim.retreat_timeout_s} s, "
+                        f"until rm_safety releases the latch."
+                    )
+                self._publish_reverse(step.vx)
+                return
+            if step.reason in (RELEASED, DISTANCE):
+                handoff = self._roam.retreated(now, scan)
+                if handoff is not None:
+                    self._fix_goal(
+                        handoff.offset_x, handoff.offset_y,
+                        why=f"roam #{handoff.n} {handoff.reason} ({step.reason}) "
+                            f"after {handoff.elapsed_s:.0f} s, free on draw "
+                            f"{handoff.attempts}; totals {self._roam.n} hand-offs",
+                    )
+                else:
+                    self.get_logger().warn(
+                        f"policy_node: retreat ended ({step.reason}) but no "
+                        f"candidate goal is in free space; holding the current "
+                        f"goal."
+                    )
+            elif step.reason == RETREAT_TIMEOUT:
+                self.get_logger().warn(
+                    "policy_node: retreat TIMEOUT with the latch still held: "
+                    "the wheels did not move, dry_run, or an obstacle beside the "
+                    "robot. Holding the current goal; jog it out."
+                )
+                self._publish_zero(reason="retreat_timeout")
+                return
+            else:
+                self.get_logger().warn(
+                    f"policy_node: retreat {step.reason}; zero published, current "
+                    f"goal kept."
+                )
+                self._publish_zero(reason=(step.reason or ABORTED).replace(":", "_"))
+                return
+        elif self._retreat.hold_reason:
+            self.get_logger().warn(
+                f"policy_node: stop-zone latched while roaming but not retreating: "
+                f"{self._retreat.hold_reason}. KILL, reset and jog it out.",
+                throttle_duration_sec=_WARN_THROTTLE_SEC,
+            )
 
         # ------------------------------------------------------------------
         # Goal must be defined. No default is ever substituted (interface.yaml
@@ -1032,11 +1164,7 @@ class PolicyNode(rclpy.node.Node):
         # The raw scan (the scan watchdog above guarantees it is fresh) is
         # what keeps the next goal out of walls; the goal distance feeds the
         # progress watchdog.
-        handoff = self._roam.step(
-            now, self._goal_reached, goal_dist,
-            Scan(self._scan_ranges, self._scan_angle_min,
-                 self._scan_angle_increment, self._lidar.range_min_m),
-        )
+        handoff = self._roam.step(now, self._goal_reached, goal_dist, scan)
         if handoff is not None:
             self._fix_goal(
                 handoff.offset_x, handoff.offset_y,

@@ -671,7 +671,9 @@ function renderRoam(snap){
     .map(o => `${o.name} ${o.roam.on ? "on" : "off"}`);
   $("roamstat").textContent = r
     ? `${ap.name||"policy"} · roam ${r.on ? "on" : "off"} · goals ${r.n} · `+
-      `timeouts ${r.timeouts} · stalls ${r.stalls} · last ${r.last_reason || "—"}`+
+      `timeouts ${r.timeouts} · stalls ${r.stalls} · retreats ${r.retreats ?? 0} · `+
+      `last ${r.last_reason || "—"}`+
+      (r.retreating ? " · RETREATING: backing out of the stop zone" : "")+
       (r.holding ? " · HOLDING: no free goal in view, jog into open floor" : "")+
       (differs.length ? ` · differs: ${differs.join(", ")}` : "")
     : `${ap.name||"policy"} · roam —`;

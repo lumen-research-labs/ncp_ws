@@ -64,6 +64,7 @@ ARRIVED = "arrived"
 TIMEOUT = "timeout"
 STALLED = "stalled"
 NO_FREE_GOAL = "no_free_goal"
+RETREATED = "retreated"
 
 # Seconds between draws while holding (no free goal in view). A draw costs
 # draw_attempts passes over the scan; once a second is plenty for a robot
@@ -76,6 +77,7 @@ KEYS = (
     "range_min_m", "range_max_m", "bearing_cap_deg", "dwell_s", "timeout_s", "seed",
     "corridor_half_width_m", "clearance_m", "min_valid_fraction", "draw_attempts",
     "progress_window_s", "progress_min_m", "self_radius_m",
+    "retreat_vx", "retreat_m", "retreat_timeout_s", "retreat_cooldown_s",
 )
 _INT_KEYS = ("seed", "draw_attempts")
 
@@ -95,6 +97,13 @@ class RoamLimits:
     progress_window_s: float
     progress_min_m: float
     self_radius_m: float
+    # The retreat (rm_policy/retreat.py): the reverse speed requested under
+    # rm_safety's stop-zone latch, how far back counts as done, how long
+    # before giving up, and the gap between retreats.
+    retreat_vx: float
+    retreat_m: float
+    retreat_timeout_s: float
+    retreat_cooldown_s: float
 
 
 @dataclass(frozen=True)
@@ -146,6 +155,14 @@ def check_limits(limits: RoamLimits) -> Optional[str]:
     if not 0.0 <= limits.self_radius_m < limits.range_min_m:
         return (f"roam.self_radius_m must be >= 0 and below roam.range_min_m "
                 f"({limits.range_min_m}), got {limits.self_radius_m}")
+    if limits.retreat_vx <= 0.0:
+        return f"roam.retreat_vx must be > 0, got {limits.retreat_vx}"
+    if limits.retreat_m <= 0.0:
+        return f"roam.retreat_m must be > 0, got {limits.retreat_m}"
+    if limits.retreat_timeout_s <= 0.0:
+        return f"roam.retreat_timeout_s must be > 0, got {limits.retreat_timeout_s}"
+    if limits.retreat_cooldown_s < 0.0:
+        return f"roam.retreat_cooldown_s must be >= 0, got {limits.retreat_cooldown_s}"
     return None
 
 
@@ -376,7 +393,20 @@ class RoamSequencer:
                 reason = STALLED
             else:
                 return None
-        if self._holding and self._retry_at is not None and now < self._retry_at:
+        return self._handoff(now, reason, scan, respect_retry=True)
+
+    def retreated(self, now: float, scan: Optional[Scan] = None) -> Optional[Handoff]:
+        """A retreat out of a stop-zone e-stop succeeded: the next goal is
+        drawn at once, from where the robot now stands, reason RETREATED.
+        None when no goal was ever fixed or nothing free is in view (hold)."""
+        if self._fixed_at is None or not self._on:
+            return None
+        return self._handoff(now, RETREATED, scan, respect_retry=False)
+
+    def _handoff(self, now: float, reason: str, scan: Optional[Scan],
+                 respect_retry: bool) -> Optional[Handoff]:
+        if (respect_retry and self._holding and self._retry_at is not None
+                and now < self._retry_at):
             return None
         drawn = self.draw(scan)
         if drawn is None:
@@ -387,7 +417,8 @@ class RoamSequencer:
             self._retry_at = now + HOLD_RETRY_S
             return None
         offset_x, offset_y, attempts = drawn
-        elapsed = now - max(self._fixed_at, self._enabled_at)
+        reference = self._fixed_at if self._enabled_at is None else max(self._fixed_at, self._enabled_at)
+        elapsed = now - reference
         self._n += 1
         if reason == TIMEOUT:
             self._timeouts += 1

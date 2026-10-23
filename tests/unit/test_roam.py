@@ -63,7 +63,8 @@ def _limits(**overrides) -> RoamLimits:
                 dwell_s=1.0, timeout_s=30.0, seed=0,
                 corridor_half_width_m=0.20, clearance_m=0.3, min_valid_fraction=0.5,
                 draw_attempts=32, progress_window_s=10.0, progress_min_m=0.05,
-                self_radius_m=0.25)
+                self_radius_m=0.25, retreat_vx=0.12, retreat_m=0.3,
+                retreat_timeout_s=8.0, retreat_cooldown_s=20.0)
     base.update(overrides)
     return RoamLimits(**base)
 
@@ -461,6 +462,10 @@ def test_non_numeric_and_non_integer_seed_are_refused(key, value, fragment):
     (dict(progress_min_m=-0.01), "progress_min_m"),
     (dict(self_radius_m=-0.1), "self_radius_m"),
     (dict(self_radius_m=1.0), "self_radius_m"),
+    (dict(retreat_vx=0.0), "retreat_vx"),
+    (dict(retreat_m=0.0), "retreat_m"),
+    (dict(retreat_timeout_s=0.0), "retreat_timeout_s"),
+    (dict(retreat_cooldown_s=-1.0), "retreat_cooldown_s"),
 ])
 def test_incoherent_limits_are_rejected(overrides, fragment):
     reason = check_limits(_limits(**overrides))
@@ -515,10 +520,13 @@ def test_the_roam_step_sits_after_every_fault_return_and_before_the_latch_zero()
         assert src.index(earlier) < step
     assert step < src.index('self._publish_zero(reason="goal_reached")')
     # The goal distance (progress watchdog) and the raw scan (free-space
-    # draw) go in; the node's own lidar range_min marks the no-returns.
-    call = src[step:src.index(")", src.index("Scan(", step)) + 1]
-    assert "goal_dist" in call and "Scan(self._scan_ranges" in call
-    assert "self._lidar.range_min_m" in call
+    # draw) go in; the scan is built once, after the pose checks, with the
+    # node's own lidar range_min marking the no-returns.
+    call = src[step:src.index(")", step) + 1]
+    assert "goal_dist" in call and "scan" in call
+    built = src.index("scan = Scan(self._scan_ranges")
+    assert src.index("self._prev_pose = pose") < built < step
+    assert "self._lidar.range_min_m" in src[built:built + 200]
     assert "elif self._roam.holding:" in src
 
 
@@ -531,11 +539,13 @@ def test_on_set_parameters_accepts_roam_and_still_rejects_the_rest():
     assert body.index("self._fix_goal(") < body.index("self._set_roam(roam)")
 
 
-def test_roam_status_is_published_and_the_node_watches_no_safety_state():
+def test_roam_status_is_published_and_safety_state_feeds_only_the_retreat():
+    """2026-10-23: the decision "policy_node reads no safety state" was
+    re-opened for exactly one input, the retreat out of a stop-zone e-stop.
+    test_retreat.py pins the narrower invariant; this keeps the rest."""
     src = _read(_POLICY_NODE)
-    assert '"roam": self._roam.status(' in src
-    assert "SafetyStatus" not in src
-    assert "/safety/status" not in src
+    assert '"roam": {**self._roam.status(' in src
+    assert src.count("self._safety_view(") == 1
     assert src.count("create_publisher(") == 2
 
 
@@ -598,7 +608,8 @@ def test_page_has_the_roam_button_and_pill_fed_by_the_debug_stream():
     assert 'id="roambtn"' in page and 'id="roamstat"' in page
     body = page[page.index("function renderRoam(snap)"):]
     body = body[:body.index("\n}\n") + 3]
-    for needle in ("ap.debug", "r.on", "r.n", "r.timeouts", "r.stalls", "r.holding", "r.last_reason"):
+    for needle in ("ap.debug", "r.on", "r.n", "r.timeouts", "r.stalls", "r.holding",
+                   "r.retreating", "r.last_reason"):
         assert needle in body, needle
     render = page[page.index("function render(snap)"):]
     assert "renderRoam(snap);" in render[:render.index("\n}\n")]

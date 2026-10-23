@@ -6,39 +6,38 @@ Roam only moves the goal; the policy drives to it behind rm_safety's clamps, wat
 
 ## Before you start
 
-- **Launch with both lidar zones on.** The launch defaults them off; on 2026-10-23 the first live run drove into a wall behind a blind-drawn goal. With the zones on a wall stops the robot, the goal stalls and switches. The dashboard refuses ROAM on while either zone is off.
+- **Launch with both lidar zones on.** The launch defaults them off; on 2026-10-23 the first live run drove into a wall behind a blind-drawn goal. The dashboard refuses ROAM on while either zone is off.
   ```bash
   bash scripts/run_stack.sh stop_zone_enabled:=true slow_zone_enabled:=true
   ```
+- **On a stop-zone e-stop the robot backs out by itself.** rm_safety passes one thing under its latch, a straight reverse at `retreat_vx`, and releases the latch after half a second of it with a clear scan. The node reverses up to `retreat_m` or `retreat_timeout_s`, then draws the next goal. The rear is unmonitored: a blind reverse, KILL in hand, never unattended. One retreat per goal, `retreat_cooldown_s` between retreats.
 
 ## Turn it on
 
-1. Press ROAM on the dashboard and confirm, or from a robot shell `ros2 param set /policy_node_m4 roam true`. The node logs `roam ON`; the current goal is kept.
+1. Press ROAM on the dashboard and confirm, or from a robot shell `ros2 param set /policy_node_m4 roam true`. The current goal is kept.
 2. Select the policy and ARM. A robot already at its goal sets off after the dwell.
-3. Each hand-off is a `goal fixed (roam #n ...)` line in the policy log: the reason (`arrived`, `timeout`, `stalled`), the seconds the goal was current, the draws tried, the totals.
-4. `ros2 topic echo /ncp_debug/m4 --once` carries a `roam` block: `on`, `n`, `timeouts`, `stalls`, `held`, `holding`, `last_reason`, `goal_age_s`.
+3. Each hand-off is a `goal fixed (roam #n ...)` log line: reason (`arrived`, `timeout`, `stalled`, `retreated`), seconds the goal lasted, draws tried, totals.
+4. `ros2 topic echo /ncp_debug/m4 --once` carries a `roam` block: the switch, the counters, `holding`, `retreating`, `goal_age_s`.
 
 ## The limits
 
-| key | starting value | what it does |
+| key | value | what it does |
 |---|---|---|
-| `range_min_m`, `range_max_m` | 0.6, 2.5 | Leg length. The shortest must exceed `goal_reached_dist` (0.4 m). |
-| `bearing_cap_deg` | 45 | The draw stays within this of straight ahead. |
-| `corridor_half_width_m`, `clearance_m` | 0.20, 0.3 | The strip to the goal plus the clearance must hold no return. |
-| `min_valid_fraction` | 0.5 | No-return rays are unknown; a strip needs this share of valid rays. |
-| `self_radius_m` | 0.25 | Returns closer than this are the robot's own body, not obstacles. |
-| `draw_attempts` | 32 | Random candidates in the cone, then the shortest leg all round, nearest heading first, before holding. |
-| `dwell_s` | 1.0 | Hold at the goal before the next draw. |
-| `progress_window_s`, `progress_min_m` | 10, 0.05 | No progress for this long: `stalled`, the goal switches. |
-| `timeout_s` | 30 | The hard ceiling on one goal. |
-| `seed` | 0 | Every node draws the same candidate sequence. |
+| `range_min_m`, `range_max_m` | 0.6, 2.5 | Leg length; the shortest exceeds the 0.4 m latch. |
+| `bearing_cap_deg` | 45 | Draw within this of straight ahead. |
+| `corridor_half_width_m`, `clearance_m` | 0.20, 0.3 | The strip to the goal plus clearance holds no return. |
+| `min_valid_fraction`, `self_radius_m` | 0.5, 0.25 | No-returns are unknown; the robot's own body is not an obstacle. |
+| `draw_attempts` | 32 | Random candidates, then the shortest leg all round, before holding. |
+| `dwell_s`, `timeout_s` | 1.0, 30 | Hold at the goal; the ceiling on one goal. |
+| `progress_window_s`, `progress_min_m` | 10, 0.05 | No progress for this long: `stalled`. |
+| `retreat_vx`, `retreat_m`, `retreat_timeout_s`, `retreat_cooldown_s` | 0.12, 0.3, 8, 20 | The reverse out of an e-stop. |
+| `seed` | 0 | Every node draws the same sequence. |
 
-The file is read at startup. Set the two windows from the elapsed seconds the hand-off lines report over a real run.
+Read at startup; tune from the logs of a real run.
 
-## Turn it off, and what will look like a bug
+## What will look like a bug
 
-- ROAM off keeps the current goal. The robot drives there and latches. KILL is the stop.
-- **The robot stops and the log says no candidate goal is in free space.** It is boxed in: `holding` is true and the draw retries once a second. Jog it into open floor.
-- Timeouts and stalls keep counting while the robot is KILLED or the node is not the selected source. Read the counters over an armed window.
-- A manual re-target during roam is accepted; the clocks restart.
-- Each node roams on its own scan, so two nodes' goals differ.
+- ROAM off keeps the current goal; the robot drives there and latches. KILL is the stop. ROAM off during a retreat ends the reverse.
+- **No candidate goal is in free space.** Boxed in: `holding` is true, the draw retries once a second. Jog it into open floor.
+- **`retreat TIMEOUT`.** The latch did not release: wheels that did not move, `dry_run`, or an obstacle beside the robot. KILL, reset and jog it out.
+- Counters climb while the robot is KILLED or the node is not the selected source; read them over an armed window.
