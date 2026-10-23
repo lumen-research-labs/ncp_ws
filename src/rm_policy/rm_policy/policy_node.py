@@ -18,12 +18,14 @@ What it does:
          vector is ever substituted (interface.yaml `goal_local.failure_mode`
          is explicit that a plausible-looking goal is worse than no goal).
          With `roam` on (a runtime parameter) a finished goal is replaced:
-         `dwell_s` after arrival, or `timeout_s` after a fix with no
-         arrival, the node draws a random robot-frame offset within
-         `config/roam.yaml` and fixes it from the current pose, exactly as
-         a re-target would (`rm_policy/roam.py`). A goal the robot takes
-         too long to reach switches anyway; a timed-out goal is never
-         retried.
+         `dwell_s` after arrival, `timeout_s` after a fix with no arrival,
+         or `progress_window_s` without the goal distance shrinking, the
+         node draws a random robot-frame offset within `config/roam.yaml`
+         that the raw scan shows to be in free space, and fixes it from the
+         current pose exactly as a re-target would (`rm_policy/roam.py`). A
+         goal the robot takes too long to reach switches anyway; a finished
+         goal is never retried; with no free candidate in view the current
+         goal is held and the node says so.
       3. Calls `rm_policy.observation_builder` to assemble the 724-element
          observation (720 lidar + 2 dynamic robot-frame goal + 2 previous
          action), with the lidar geometry, search window and self-occlusion
@@ -153,7 +155,7 @@ from rm_policy.lidar_contract import lidar_contract_from
 from rm_policy.observation_builder import build_observation
 from rm_policy.policy_runner import PolicyRunner
 from rm_policy.pose_source import Pose2D, detect_pose_jump, pose_is_usable
-from rm_policy.roam import RoamSequencer, load_roam_limits
+from rm_policy.roam import RoamSequencer, Scan, load_roam_limits
 from rm_policy.vendor import ncp_policy
 
 # ---------------------------------------------------------------------------
@@ -699,15 +701,19 @@ class PolicyNode(rclpy.node.Node):
         if on:
             self.get_logger().info(
                 f"policy_node: roam ON{'' if changed else ' (already on)'}: "
-                f"next goal drawn {lim.dwell_s} s after arrival or "
-                f"{lim.timeout_s} s after a fix with no arrival, "
-                f"{lim.range_min_m}-{lim.range_max_m} m within "
-                f"+-{lim.bearing_cap_deg} deg, seed {lim.seed}; current goal kept."
+                f"next goal drawn {lim.dwell_s} s after arrival, "
+                f"{lim.timeout_s} s after a fix with no arrival, or after "
+                f"{lim.progress_window_s} s without {lim.progress_min_m} m of "
+                f"progress; {lim.range_min_m}-{lim.range_max_m} m within "
+                f"+-{lim.bearing_cap_deg} deg, in free space ({lim.clearance_m} m "
+                f"clearance, {lim.corridor_half_width_m} m half-width), seed "
+                f"{lim.seed}; current goal kept."
             )
         else:
             self.get_logger().info(
                 f"policy_node: roam OFF{'' if changed else ' (already off)'} after "
-                f"{self._roam.n} hand-off(s), {self._roam.timeouts} timeout(s); "
+                f"{self._roam.n} hand-off(s), {self._roam.timeouts} timeout(s), "
+                f"{self._roam.stalls} stall(s), {self._roam.held} held; "
                 f"current goal kept, the robot stops there."
             )
 
@@ -1023,13 +1029,28 @@ class PolicyNode(rclpy.node.Node):
         # one. One decision per tick. A hand-off is a re-target, so it clears
         # the latch and this same tick drives toward the new goal. With roam
         # off the sequencer only records the arrival edge and returns None.
-        handoff = self._roam.step(now, self._goal_reached)
+        # The raw scan (the scan watchdog above guarantees it is fresh) is
+        # what keeps the next goal out of walls; the goal distance feeds the
+        # progress watchdog.
+        handoff = self._roam.step(
+            now, self._goal_reached, goal_dist,
+            Scan(self._scan_ranges, self._scan_angle_min,
+                 self._scan_angle_increment, self._lidar.range_min_m),
+        )
         if handoff is not None:
             self._fix_goal(
                 handoff.offset_x, handoff.offset_y,
                 why=f"roam #{handoff.n} {handoff.reason} after "
-                    f"{handoff.elapsed_s:.0f} s; totals {self._roam.n} hand-offs, "
-                    f"{self._roam.timeouts} timeouts",
+                    f"{handoff.elapsed_s:.0f} s, free on draw {handoff.attempts}; "
+                    f"totals {self._roam.n} hand-offs, {self._roam.timeouts} "
+                    f"timeouts, {self._roam.stalls} stalls, {self._roam.held} held",
+            )
+        elif self._roam.holding:
+            self.get_logger().warn(
+                "policy_node: roam: a hand-off is due but no candidate goal is "
+                "in free space the lidar can see — holding the current goal "
+                "and retrying once a second. Jog the robot into open floor.",
+                throttle_duration_sec=_WARN_THROTTLE_SEC,
             )
         if self._goal_reached:
             self._publish_zero(reason="goal_reached")

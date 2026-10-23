@@ -27,13 +27,18 @@ sys.path.insert(0, os.path.join(_REPO_ROOT, "src", "rm_policy"))
 
 from rm_policy.roam import (  # noqa: E402
     ARRIVED,
+    HOLD_RETRY_S,
     KEYS,
+    NO_FREE_GOAL,
+    STALLED,
     TIMEOUT,
     RoamLimits,
     RoamSequencer,
+    Scan,
     check_limits,
     limits_from_dict,
     load_roam_limits,
+    strip_is_free,
 )
 
 _ROAM_YAML = os.path.join(_REPO_ROOT, "config", "roam.yaml")
@@ -55,7 +60,9 @@ def _read(path: str) -> str:
 
 def _limits(**overrides) -> RoamLimits:
     base = dict(range_min_m=1.0, range_max_m=2.5, bearing_cap_deg=45.0,
-                dwell_s=1.0, timeout_s=30.0, seed=0)
+                dwell_s=1.0, timeout_s=30.0, seed=0,
+                corridor_half_width_m=0.20, clearance_m=0.5, min_valid_fraction=0.5,
+                draw_attempts=32, progress_window_s=10.0, progress_min_m=0.05)
     base.update(overrides)
     return RoamLimits(**base)
 
@@ -67,6 +74,25 @@ def _seq(on_at=0.0, **overrides) -> RoamSequencer:
     return seq
 
 
+# A 360-ray, 1-degree scan starting at -pi, like the TG30's layout: `f` maps
+# a bearing in degrees to a range; 0.0 is the no-return sentinel.
+_N, _INC, _AMIN = 360, math.radians(1.0), -math.pi
+
+
+def _scan(f) -> Scan:
+    return Scan([f(math.degrees(_AMIN + i * _INC)) for i in range(_N)], _AMIN, _INC, 0.01)
+
+
+_OPEN = _scan(lambda a: 10.0)
+_WALL_AHEAD = _scan(lambda a: 1.5 if abs(a) <= 30 else 10.0)   # a wall 1.5 m ahead
+_BOXED = _scan(lambda a: 0.8)                                   # walls all round
+_UNKNOWN = _scan(lambda a: 0.0)                                 # nothing but no-returns
+
+
+def _polar(offset):
+    return math.hypot(offset[0], offset[1]), math.degrees(math.atan2(offset[1], offset[0]))
+
+
 # ---------------------------------------------------------------------------
 # the draw
 # ---------------------------------------------------------------------------
@@ -74,7 +100,8 @@ def _seq(on_at=0.0, **overrides) -> RoamSequencer:
 def test_draws_stay_inside_the_configured_range_and_cone():
     seq = _seq()
     for _ in range(2000):
-        x, y = seq.draw()
+        x, y, attempts = seq.draw()
+        assert attempts == 1          # no scan: the first candidate is taken
         d = math.hypot(x, y)
         assert 1.0 <= d <= 2.5
         assert abs(math.degrees(math.atan2(y, x))) <= 45.0
@@ -82,13 +109,69 @@ def test_draws_stay_inside_the_configured_range_and_cone():
 
 
 def test_same_seed_draws_the_same_sequence_and_different_seeds_differ():
-    a = [_seq(seed=7).draw() for _ in range(1)][0]
+    a = _seq(seed=7).draw()
     b = _seq(seed=7).draw()
     c = _seq(seed=8).draw()
     assert a == b
     assert a != c
     s1, s2 = _seq(seed=3), _seq(seed=3)
     assert [s1.draw() for _ in range(20)] == [s2.draw() for _ in range(20)]
+
+
+# ---------------------------------------------------------------------------
+# free space
+# ---------------------------------------------------------------------------
+
+def test_strip_is_free_reads_the_scan_as_a_strip_to_the_goal_plus_clearance():
+    lim = _limits()
+    assert strip_is_free(_OPEN, 0.0, 2.0, lim) is True
+    assert strip_is_free(_WALL_AHEAD, 0.0, 2.0, lim) is False
+    # 1.0 m goal + 0.5 m clearance reaches the wall at 1.5 m exactly: blocked.
+    assert strip_is_free(_WALL_AHEAD, 0.0, 1.0, lim) is False
+    assert strip_is_free(_WALL_AHEAD, 0.0, 0.9, lim) is True
+    # Beside the wall the strip is clear.
+    assert strip_is_free(_WALL_AHEAD, math.radians(90.0), 2.0, lim) is True
+    # A return just outside the strip's width does not block it.
+    side = _scan(lambda a: 0.5 if abs(a - 30.0) < 0.5 else 10.0)   # 0.5 m at 30 deg: lateral 0.25 m
+    assert strip_is_free(side, 0.0, 2.0, lim) is True
+    narrow = _scan(lambda a: 1.0 if abs(a - 10.0) < 0.5 else 10.0)  # 1.0 m at 10 deg: lateral 0.17 m
+    assert strip_is_free(narrow, 0.0, 2.0, lim) is False
+
+
+def test_no_returns_are_unknown_not_free():
+    lim = _limits()
+    assert strip_is_free(_UNKNOWN, 0.0, 2.0, lim) is None
+    # Half the rays over the strip valid and far: enough to call it free.
+    half = _scan(lambda a: 10.0 if int(a) % 2 == 0 else 0.0)
+    assert strip_is_free(half, 0.0, 2.0, lim) is True
+    # Fewer than the fraction: unknown.
+    sparse = _scan(lambda a: 10.0 if int(a) % 4 == 0 else 0.0)
+    assert strip_is_free(sparse, 0.0, 2.0, lim) is None
+    # An unreadable scan is unknown, never free.
+    assert strip_is_free(Scan([], _AMIN, _INC, 0.01), 0.0, 2.0, lim) is None
+    assert strip_is_free(Scan([10.0] * 10, _AMIN, 0.0, 0.01), 0.0, 2.0, lim) is None
+
+
+def test_draw_avoids_the_wall_and_holds_when_boxed_in():
+    seq = _seq()
+    x, y, attempts = seq.draw(_WALL_AHEAD)
+    d, b = _polar((x, y))
+    assert attempts >= 1
+    assert strip_is_free(_WALL_AHEAD, math.radians(b), d, seq.limits) is True
+    assert seq.draw(_BOXED) is None
+    assert seq.draw(_UNKNOWN) is None
+
+
+def test_draw_falls_back_to_the_shortest_leg_across_the_cone():
+    # A wall at 1.6 m everywhere in the cone: no random leg over 1.1 m is
+    # free, but the shortest leg (1.0 m + 0.5 m clearance) is.
+    near_wall = _scan(lambda a: 1.6)
+    seq = _seq(draw_attempts=4, seed=1)
+    x, y, attempts = seq.draw(near_wall)
+    d, b = _polar((x, y))
+    assert d == pytest.approx(1.0)
+    assert abs(b) <= 45.0
+    assert attempts > 4
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +244,60 @@ def test_a_hand_off_restarts_the_goal_clock_even_without_goal_fixed():
     assert seq.step(61.3, goal_reached=False) is not None
 
 
+def test_no_progress_hands_off_as_stalled_and_progress_resets_the_clock():
+    seq = _seq()
+    seq.goal_fixed(0.0)
+    # The progress clock starts at the first distance sample, which the node
+    # supplies on the tick after the fix.
+    assert seq.step(0.2, goal_reached=False, goal_dist=2.0) is None
+    assert seq.step(9.9, goal_reached=False, goal_dist=2.0) is None
+    h = seq.step(10.3, goal_reached=False, goal_dist=2.0)
+    assert h is not None and h.reason == STALLED
+    assert seq.stalls == 1 and seq.timeouts == 0 and seq.last_reason == STALLED
+    # Closing on the goal keeps it alive; the timeout stays the ceiling.
+    seq = _seq()
+    seq.goal_fixed(0.0)
+    for t, d in ((2.0, 2.0), (8.0, 1.9), (16.0, 1.8), (24.0, 1.7)):
+        assert seq.step(t, goal_reached=False, goal_dist=d) is None
+    h = seq.step(30.5, goal_reached=False, goal_dist=1.65)
+    assert h is not None and h.reason == TIMEOUT
+
+
+def test_progress_smaller_than_the_minimum_does_not_count():
+    seq = _seq()
+    seq.goal_fixed(0.0)
+    assert seq.step(0.2, goal_reached=False, goal_dist=2.00) is None
+    assert seq.step(8.0, goal_reached=False, goal_dist=1.97) is None   # 3 cm: noise
+    h = seq.step(10.5, goal_reached=False, goal_dist=1.96)
+    assert h is not None and h.reason == STALLED
+
+
+def test_a_due_hand_off_with_no_free_goal_holds_and_retries_once_a_second():
+    seq = _seq()
+    seq.goal_fixed(0.0)
+    assert seq.step(31.0, goal_reached=False, goal_dist=2.0, scan=_BOXED) is None
+    assert seq.holding and seq.held == 1 and seq.last_reason == NO_FREE_GOAL
+    assert seq.n == 0 and seq.timeouts == 0
+    assert seq.status(31.0)["holding"] is True
+    # Within the retry interval nothing is drawn again (held stays 1 either
+    # way; the point is no storm of draws).
+    assert seq.step(31.0 + HOLD_RETRY_S / 2, goal_reached=False, goal_dist=2.0, scan=_BOXED) is None
+    assert seq.held == 1
+    # Open floor appears: the next retry hands off.
+    h = seq.step(31.0 + HOLD_RETRY_S + 0.1, goal_reached=False, goal_dist=2.0, scan=_OPEN)
+    assert h is not None and h.reason == TIMEOUT and not seq.holding
+    assert seq.n == 1 and seq.timeouts == 1 and seq.held == 1
+
+
+def test_hand_off_offsets_are_free_in_the_scan_they_were_drawn_from():
+    seq = _seq()
+    seq.goal_fixed(0.0)
+    h = seq.step(31.0, goal_reached=False, goal_dist=2.0, scan=_WALL_AHEAD)
+    assert h is not None
+    d, b = _polar((h.offset_x, h.offset_y))
+    assert strip_is_free(_WALL_AHEAD, math.radians(b), d, seq.limits) is True
+
+
 def test_goal_fixed_clears_the_arrival_and_restarts_the_timeout():
     seq = _seq()
     seq.goal_fixed(0.0)
@@ -185,10 +322,11 @@ def test_set_on_reports_whether_it_changed():
     assert seq.set_on(False, 2.0) is True
 
 
-def test_status_carries_the_five_keys_and_goal_age():
+def test_status_carries_the_counters_and_goal_age():
     seq = _seq()
     assert seq.status(5.0) == {
-        "on": True, "n": 0, "timeouts": 0, "last_reason": None, "goal_age_s": None,
+        "on": True, "n": 0, "timeouts": 0, "stalls": 0, "held": 0, "holding": False,
+        "last_reason": None, "goal_age_s": None,
     }
     seq.goal_fixed(5.0)
     assert seq.status(7.25)["goal_age_s"] == pytest.approx(2.2, abs=0.06)
@@ -240,6 +378,7 @@ def test_a_missing_key_names_the_key_and_the_file(tmp_path):
     ("range_min_m", "1.0", "not a number"),
     ("range_min_m", True, "not a number"),
     ("seed", 0.5, "integer"),
+    ("draw_attempts", 2.5, "integer"),
 ])
 def test_non_numeric_and_non_integer_seed_are_refused(key, value, fragment):
     block = dataclasses.asdict(_limits())
@@ -254,6 +393,13 @@ def test_non_numeric_and_non_integer_seed_are_refused(key, value, fragment):
     (dict(bearing_cap_deg=200.0), "bearing_cap_deg"),
     (dict(dwell_s=-1.0), "dwell_s"),
     (dict(timeout_s=0.0), "timeout_s"),
+    (dict(corridor_half_width_m=0.0), "corridor_half_width_m"),
+    (dict(clearance_m=-0.1), "clearance_m"),
+    (dict(min_valid_fraction=0.0), "min_valid_fraction"),
+    (dict(min_valid_fraction=1.5), "min_valid_fraction"),
+    (dict(draw_attempts=0), "draw_attempts"),
+    (dict(progress_window_s=0.0), "progress_window_s"),
+    (dict(progress_min_m=-0.01), "progress_min_m"),
 ])
 def test_incoherent_limits_are_rejected(overrides, fragment):
     reason = check_limits(_limits(**overrides))
@@ -303,10 +449,16 @@ def test_the_goal_is_written_in_exactly_one_place_and_every_site_goes_through_it
 
 def test_the_roam_step_sits_after_every_fault_return_and_before_the_latch_zero():
     src = _read(_POLICY_NODE)
+    step = src.index("self._roam.step(")
     for earlier in ('reason="scan_stale"', 'reason="odom_stale"', 'reason="goal_undefined"'):
-        assert src.index(earlier) < src.index("self._roam.step(now, self._goal_reached)")
-    assert src.index("self._roam.step(now, self._goal_reached)") \
-        < src.index('self._publish_zero(reason="goal_reached")')
+        assert src.index(earlier) < step
+    assert step < src.index('self._publish_zero(reason="goal_reached")')
+    # The goal distance (progress watchdog) and the raw scan (free-space
+    # draw) go in; the node's own lidar range_min marks the no-returns.
+    call = src[step:src.index(")", src.index("Scan(", step)) + 1]
+    assert "goal_dist" in call and "Scan(self._scan_ranges" in call
+    assert "self._lidar.range_min_m" in call
+    assert "elif self._roam.holding:" in src
 
 
 def test_on_set_parameters_accepts_roam_and_still_rejects_the_rest():

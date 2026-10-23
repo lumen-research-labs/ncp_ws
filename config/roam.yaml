@@ -1,16 +1,21 @@
 # roam.yaml — limits for policy_node's ROAM mode: the node draws its own next
-# goal, at random, each time it reaches the current one or gives up on it.
-# THE AUTHORITY for every number roam uses. A missing key refuses to start.
+# goal, at random in free space, each time it reaches the current one or
+# gives up on it. THE AUTHORITY for every number roam uses. A missing key
+# refuses to start.
 #
 # WHAT THIS IS FOR: "set waypoints at random and let it run". A policy is
 # exercised leg after leg without an operator clicking a goal each time, and
-# a goal the robot never reaches is dropped after a timeout instead of being
-# held forever.
+# a goal the robot never reaches is dropped instead of being held forever.
 #
 # WHAT IT IS NOT: roam only moves the goal. The policy proposes exactly as it
 # does for an operator goal, behind the same clamps, watchdogs and kill. Roam
-# adds no obstacle logic, no retry and no command authority. /safety/kill is
-# the stop. Read with docs/roam.md.
+# adds no command authority and no retry. It looks at the lidar ONLY to keep
+# the next goal out of walls; it does not steer, and the policy's obstacle
+# avoidance is what it is. RUN ROAM WITH BOTH LIDAR ZONES ON
+# (stop_zone_enabled:=true slow_zone_enabled:=true): the launch defaults
+# them off, and on 2026-10-23 the first live run drove into a wall behind a
+# blind-drawn goal with nothing between the goal and the wall but KILL.
+# Read with docs/roam.md.
 #
 # Policy-agnostic: M4 steers to the goal, so these are real waypoints. M8-v2
 # ignores the goal, so for it roam only keeps the arrival latch from ending
@@ -40,6 +45,24 @@ roam:
   #     trained on random goal bearings.
   bearing_cap_deg: 45.0
 
+  # ---- the draw must land in free space the lidar can see -----------------
+  # The strip from the robot to the goal, extended by clearance_m and
+  # corridor_half_width_m wide, must hold no lidar return.
+  # 0.20: the X3's half-width (~0.13 m) plus margin for the policy's wander.
+  corridor_half_width_m: 0.20
+  # 0.5: keeps the goal itself out of the stop zone and lets the 0.4 m latch
+  #      close before the wall does.
+  clearance_m: 0.5
+  # No-return rays (the TG30's 0.0 sentinel, ~30% of rays) are UNKNOWN, not
+  # free: a candidate needs at least this fraction of the rays over its strip
+  # to be valid, or it is refused.
+  min_valid_fraction: 0.5
+  # Random candidates per hand-off, then as many bearings at the shortest
+  # leg. If none is free the node HOLDS the current goal (last_reason
+  # no_free_goal, counted in held) and retries once a second: a boxed-in
+  # robot waits instead of being sent through a wall. Jog it out.
+  draw_attempts: 32
+
   # ---- when the next goal is drawn --------------------------------------
   # Seconds to hold zero after arrival before the next goal. rm_safety's
   # acceleration limiter (max_ax 0.75) brings 0.25 m/s to rest in ~0.33 s;
@@ -48,21 +71,25 @@ roam:
   # hand-off is distinguishable from an operator re-target.
   dwell_s: 1.0
 
-  # Give up on a goal this old and draw the next one, whatever the reason
-  # (blocked, stuck, the policy ignores it, killed). The policy-agnostic
-  # bound on an excursion: M4 misses the 0.4 m latch by ~0.5 m and lets the
-  # goal fall behind (off-distribution); M8-v2 never aims at it at all. The
-  # farthest leg is 2.5 m, 10 s at the 0.25 m/s clamp, and M4's heading
-  # converges ~4x slower than its dynamics expect under the uniform clamp,
-  # so 30 s is a starting value. Every hand-off log line carries the elapsed
-  # seconds: set this from the arrival-time distribution of a real run.
-  # Counted as `timeouts` on the debug stream. NOT a recovery: a robot held
-  # by rm_safety or by an obstacle does not move toward a new goal either.
+  # Give up on a goal the robot is not closing on: if the distance to the
+  # goal has not shrunk by progress_min_m within progress_window_s, the goal
+  # is abandoned (reason stalled). The same rule as rm_waypoint's progress
+  # watchdog, and it is what ends a push against a wall or a stop-zone hold.
+  # 10 s, not rm_waypoint's 6 s: a 45 deg turn at the policy's clamped yaw
+  # rate takes ~3-4 s before any distance closes. Counted as `stalls`.
+  progress_window_s: 10.0
+  progress_min_m: 0.05
+
+  # The hard ceiling on one goal, whatever happens. The farthest leg is
+  # 2.5 m, 10 s at the 0.25 m/s clamp, and M4's heading converges ~4x slower
+  # than its dynamics expect under the uniform clamp. Every hand-off log line
+  # carries the elapsed seconds: set this from a real run. Counted as
+  # `timeouts`. While the robot is KILLED these clocks still run and the
+  # counters climb: read them over an armed window.
   timeout_s: 30.0
 
   # Seed for the node's own random generator. Every policy node seeds its own
-  # generator from this, so two nodes draw the SAME sequence of offsets (the
-  # world goals still differ, because each hands off at its own moments) and
-  # a run is reproducible: same seed, same relative course. Change it for a
-  # different course.
+  # generator from this, so two nodes draw the SAME sequence of candidates
+  # (their goals still differ: each hands off at its own moments and sees its
+  # own scan) and a run is reproducible. Change it for a different course.
   seed: 0
