@@ -173,9 +173,9 @@ Full procedure, including verification and troubleshooting:
 BUILD-PLAN.md   the authority on scope and phase gates
 CLAUDE.md       the working-state project brain and session log
 config/         interface.yaml (THE contract), safety_limits.yaml,
-                base_calibration.yaml, waypoint.yaml, slam_toolbox.yaml,
-                topics.yaml, fastdds_unicast_peers.xml
-docs/           architecture, operating_guide, interface_contract,
+                base_calibration.yaml, waypoint.yaml, roam.yaml,
+                slam_toolbox.yaml, topics.yaml, fastdds_unicast_peers.xml
+docs/           architecture, operating_guide, roam, interface_contract,
                 safety_validation, deployment, dev_env_setup
 src/            the seven rm_* packages (see the table above)
 scripts/        deploy_to_robot.sh, deploy_upstream.sh, prep_robot.sh,

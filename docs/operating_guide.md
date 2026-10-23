@@ -224,7 +224,8 @@ Two things worth knowing how to read:
 The page can **kill**, **reset (arm)**, **switch `command_source`** (one
 button per source: `teleop`, `policy`, `m8v2`, `m4`; a policy button is
 greyed until its node is publishing), **re-target the goal** on every running
-policy, **send a waypoint**, **jog** with WASD, and **reset the SLAM map**
+policy, **switch ROAM** on every running policy (random goals; see
+[`roam.md`](roam.md)), **send a waypoint**, **jog** with WASD, and **reset the SLAM map**
 (which kills first and leaves the robot killed; see §8). The header names the
 policy the page is following next to its checkpoint hash.
 
@@ -429,6 +430,9 @@ bash scripts/run_stack.sh dry_run:=true
 
 # add the waypoint controller for repositioning between runs
 bash scripts/run_stack.sh with_slam:=true with_waypoint:=true
+
+# let the robot pick its own goals: the stack as usual, then ROAM on the
+# dashboard (or `ros2 param set /policy_node_m4 roam true`); see docs/roam.md
 ```
 
 ### Choosing the policy
@@ -475,12 +479,21 @@ and resets the network's recurrent state.
 ros2 param set /policy_node goal_x 1.8
 ```
 
+With ROAM on the node re-targets itself: after a dwell at each goal, or when
+a goal has been held for `timeout_s` without arrival, it draws the next one at
+random. See [`roam.md`](roam.md).
+
 ### Things that will look like bugs and are not
 
 - **The robot stops at the goal and stays stopped.** That is the goal-reached
   latch. The trained policy has no stop-at-the-goal behaviour — BarnEnv
   terminated the episode on arrival, so it never learned one. Re-target to
-  clear the latch.
+  clear the latch, or switch ROAM on.
+- **With ROAM on, the robot stops at each goal, then sets off somewhere
+  else.** That is the dwell followed by the next random draw. ROAM off keeps
+  the current goal; KILL is the stop.
+- **`m8v2` roams but its path does not change.** It ignores the goal
+  (2026-10-09), so roam only advances its counters.
 - **Standing still, `wz` oscillates every tick and nets ~zero rotation.** A
   period-2 limit cycle driven by the previous-action feedback, which the
   acceleration limiter filters out. It largely resolves once the observation

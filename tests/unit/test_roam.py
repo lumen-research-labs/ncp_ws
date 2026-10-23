@@ -434,11 +434,14 @@ def test_every_relative_doc_link_resolves():
     assert not broken, broken
 
 
-def test_roam_is_reachable_from_the_package_readmes():
-    for pkg in ("rm_policy", "rm_bringup", "rm_dashboard"):
-        readme = os.path.join(_REPO_ROOT, "src", pkg, "README.md")
+def test_roam_is_reachable_from_the_operator_docs():
+    docs = [os.path.join(_DOCS, "operating_guide.md")] + [
+        os.path.join(_REPO_ROOT, "src", pkg, "README.md")
+        for pkg in ("rm_policy", "rm_bringup", "rm_dashboard")
+    ]
+    for doc in docs:
         targets = [
-            os.path.normpath(os.path.join(os.path.dirname(readme), t))
-            for t in _relative_links(readme)
+            os.path.normpath(os.path.join(os.path.dirname(doc), t))
+            for t in _relative_links(doc)
         ]
-        assert os.path.join(_DOCS, "roam.md") in targets, pkg
+        assert os.path.join(_DOCS, "roam.md") in targets, doc

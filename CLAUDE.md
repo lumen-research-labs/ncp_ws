@@ -1790,6 +1790,38 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     without sourcing the install on the command line. Recorded in the
     robot-ssh skill.
 
+- 2026-10-23: **ROAM MODE (branch `feat/roam-mode` on top of
+  feat/source-per-policy; commits 844e165 plan, 64f1bda, b6e2322, 9b39e6c,
+  97e77f2).** Daniel asked for a mode where "waypoints are just set randomly
+  and the thing can run", and "if the robot takes too long the thing should
+  just switch the goal anyway". `policy_node` gained a runtime bool parameter
+  `roam`: on arrival (after `dwell_s`) or when a goal has been current for
+  `timeout_s` without arrival, the node draws a random robot-frame offset
+  within `config/roam.yaml` (1.0-2.5 m, within 45 deg of ahead, dwell 1 s,
+  timeout 30 s, seed 0) and fixes it from its current pose. A timed-out
+  goal is abandoned, never retried. `rm_policy/roam.py` is the pure half
+  (limits loader, `RoamSequencer` with the clocks; switching on restarts
+  them so an old goal gets a full timeout). `_fix_goal` is now the ONE
+  place the goal is written (first odom pose, first map pose, parameter
+  set, roam hand-off); it also zeroes the fed-back previous action, since a
+  new goal is a new episode. `/ncp_debug/<p>` carries a `roam` block (on,
+  n, timeouts, last_reason, goal_age_s). The launch hands every policy
+  node `config/roam.yaml`; `roam` is NOT a launch argument. The dashboard
+  got a `roam` command through the new `_set_on_policies` aggregation (the
+  `_retarget` loop generalised; result key `retargeted` -> `applied`), a
+  ROAM button that confirms on enable only, and a pill from the active
+  policy's debug stream. `docs/roam.md` is the how-to. 611 workstation
+  tests. **NOT yet driven on hardware**: the stack on bernard-1 still runs
+  6c5b102; deploy, dry-run with the source on teleop (hand-offs on timeouts
+  only), then live on `m4` with KILL in hand, and set `timeout_s` from the
+  elapsed seconds the hand-off lines report.
+  * Also this day: the M9 Gazebo fine-tune finished on the box 2026-10-17
+    (best 0.52 in Gazebo vs 0.46 zero-shot; M9 still not exported to the
+    robot), the three repos were pushed to GitHub (`lumen-research-labs/
+    ncp_ws` five branches, `NCP-on-Rosmaster` `feat/720-beam-270fov`, new
+    private `optomotive`), and bernard-1 came back after a week off the
+    network (clock pushed, stack up with the default profiles).
+
 ## 4. Current Goal
 
 **INTERFACE 4.0.0 — THE FULL-SENSOR POLICY (2026-10-08, branch
@@ -1813,7 +1845,10 @@ profiles:=m8v2,m4` (the default) starts `policy_node_m8v2` and
 (`teleop` / `policy` / `m8v2` / `m4`, the dashboard's source buttons) picks
 the one `rm_safety` forwards. A switch is a parameter set, force-kills as
 before, and never restarts the stack. Goals re-target every running policy.
-The dashboard header names the policy the page follows.**
+The dashboard header names the policy the page follows.** Roam (the
+dashboard's ROAM button, or `ros2 param set /policy_node_m4 roam true`) lets
+each policy node draw its own next goal on arrival or timeout; see
+`docs/roam.md` (2026-10-23, not yet driven on hardware).
 
 **THE NCP DEBUG TEST HAS RUN END TO END ON HARDWARE (2026-08-29 s2).** One
 command brings up the whole stack, the policy drives the wheels through
@@ -2267,6 +2302,19 @@ Settled, do not re-open:
   ahead, so the network learned corridor-running from the lidar. Judge it on
   an obstacle course; goal-seeking needs retraining with randomized goal
   bearings.
+- **ROAM on asks; ROAM off never asks and never stops the robot** (operator,
+  2026-10-23). Roam is a parameter set on the policy nodes, routed exactly
+  like a goal; it cannot arm or select a source. Off keeps the current goal.
+  KILL is the stop. A timed-out goal switches anyway and is never retried.
+- **`policy_node` does not read `/safety/status`** (2026-10-23). The
+  proposer's behaviour must not depend on the arbiter's state, and "not
+  driving" is also true of the unselected policy node, so a roam pause on
+  KILLED would be a half-truth. Timeouts count while killed; read them over
+  an armed window.
+- **`_fix_goal` is the one place the goal is written** (2026-10-23): first
+  odom pose, first map pose, parameter set, roam hand-off. A new goal clears
+  the latch, resets the recurrent state and zeroes the fed-back previous
+  action. Do not add a fifth writer.
 
 ### Remote-command gotchas
 
