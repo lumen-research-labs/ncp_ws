@@ -671,9 +671,11 @@ function renderRoam(snap){
     .map(o => `${o.name} ${o.roam.on ? "on" : "off"}`);
   $("roamstat").textContent = r
     ? `${ap.name||"policy"} · roam ${r.on ? "on" : "off"} · goals ${r.n} · `+
-      `timeouts ${r.timeouts} · last ${r.last_reason || "—"}`+
+      `timeouts ${r.timeouts} · stalls ${r.stalls} · last ${r.last_reason || "—"}`+
+      (r.holding ? " · HOLDING: no free goal in view, jog into open floor" : "")+
       (differs.length ? ` · differs: ${differs.join(", ")}` : "")
     : `${ap.name||"policy"} · roam —`;
+  $("roamstat").style.color = r && r.holding ? "var(--warn)" : "";
 }
 
 /* ---------------- command table ---------------- */
@@ -1186,10 +1188,11 @@ $("roambtn").onclick = () => {
   const ap = latest ? activePolicy(latest) : {};
   const r = roamOf(latest, ap.debug), on = !(r && r.on);
   if(on && !confirm("Turn ROAM on for every running policy?\n\nEach policy "+
-      "will pick its own next goal at random (config/roam.yaml) when it "+
-      "arrives or times out, and keep going. If the robot is ARMED on a "+
-      "policy source it will move at the next hand-off without another "+
-      "press. Keep the KILL button in reach.")) return;
+      "will pick its own next goal at random in free space the lidar sees "+
+      "(config/roam.yaml) when it arrives, stalls or times out, and keep "+
+      "going. If the robot is ARMED on a policy source it will move at the "+
+      "next hand-off without another press. Refused unless both lidar "+
+      "zones are on. Keep the KILL button in reach.")) return;
   post("roam",{on});
 };
 $("resetmap").onclick = () => {

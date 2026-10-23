@@ -517,12 +517,27 @@ def test_roam_command_refuses_a_non_bool_before_any_set_and_shares_the_aggregati
     assert "self._set_on_policies(" in retarget
 
 
+def test_roam_on_is_refused_unless_both_lidar_zones_are_on_and_off_never_checks():
+    src = _read(_DASHBOARD_NODE)
+    body = src[src.index('if command == "roam":'):src.index('if command == "goal_map":')]
+    on_branch = body[body.index("if on:"):body.index("self._set_on_policies(")]
+    assert "self._lidar_zones_off()" in on_branch
+    assert body.index("if on:") < body.index("self._set_on_policies(")
+    check = src[src.index("def _lidar_zones_off("):src.index("def _retarget_targets(")]
+    assert '"stop_zone_enabled", "slow_zone_enabled"' in check
+    assert "self._safety_get_params" in check       # read from safety_node, not remembered
+    assert "PARAMETER_BOOL" in check
+    for failure in ("unavailable", "did not answer", "no boolean", "is off in rm_safety"):
+        assert failure in check, failure            # every path that cannot confirm refuses
+    assert "stop_zone_enabled:=true" in check and "slow_zone_enabled:=true" in check
+
+
 def test_page_has_the_roam_button_and_pill_fed_by_the_debug_stream():
     page = _read(_INDEX)
     assert 'id="roambtn"' in page and 'id="roamstat"' in page
     body = page[page.index("function renderRoam(snap)"):]
     body = body[:body.index("\n}\n") + 3]
-    for needle in ("ap.debug", "r.on", "r.n", "r.timeouts", "r.last_reason"):
+    for needle in ("ap.debug", "r.on", "r.n", "r.timeouts", "r.stalls", "r.holding", "r.last_reason"):
         assert needle in body, needle
     render = page[page.index("function render(snap)"):]
     assert "renderRoam(snap);" in render[:render.index("\n}\n")]

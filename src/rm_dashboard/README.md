@@ -162,8 +162,10 @@ that took the goal and any that refused.
 **ROAM** sets the `roam` parameter on every running policy through the same
 aggregation, and the pill beside it reads the active policy's `roam` counters
 from its debug stream. Turning it on asks first, since an armed, selected
-policy then moves at the next hand-off; turning it off never asks and does not
-stop the robot. See [`docs/roam.md`](../../docs/roam.md).
+policy then moves at the next hand-off, and is **refused unless rm_safety has
+both lidar zones on** (read from `safety_node` at that moment, never from what
+the page last saw); turning it off never asks and does not stop the robot.
+See [`docs/roam.md`](../../docs/roam.md).
 
 An earlier version of this docstring claimed waypoints "require two prior
 operator acts that this page cannot perform". **That was false**, and it is

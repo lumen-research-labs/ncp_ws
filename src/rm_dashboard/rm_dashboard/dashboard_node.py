@@ -837,6 +837,31 @@ class DashboardNode(rclpy.node.Node):
         topics = self._store.snapshot()
         return self._policy_debug(self._active_policy(topics), topics)
 
+    def _lidar_zones_off(self) -> Optional[str]:
+        """Why roam may not be switched on, or None when both lidar zones are
+        on in rm_safety. Fail-closed: a zone that cannot be read is off."""
+        names = ["stop_zone_enabled", "slow_zone_enabled"]
+        if not self._safety_get_params.service_is_ready():
+            return "roam refused: safety_node's parameter service is unavailable, so the lidar zones cannot be confirmed on"
+        request = GetParameters.Request()
+        request.names = names
+        result = self._await(self._safety_get_params.call_async(request))
+        if result is None:
+            return "roam refused: safety_node did not answer the lidar-zone read in time"
+        off = []
+        for name, value in zip(names, result.values):
+            if value.type != ParameterType.PARAMETER_BOOL:
+                return f"roam refused: safety_node reports no boolean {name}"
+            if not value.bool_value:
+                off.append(name)
+        if off:
+            return (
+                f"roam refused: {', '.join(off)} is off in rm_safety. Roam needs both "
+                f"lidar zones on; relaunch with stop_zone_enabled:=true "
+                f"slow_zone_enabled:=true (the launch defaults them off)."
+            )
+        return None
+
     def _retarget_targets(self) -> List[str]:
         """Policy rows with a node whose parameter service is up right now.
 
@@ -1044,6 +1069,17 @@ class DashboardNode(rclpy.node.Node):
             # as an operator turning roam on or off.
             if not isinstance(on, bool):
                 return {"ok": False, "error": f"roam needs boolean 'on', got {on!r}"}
+            if on:
+                # Refused unless rm_safety has BOTH lidar zones on. Roam draws
+                # goals the lidar shows as free, but the policy's own obstacle
+                # avoidance is what it is, and the launch defaults the zones
+                # OFF: on 2026-10-23 the first live run drove into a wall
+                # with nothing between a bad goal and the wall but KILL.
+                # Read from safety_node itself, never from what this page
+                # last saw. Off never checks: it only removes autonomy.
+                refusal = self._lidar_zones_off()
+                if refusal:
+                    return {"ok": False, "error": refusal}
             # Every running policy, like a goal: the policy you switch to
             # should roam the same way as the one that is driving.
             return self._set_on_policies(

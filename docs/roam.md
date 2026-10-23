@@ -6,7 +6,7 @@ Roam only moves the goal; the policy drives to it behind rm_safety's clamps, wat
 
 ## Before you start
 
-- **Launch with both lidar zones on.** The launch defaults them off; on 2026-10-23 the first live run drove into a wall behind a blind-drawn goal. With the zones on a wall stops the robot, the goal stalls and switches.
+- **Launch with both lidar zones on.** The launch defaults them off; on 2026-10-23 the first live run drove into a wall behind a blind-drawn goal. With the zones on a wall stops the robot, the goal stalls and switches. The dashboard refuses ROAM on while either zone is off.
   ```bash
   bash scripts/run_stack.sh stop_zone_enabled:=true slow_zone_enabled:=true
   ```
@@ -42,4 +42,4 @@ The file is read at startup. Set the two windows from the elapsed seconds the ha
 - **The robot stops and the log says no candidate goal is in free space.** It is boxed in: `holding` is true and the draw retries once a second. Jog it into open floor.
 - Timeouts and stalls keep counting while the robot is KILLED or the node is not the selected source. Read the counters over an armed window.
 - A manual re-target during roam is accepted; the clocks restart.
-- Each node roams on its own scan, so two nodes' goals differ; the pill names the other node when their switches differ.
+- Each node roams on its own scan, so two nodes' goals differ.

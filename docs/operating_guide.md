@@ -494,6 +494,8 @@ random. See [`roam.md`](roam.md).
   the current goal; KILL is the stop.
 - **`m8v2` roams but its path does not change.** It ignores the goal
   (2026-10-09), so roam only advances its counters.
+- **ROAM on is refused with "zones off".** Roam needs both lidar zones;
+  relaunch with `stop_zone_enabled:=true slow_zone_enabled:=true`.
 - **Standing still, `wz` oscillates every tick and nets ~zero rotation.** A
   period-2 limit cycle driven by the previous-action feedback, which the
   acceleration limiter filters out. It largely resolves once the observation
