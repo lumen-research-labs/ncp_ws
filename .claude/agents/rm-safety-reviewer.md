@@ -33,7 +33,7 @@ your agent memory first for patterns/gotchas noted in earlier reviews.
 - [ ] No `.engine` file has been committed.
 
 ### Warnings — structure & style
-- [ ] `rm_tools` is not imported at runtime by `rm_safety` or `rm_policy`.
+- [ ] Nothing under `archive/` is imported anywhere (it is not part of the codebase).
 - [ ] `rm_policy` keeps observation building / inference / ROS node wrapper
       as separate files, not merged.
 - [ ] No magic numbers — timeouts/limits/rates are named constants sourced

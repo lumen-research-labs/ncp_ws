@@ -2,19 +2,24 @@
 safety_node.py — ROS2 node wrapper for the rm_safety pipeline.
 
 What it does:
-    Sits between all command sources (/policy/cmd_vel, /teleop/cmd_vel) and the
-    base driver.  On every timer tick it builds an EvalInputs from the latest
-    sensor and command data, calls safety_logic.evaluate(), publishes the
-    resulting velocity to /cmd_vel (the ONLY publisher of that topic in the
-    entire system), and publishes a SafetyStatus message.
+    Sits between every command source and the base driver.  The sources are
+    the rows of config/topics.yaml `command_sources` (teleop, policy, m8v2,
+    m4 as of 2026-10-13); this node subscribes to all of them, keeps one
+    buffer per row, and forwards ONLY the row named by `command_source`.  On
+    every timer tick it builds an EvalInputs from the latest sensor data and
+    that one buffer, calls safety_logic.evaluate(), publishes the resulting
+    velocity to /cmd_vel (the ONLY publisher of that topic in the entire
+    system), and publishes a SafetyStatus message.
 
     All decision logic (clamping, e-stop, kill-state transitions) lives in
     safety_logic.py.  This node is responsible only for I/O, timing, state
     persistence, and calling evaluate().
 
 Subscribes:
-    /policy/cmd_vel   [geometry_msgs/Twist]  @ ~5 Hz (Phase 3 TBD)
-    /teleop/cmd_vel   [geometry_msgs/Twist]  @ variable (operator)
+    <every command_sources row's topic in config/topics.yaml>
+                      [geometry_msgs/Twist]  @ ~5 Hz (policy rows) / variable
+                                              (teleop). One buffer per row;
+                                              only the selected row is read.
     /scan             [sensor_msgs/LaserScan] @ ~10 Hz (Phase 3 TBD)
     /odom             [nav_msgs/Odometry]     @ ~10 Hz (Phase 3 TBD)
 
@@ -27,8 +32,12 @@ Services:
     /safety/reset     [std_srvs/Trigger]  — clear kill and request latch reset
 
 Parameters:
-    command_source        (str,   "teleop")        — active command source:
-                                                     "policy" or "teleop".
+    command_source        (str,   "teleop")        — active command source: a
+                                                     row name from
+                                                     config/topics.yaml
+                                                     `command_sources`. Any
+                                                     other value is REFUSED, at
+                                                     startup and at runtime.
                                                      Default is "teleop" so that
                                                      bringing the stack up can
                                                      never connect the policy to
@@ -59,6 +68,12 @@ Parameters:
                                                      resolves relative to this
                                                      file's location and is only
                                                      valid in a development layout.
+    topics_path           (str,   <in-repo path>)  — absolute path to
+                                                     config/topics.yaml, the
+                                                     command-source table. Same
+                                                     resolution rule. Read once;
+                                                     a malformed table is fatal
+                                                     (rm_safety/command_sources.py).
 
 Failure mode:
     - Node comes up KILLED (start_killed: true in safety_limits.yaml).  No
@@ -80,17 +95,17 @@ Failure mode:
 """
 
 # ---------------------------------------------------------------------------
-# Subscribes:  /policy/cmd_vel  [geometry_msgs/Twist]  @ ~5 Hz (Phase 3 TBD)
-# Subscribes:  /teleop/cmd_vel  [geometry_msgs/Twist]  @ variable
+# Subscribes:  <each config/topics.yaml command_sources row> [geometry_msgs/Twist]
 # Subscribes:  /scan            [sensor_msgs/LaserScan] @ ~10 Hz (Phase 3 TBD)
 # Subscribes:  /odom            [nav_msgs/Odometry]     @ ~10 Hz (Phase 3 TBD)
 # Publishes:   /cmd_vel         [geometry_msgs/Twist]  @ safety_loop_rate_hz
 # Publishes:   /safety/status   [rm_interfaces/SafetyStatus]  @ status_rate_hz
 # Services:    /safety/kill     [std_srvs/Trigger]
 # Services:    /safety/reset    [std_srvs/Trigger]
-# Parameters:  command_source (str, "teleop") — active command source
+# Parameters:  command_source (str, "teleop") — active command source, a table row
 # Parameters:  safety_loop_rate_hz (float, 20.0) — control loop rate (provisional)
 # Parameters:  safety_limits_path (str, <repo-relative>) — path to safety_limits.yaml
+# Parameters:  topics_path (str, <repo-relative>) — path to topics.yaml (the table)
 # Failure mode: fail-closed; killed-on-startup; any exception → publish zero
 # ---------------------------------------------------------------------------
 
@@ -101,7 +116,7 @@ import math
 import os
 import pathlib
 import time
-from typing import List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import rclpy
 import rclpy.node
@@ -114,6 +129,11 @@ from sensor_msgs.msg import LaserScan
 from std_srvs.srv import Trigger
 
 from rm_interfaces.msg import SafetyStatus
+from rm_safety.command_sources import (
+    CommandSource,
+    DEFAULT_TOPICS_PATH,
+    load_command_sources,
+)
 from rm_safety.safety_logic import (
     EvalInputs,
     Limits,
@@ -141,10 +161,24 @@ _DEFAULT_LIMITS_PATH = str(_THIS_DIR.parents[2] / "config" / "safety_limits.yaml
 # ---------------------------------------------------------------------------
 _DEFAULT_LOOP_RATE_HZ: float = 20.0
 
-# Default active command source.  "teleop" because no trained policy exists in
-# Phase 2 and the default must never allow the policy path to be active without
-# an explicit operator opt-in.
+# Default active command source.  "teleop" (the row config/topics.yaml
+# requires) because the default must never allow a policy path to be active
+# without an explicit operator opt-in.
 _DEFAULT_COMMAND_SOURCE: str = "teleop"
+
+
+@dataclasses.dataclass
+class _CommandBuffer:
+    """The latest Twist from one command source, and when it arrived.
+
+    One per table row. `stamp` is time.monotonic() at arrival, or None if the
+    row has never published, which the staleness check reads as infinitely
+    old, so a freshly selected source that is silent fails closed.
+    """
+    vx: float = 0.0
+    vy: float = 0.0
+    wz: float = 0.0
+    stamp: Optional[float] = None
 
 # ---------------------------------------------------------------------------
 # LIDAR ZONE MASTER SWITCHES — both default ON, and the composition is AND.
@@ -174,6 +208,7 @@ class SafetyNode(rclpy.node.Node):
         self.declare_parameter("command_source", _DEFAULT_COMMAND_SOURCE)
         self.declare_parameter("safety_loop_rate_hz", _DEFAULT_LOOP_RATE_HZ)
         self.declare_parameter("safety_limits_path", _DEFAULT_LIMITS_PATH)
+        self.declare_parameter("topics_path", DEFAULT_TOPICS_PATH)
         self.declare_parameter("slow_zone_enabled", _DEFAULT_ZONE_ENABLED)
         self.declare_parameter("stop_zone_enabled", _DEFAULT_ZONE_ENABLED)
 
@@ -190,11 +225,21 @@ class SafetyNode(rclpy.node.Node):
             .get_parameter_value()
             .string_value
         )
+        topics_path: str = (
+            self.get_parameter("topics_path").get_parameter_value().string_value
+        )
 
-        if self._command_source not in ("policy", "teleop"):
+        # ------------------------------------------------------------------
+        # The command-source table — fatal if unreadable or malformed. A
+        # node that cannot name its inputs must not start: the alternative
+        # is accepting a `command_source` and forwarding nothing.
+        # ------------------------------------------------------------------
+        self._sources: Dict[str, CommandSource] = self._load_sources(topics_path)
+        if self._command_source not in self._sources:
             raise ValueError(
-                f"command_source must be 'policy' or 'teleop', "
-                f"got: {self._command_source!r}"
+                f"command_source must be one of {sorted(self._sources)} "
+                f"(config/topics.yaml command_sources), got: "
+                f"{self._command_source!r}"
             )
 
         # ------------------------------------------------------------------
@@ -261,6 +306,7 @@ class SafetyNode(rclpy.node.Node):
         # ------------------------------------------------------------------
         self._estop_latched: bool = False
         self._consecutive_stop_count: int = 0
+        self._retreat_clear_count: int = 0  # ticks of passed reverse with a clear scan
         self._reset_latch: bool = False  # consumed once per tick
 
         # Last published velocity (for acceleration-limit context)
@@ -277,17 +323,13 @@ class SafetyNode(rclpy.node.Node):
         # None if the topic has never been received.
         # ------------------------------------------------------------------
 
-        # Policy command
-        self._policy_vx: float = 0.0
-        self._policy_vy: float = 0.0
-        self._policy_wz: float = 0.0
-        self._policy_stamp: Optional[float] = None  # None → infinitely stale
-
-        # Teleop command
-        self._teleop_vx: float = 0.0
-        self._teleop_vy: float = 0.0
-        self._teleop_wz: float = 0.0
-        self._teleop_stamp: Optional[float] = None
+        # One command buffer per table row, keyed by row name. All rows are
+        # subscribed and kept current; only the selected row is ever read
+        # (see _select_command). A row that has never published keeps a None
+        # stamp and is infinitely stale.
+        self._commands: Dict[str, _CommandBuffer] = {
+            name: _CommandBuffer() for name in self._sources
+        }
 
         # Lidar scan
         self._scan_ranges: List[float] = []
@@ -325,12 +367,10 @@ class SafetyNode(rclpy.node.Node):
         # ------------------------------------------------------------------
         # Subscriptions
         # ------------------------------------------------------------------
-        self.create_subscription(
-            Twist, "/policy/cmd_vel", self._policy_cb, sensor_qos
-        )
-        self.create_subscription(
-            Twist, "/teleop/cmd_vel", self._teleop_cb, sensor_qos
-        )
+        for name, source in self._sources.items():
+            self.create_subscription(
+                Twist, source.topic, self._command_cb(name), sensor_qos
+            )
         self.create_subscription(
             LaserScan, "/scan", self._scan_cb, sensor_qos
         )
@@ -389,9 +429,10 @@ class SafetyNode(rclpy.node.Node):
         self._tick_counter: int = 0
 
         self.get_logger().info(
-            f"safety_node ready: source={self._command_source!r}, "
-            f"loop={self._loop_rate_hz} Hz, "
-            f"killed={self._is_killed}"
+            f"safety_node ready: source={self._command_source!r} of "
+            f"{sorted(self._sources)} (" + ", ".join(
+                f"{n}={s.topic}" for n, s in self._sources.items()
+            ) + f"), loop={self._loop_rate_hz} Hz, killed={self._is_killed}"
         )
 
     # ------------------------------------------------------------------
@@ -414,6 +455,16 @@ class SafetyNode(rclpy.node.Node):
         except Exception as exc:
             raise RuntimeError(
                 f"safety_node: safety_limits.yaml is malformed: {exc}"
+            ) from exc
+
+    def _load_sources(self, path: str) -> Dict[str, CommandSource]:
+        """Load config/topics.yaml's command_sources; raises on any failure (fatal)."""
+        try:
+            return load_command_sources(path)
+        except Exception as exc:
+            raise RuntimeError(
+                f"safety_node: cannot load the command-source table from "
+                f"{path!r}: {exc}"
             ) from exc
 
     def _apply_zone_switches(self, limits: Limits) -> Limits:
@@ -451,10 +502,16 @@ class SafetyNode(rclpy.node.Node):
         the dashboard and every recorded bag.
         """
         es = self._limits.estop
+        retreat = (
+            f" Retreat under the latch: pure straight reverse at <= "
+            f"{es.retreat_max_vx} m/s, release after {es.retreat_release_ticks} "
+            f"ticks clear to {es.retreat_release_range_m} m."
+            if es.retreat_enabled else " Retreat under the latch: OFF."
+        )
         if es.slow_zone_enabled and es.stop_zone_enabled:
             self.get_logger().info(
                 f"safety_node: lidar e-stop ACTIVE — "
-                f"slow {es.slow_zone_m} m / stop {es.stop_zone_m} m."
+                f"slow {es.slow_zone_m} m / stop {es.stop_zone_m} m.{retreat}"
             )
             return
 
@@ -568,17 +625,27 @@ class SafetyNode(rclpy.node.Node):
     # Subscription callbacks — record data + arrival time only
     # ------------------------------------------------------------------
 
-    def _policy_cb(self, msg: Twist) -> None:
-        self._policy_vx = msg.linear.x
-        self._policy_vy = msg.linear.y
-        self._policy_wz = msg.angular.z
-        self._policy_stamp = time.monotonic()
+    def _command_cb(self, name: str) -> Callable[[Twist], None]:
+        """The subscription callback for one table row: record its latest Twist."""
+        buffer = self._commands[name]
 
-    def _teleop_cb(self, msg: Twist) -> None:
-        self._teleop_vx = msg.linear.x
-        self._teleop_vy = msg.linear.y
-        self._teleop_wz = msg.angular.z
-        self._teleop_stamp = time.monotonic()
+        def cb(msg: Twist) -> None:
+            buffer.vx = msg.linear.x
+            buffer.vy = msg.linear.y
+            buffer.wz = msg.angular.z
+            buffer.stamp = time.monotonic()
+
+        return cb
+
+    def _select_command(self) -> Tuple[CommandSource, _CommandBuffer]:
+        """The active row and its buffer. The ONLY place a buffer is read.
+
+        `command_source` is validated against the table at startup and on
+        every runtime set, so the lookup cannot miss; a KeyError here would
+        be a bug, and the control loop's catch-all would publish zero for it.
+        """
+        source = self._sources[self._command_source]
+        return source, self._commands[self._command_source]
 
     def _scan_cb(self, msg: LaserScan) -> None:
         self._scan_ranges = list(msg.ranges)
@@ -617,6 +684,15 @@ class SafetyNode(rclpy.node.Node):
         would otherwise hand a live robot to the policy in one step, with no
         operator act in between.
         """
+        # VALIDATE EVERYTHING FIRST, APPLY ONCE AFTER. A set carrying several
+        # parameters is accepted or rejected as a whole by rcl, so applying
+        # command_source inside the loop and then rejecting a later parameter
+        # would leave this node forwarding the new source while
+        # `ros2 param get` (and the dashboard's read-back) still showed the
+        # old one. Fail-closed either way (the kill would have fired), but a
+        # page saying 'teleop' over a node forwarding a policy is exactly the
+        # mismatch an operator arms into.
+        new_source: Optional[str] = None
         for param in params:
             if param.name in ("slow_zone_enabled", "stop_zone_enabled"):
                 # Called out separately from the generic rejection because
@@ -644,25 +720,29 @@ class SafetyNode(rclpy.node.Node):
                     ),
                 )
             value = param.value
-            if value not in ("policy", "teleop"):
+            if value not in self._sources:
                 return SetParametersResult(
                     successful=False,
                     reason=(
-                        f"command_source must be 'policy' or 'teleop', "
-                        f"got {value!r}"
+                        f"command_source must be one of "
+                        f"{sorted(self._sources)} (config/topics.yaml "
+                        f"command_sources), got {value!r}"
                     ),
                 )
-            if value == self._command_source:
-                continue  # no-op: do not kill a running robot for nothing
+            new_source = value
 
-            previous = self._command_source
-            self._command_source = value
-            self._is_killed = True
-            self._write_kill_state(True)
-            self.get_logger().warn(
-                f"safety_node: command_source {previous!r} -> {value!r}; "
-                f"KILLED as a consequence. Call /safety/reset to arm."
-            )
+        if new_source is None or new_source == self._command_source:
+            # No-op (same row): do not kill a running robot for nothing.
+            return SetParametersResult(successful=True)
+
+        previous = self._command_source
+        self._command_source = new_source
+        self._is_killed = True
+        self._write_kill_state(True)
+        self.get_logger().warn(
+            f"safety_node: command_source {previous!r} -> {new_source!r}; "
+            f"KILLED as a consequence. Call /safety/reset to arm."
+        )
         return SetParametersResult(successful=True)
 
     def _kill_srv(
@@ -735,22 +815,17 @@ class SafetyNode(rclpy.node.Node):
             )
 
         # ------------------------------------------------------------------
-        # Active source selection
+        # Active source selection: the one row named by command_source. Its
+        # KIND (not its name) decides whether the policy-only checks apply,
+        # so a new policy row gets the lateral-velocity check for free.
         # ------------------------------------------------------------------
-        is_policy_source = self._command_source == "policy"
+        source, command = self._select_command()
+        is_policy_source = source.is_policy
+        cmd_vx = command.vx
+        cmd_vy = command.vy
+        cmd_wz = command.wz
 
-        if is_policy_source:
-            cmd_vx = self._policy_vx
-            cmd_vy = self._policy_vy
-            cmd_wz = self._policy_wz
-            cmd_stamp = self._policy_stamp
-        else:
-            cmd_vx = self._teleop_vx
-            cmd_vy = self._teleop_vy
-            cmd_wz = self._teleop_wz
-            cmd_stamp = self._teleop_stamp
-
-        command_age_ms = self._age_ms(cmd_stamp, now)
+        command_age_ms = self._age_ms(command.stamp, now)
 
         # ------------------------------------------------------------------
         # Build EvalInputs
@@ -780,6 +855,7 @@ class SafetyNode(rclpy.node.Node):
             consecutive_stop_count=self._consecutive_stop_count,
             reset_latch=self._reset_latch,
             odom_stale=self._odom_stale,
+            retreat_clear_count=self._retreat_clear_count,
         )
 
         # Consume the reset_latch flag — it is a one-shot per reset service call.
@@ -796,16 +872,29 @@ class SafetyNode(rclpy.node.Node):
         # policy_vy_check docstring).
         if is_policy_source and decision.clamping_active and abs(cmd_vy) > 1e-6:
             self.get_logger().warn(
-                f"safety_node: /policy/cmd_vel had non-zero linear.y "
-                f"({cmd_vy:.6f}) — this is a bug in the policy node (interface "
-                f"2.0.0 action space is [vx, wz] only).  Zeroed and warned."
+                f"safety_node: {source.topic} had non-zero linear.y "
+                f"({cmd_vy:.6f}) — this is a bug in the policy node (the "
+                f"action space is [vx, wz] only).  Zeroed and warned."
             )
 
         # ------------------------------------------------------------------
         # Update carried state
         # ------------------------------------------------------------------
+        if (self._estop_latched and not decision.estop_latched
+                and not inputs.reset_latch):
+            # The only way a latch clears without /safety/reset is the
+            # retreat release (safety_logic precedence 3). Say so loudly:
+            # the robot resumes under its source's command from here.
+            self.get_logger().warn(
+                f"safety_node: stop-zone latch RELEASED by retreat — "
+                f"{inputs.retreat_clear_count + 1} ticks of passed reverse "
+                f"with min_range >= {self._limits.estop.retreat_release_range_m} m "
+                f"(now {decision.min_range:.2f} m). Driving resumes under "
+                f"'{source.name}'."
+            )
         self._estop_latched = decision.estop_latched
         self._consecutive_stop_count = decision.consecutive_stop_count
+        self._retreat_clear_count = decision.retreat_clear_count
         self._last_vx = decision.out_vx
         self._last_vy = decision.out_vy
         self._last_wz = decision.out_wz
@@ -838,6 +927,7 @@ class SafetyNode(rclpy.node.Node):
             # float32 saturates at +inf; math.inf is a valid IEEE-754 float32 inf.
             status.min_range = float(decision.min_range)
             status.clamping_active = decision.clamping_active
+            status.command_topic = source.topic
             self._status_pub.publish(status)
 
 

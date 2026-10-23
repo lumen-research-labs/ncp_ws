@@ -1,17 +1,22 @@
 """NCP policy plumbing for the Rosmaster X3 — ROS-free, unit-testable.
 
 Mirrors the barn_gym BarnEnv observation/action contract exactly
-(optomotive arch-comparison worktree, --beams 32 --fov 180):
+(optomotive arch-comparison worktree, --beams 720 --fov 270, the native
+BARN Hokuyo UST-10LX layout):
 
-    obs(36) = [laser(32, normalized), local goal(x, y), last action(v, w)]
-    action  = [v, w]  (linear m/s, angular rad/s, physical units)
+    obs(724) = [laser(720, normalized), local goal(x, y), last action(v, w)]
+    action   = [v, w]  (linear m/s, angular rad/s, physical units)
 
 The actor is the trained policy's exact hookup — a CfC on an AutoNCP
 wiring (256 neurons, 128 motor) with mixed memory, then the SB3 MLP head
 [64, 64] to (v, w) — with the checkpoint's VecNormalize obs statistics
-carried as buffers. `weights/actor.pt` holds the m4 training run
-(exported bit-exact from the SB3 checkpoint); without a weights file the
-actor runs with random weights and pass-through normalization.
+carried as buffers. `weights/actor.pt` holds the M8-v2 run, snapshot
+s1436792 (63% held-out success, official BARN 0.219), exported bit-exact
+from the SB3 checkpoint by `weights/export_from_sb3.py`. `weights/actor_m4.pt`
+is the earlier M4 run (32 beams over 180 deg, obs 36); a deployment that
+loads it must build the actor with obs_dim=36 and feed it that layout.
+Without a weights file the actor runs with random weights and pass-through
+normalization.
 """
 
 import numpy as np
@@ -20,8 +25,8 @@ import torch.nn as nn
 from ncps.torch import CfC
 from ncps.wirings import AutoNCP
 
-BEAMS = 32
-FOV_DEG = 180.0
+BEAMS = 720
+FOV_DEG = 270.0
 LASER_CLIP = 5.0  # meters
 OBS_DIM = BEAMS + 2 + 2
 
@@ -34,7 +39,7 @@ UNITS = 256
 MOTOR_NEURONS = 128
 
 # Debug reactive rule (mode:=debug): unmistakable "I can see" behavior.
-OBSTACLE_DIST = 1.5  # meters: anything closer in the 180° FOV triggers a spin
+OBSTACLE_DIST = 1.5  # meters: anything closer in the FOV triggers a spin
 SPIN_W = 1.2  # rad/s
 CRUISE_V = 0.4  # m/s when nothing is near
 
@@ -144,7 +149,7 @@ class NcpActor(nn.Module):
 
     @torch.no_grad()
     def act(self, obs, state=None):
-        """One 5 Hz tick: obs(36) -> ((v, w) clipped to action bounds, state).
+        """One 5 Hz tick: obs(OBS_DIM) -> ((v, w) clipped to action bounds, state).
 
         Pass the returned state back in on the next tick; None resets it.
         """

@@ -186,6 +186,15 @@ ssh bernard-1 "pkill -f '[y]ahboomcar_bringup'"       # bracket breaks self-matc
 Prefer stopping nodes by the PID you started; confirm with `pgrep -af` before
 and after.
 
+**`scripts/stack_down.sh` has the same trap built in.** Its catch-all
+`pkill -f /home/jetson/ncp_ws/install` matches any remote shell whose command
+line sources `/home/jetson/ncp_ws/install/setup.bash`, so a one-liner like
+`ssh bernard-1 'source .../ncp_ws/install/setup.bash && bash scripts/stack_down.sh && ...'`
+dies at the teardown and never runs what follows (2026-10-13). Put the
+sourcing inside a script fed over stdin (`ssh bernard-1 bash -s <<'EOF'`),
+or do not source the install on the command line (`run_stack.sh` sources it
+itself).
+
 ## 7. `ros2 multicast send/receive` proves nothing about DDS
 
 It uses group 225.0.0.1. FastDDS SPDP discovery uses **239.255.0.1**, which
@@ -264,7 +273,9 @@ first.
 - **Never start `cpt_b2_engine`.** It publishes `/cmd_vel` directly with no
   safety layer and moves the robot the instant it starts. Concurrent with
   `rm_safety` it is two publishers on `/cmd_vel`.
-- **Never publish to `/cmd_vel` or `/policy/cmd_vel`** from a remote command.
+- **Never publish to `/cmd_vel` or any command-source topic** (`/teleop/cmd_vel`,
+  `/policy/cmd_vel`, `/policy/m8v2/cmd_vel`, `/policy/m4/cmd_vel`) from a
+  remote command.
 - **Never run teleop or any test that moves the robot.** There is no physical
   E-stop; `/safety/kill` is the only stop and battery pull is the last resort.
   Anything that moves the base requires a human operator with a kill switch in

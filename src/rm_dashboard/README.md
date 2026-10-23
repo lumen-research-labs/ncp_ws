@@ -16,6 +16,7 @@
 |---|---|---|
 | `state_store.py` | pure, thread-safe | Latest value per topic, plus arrival-rate, jitter and staleness. |
 | `slam_health.py` | pure | Turns a stream of `map → odom` corrections into the few numbers that say whether SLAM works. Also `pack_grid` / `summarize_map`. |
+| `slam_restart.py` | pure | RESET MAP's ROS-free half: finds the one `slam_toolbox` process, decides whether a reset is allowed. |
 | `web_server.py` | pure, ROS-free | `http.server` + SSE. One page, one event stream, a few command endpoints. |
 | `dashboard_node.py` | ROS2 node | Subscribes to everything; runs the server on a background thread. |
 | `static/index.html` | the page | |
@@ -37,8 +38,16 @@ side by side, right now.** So the layout follows the signal:
 
 ```
 /scan → /ncp/scan → [observation] → policy (v,w)
-      → /policy/cmd_vel → rm_safety → /cmd_vel → rm_base → wheels
+      → /policy/<p>/cmd_vel → rm_safety → /cmd_vel → rm_base → wheels
 ```
+
+Several policy nodes run at once (`ncp.launch.py profiles:=`, one per row of
+`config/topics.yaml` `command_sources`). The page follows ONE of them, the
+**active policy**: the selected source when that is a policy row, else the
+policy most recently selected, else the first one publishing
+(`rm_dashboard/sources.py`). The header names it next to its checkpoint
+hash, and the observation panel, the chain and the command table read its
+debug stream and request topic.
 
 with **rate, jitter and staleness on every hop**, plus safety state/reason/
 `min_range`, per-wheel base telemetry with its flags, and the SLAM panel.
@@ -69,7 +78,7 @@ diagnostic must not share a failure mode with the thing it diagnoses.**
 
 ### The observation comes from `/ncp_debug`, not rebuilt here
 
-`policy_node` publishes the actual 36-dim vector it consumed. A second
+`policy_node` publishes the actual 724-dim vector it consumed. A second
 implementation of the frozen contract would render a *plausible* vector that is
 not the one the network read.
 
@@ -135,8 +144,28 @@ goes where the operator clicked.
 ## Controls, and an honest note about them
 
 The page can send: `/safety/kill`, `/safety/reset`, parameter sets on
-`safety_node` / `policy_node`, and the two `/waypoint` services (`goto`,
-`cancel`, `jog`). It has **no publisher of any kind**.
+`safety_node` and the policy nodes, the `/waypoint` services (`goto`,
+`cancel`, `jog`), and one thing that is not ROS at all: a SIGTERM to the
+`slam_toolbox` process (RESET MAP, below). It has **no publisher of any
+kind**.
+
+The **source buttons** are one per row of the table, built from the snapshot,
+so the page offers exactly the names `rm_safety` accepts. A policy button is
+greyed until its node is publishing (a button for a silent source would
+select silence, and kill). Every goal command (`goal`, the map click,
+RESET MAP's re-fix) goes to **every running policy** through
+`/<node>/set_parameters_atomically`, so the goal stays one thing and the
+policy you switch to is already aimed. The map click converts the world point
+against each policy's own published pose. The response lists the policies
+that took the goal and any that refused.
+
+**ROAM** sets the `roam` parameter on every running policy through the same
+aggregation, and the pill beside it reads the active policy's `roam` counters
+from its debug stream. Turning it on asks first, since an armed, selected
+policy then moves at the next hand-off, and is **refused unless rm_safety has
+both lidar zones on** (read from `safety_node` at that moment, never from what
+the page last saw); turning it off never asks and does not stop the robot.
+See [`docs/roam.md`](../../docs/roam.md).
 
 An earlier version of this docstring claimed waypoints "require two prior
 operator acts that this page cannot perform". **That was false**, and it is
@@ -156,7 +185,26 @@ endpoints refuse and the buttons render disabled.
 `command_source` is **read back** from `safety_node` via
 `/safety_node/get_parameters`, not remembered from what the page last asked
 for. The page also states plainly, *before* the button is pressed, why a
-waypoint would not move the robot (killed / wrong source / dry run).
+waypoint would not move the robot (killed / a policy row selected / dry run);
+the jog and waypoint commands refuse while any policy row is selected.
+
+### RESET MAP restarts `slam_toolbox` in place
+
+slam_toolbox 2.6.9 has no reset service, so a fresh map is a restart of its
+process. `slam.launch.py` marks the node `respawn=True`; `reset_map`
+terminates it and the launch system brings it back empty, anchored on the
+odometry frame (the `map → odom` correction starts over at zero, so the
+robot's map pose equals its odom pose). The order inside `_reset_map` is the
+same principle as `stack_down.sh`: it calls `/safety/kill` **first** and
+returns with the robot still killed, cancels any waypoint run (its target
+lived in the frame that just vanished), waits for a `map → odom` transform
+stamped after the kill (tf2 keeps serving the dead map's last transform for
+seconds, so the stamp is the only honest signal), then re-fixes the policy
+goal from the current pose. The ROS-free half, finding exactly one
+`async_slam_toolbox_node` by argv[0] basename and refusing on zero or two of
+them, is `slam_restart.py` and is unit-tested. The one consequence of
+`respawn=True` to know about: a slam_toolbox crash also comes back silently
+with a fresh map; the SLAM panel's counters starting over is the tell.
 
 ### Keyboard driving lives in `rm_waypoint`, not here
 

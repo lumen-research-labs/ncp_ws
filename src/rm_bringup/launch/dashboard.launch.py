@@ -42,6 +42,9 @@ Launch arguments:
                      when it changes, so it never rides the 10 Hz stream.
     tf_poll_hz       5.0 — how often map -> odom (the SLAM correction) and
                      map -> base_footprint (the corrected pose) are read.
+    topics_path      config/topics.yaml, the command-source table: one
+                     source button per row, and the policy rows' debug
+                     streams and nodes. Defaults to the in-repo file.
 
 Failure mode:
     The node publishes NO topics, so it can never become a second /cmd_vel
@@ -59,15 +62,22 @@ Usage:
     ros2 launch rm_bringup dashboard.launch.py enable_controls:=false
 """
 
+import pathlib
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+_DEFAULT_TOPICS_PATH = str(
+    pathlib.Path(__file__).resolve().parents[3] / "config" / "topics.yaml"
+)
+
 
 def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
         DeclareLaunchArgument("port", default_value="8080"),
+        DeclareLaunchArgument("topics_path", default_value=_DEFAULT_TOPICS_PATH),
         DeclareLaunchArgument("host", default_value="0.0.0.0"),
         DeclareLaunchArgument("enable_controls", default_value="true"),
         DeclareLaunchArgument("stream_hz", default_value="10.0"),
@@ -87,6 +97,7 @@ def generate_launch_description() -> LaunchDescription:
                 "enable_controls": LaunchConfiguration("enable_controls"),
                 "map_max_cells": LaunchConfiguration("map_max_cells"),
                 "tf_poll_hz": LaunchConfiguration("tf_poll_hz"),
+                "topics_path": LaunchConfiguration("topics_path"),
             }],
         ),
     ])

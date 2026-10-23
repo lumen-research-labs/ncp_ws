@@ -2,17 +2,25 @@
 ncp.launch.py — the NCP policy pipeline, behind rm_safety.
 
 What it does:
-    Brings up the scan bridge plus ONE policy consumer, and (optionally) the
-    safety layer, so the trained NCP can be exercised on the real robot
-    without any node ever publishing to /cmd_vel except rm_safety.
+    Brings up the scan bridge plus one policy node PER PROFILE (default:
+    both trained policies), and (optionally) the safety layer, so the
+    trained NCPs can be exercised on the real robot without any node ever
+    publishing to /cmd_vel except rm_safety. Each policy node publishes its
+    own request on its own topic; rm_safety forwards only the one named by
+    command_source, so switching policies is a parameter set, never a
+    restart.
 
         /scan (TG30, ~1982 pts, 360 deg)
               |
-              +-- rm_policy/scan_bridge_node --> /ncp/scan (32 beams, 180 deg)
-                        |
-                        +-- consumer --> /policy/cmd_vel
-                                              |
-                                              +-- rm_safety --> /cmd_vel
+              +-- rm_policy/scan_bridge_node --> /ncp/scan (first profile's beams)
+              |
+              +-- policy_node_m8v2 --> /policy/m8v2/cmd_vel --+
+              |                                               +-- rm_safety --> /cmd_vel
+              +-- policy_node_m4   --> /policy/m4/cmd_vel   --+   (command_source picks ONE)
+
+    Node names, command topics and debug streams come from the rows of
+    config/topics.yaml `command_sources`, the same table rm_safety validates
+    command_source against and the dashboard draws its buttons from.
 
     rm_dashboard subscribes to every arrow above and serves it as one live
     page on http://<robot>:8080/. It is a leaf: nothing depends on it and it
@@ -26,7 +34,7 @@ Launch arguments:
     consumer      "policy_node" (DEFAULT) or "upstream".
 
                   "policy_node" runs rm_policy/policy_node, the
-                  contract-checked (interface_version 3.0.0), fail-closed
+                  contract-checked (interface_version 4.0.0), fail-closed
                   production path with staleness watchdogs and a goal fixed
                   from the first /odom. This is the default because a trained
                   checkpoint now exists (2026-08-29) and this is the path that
@@ -55,15 +63,44 @@ Launch arguments:
                       0.90 m  policy spins away       (this)
                       0.50 m  safety scales velocity  (slow_zone_m)
                       0.35 m  safety zeroes + latches (stop_zone_m)
-                  Upstream's 1.5 is measured across the whole 180 deg arc
+                  Upstream's 1.5 is measured across the whole 270 deg arc
                   including the sides, so in a normal room something is nearly
                   always inside it and the robot spins continuously instead of
                   ever cruising.
 
-    weights       Path to a trained actor state_dict. DEFAULTS to
-                  <upstream>/weights/actor.pt — the m4 BARN run that landed
-                  2026-08-29. Pass weights:='' for random weights, which
-                  exercises the PLUMBING and nothing else.
+    profiles      Comma-separated list of trained policies to run, default
+                  "m8v2,m4" (both). Each name is a row of the _PROFILES
+                  table below (contract file + checkpoint) AND a row of
+                  config/topics.yaml command_sources (node name, command
+                  topic, debug stream):
+                      "m8v2"  config/interface.yaml (4.0.0), 720 beams over
+                              270 deg, <upstream>/weights/actor.pt;
+                              policy_node_m8v2 -> /policy/m8v2/cmd_vel
+                      "m4"    config/interface_m4.yaml (3.0.0), 32 beams
+                              over 180 deg, <upstream>/weights/actor_m4.pt;
+                              policy_node_m4 -> /policy/m4/cmd_vel
+                  Every listed policy runs at once. rm_safety forwards only
+                  the row named by command_source, so the live policy is
+                  chosen with `ros2 param set /safety_node command_source
+                  m4` or the dashboard's source buttons, and a change still
+                  force-kills. The scan bridge serves the FIRST listed
+                  profile's contract. policy_node builds the network to its
+                  contract's width and loads its checkpoint strictly, so a
+                  mismatched pair refuses to start; the dashboard header
+                  shows the live policy's version and beam count.
+                  consumer:=upstream needs the list to START with m8v2 (the
+                  vendored upstream module is fixed at 720 beams).
+
+    interface_config_path
+                  Override the contract file of ONE profile: pass
+                  profiles:=<one> with it. Default "profile" = from the
+                  table. Rarely needed.
+
+    weights       Path to a trained actor state_dict, for ONE profile (pass
+                  profiles:=<one> with it). Default "profile" = the
+                  profile's checkpoint in the upstream checkout. Pass
+                  weights:='' for random weights, which exercises the
+                  PLUMBING and nothing else.
 
                   The checkpoint lives in the UPSTREAM repo. It must be
                   present on the robot: bernard-1 has no internet, so it gets
@@ -142,6 +179,14 @@ Launch arguments:
                   armed. Its pose_source follows this file's, so a waypoint is
                   always in the frame the policy is driving in.
 
+    (roam)        NOT a launch argument. Every policy node reads
+                  config/roam.yaml at startup, and roam is switched at
+                  runtime (the dashboard's ROAM button, or `ros2 param set
+                  /policy_node_m4 roam true`): an operator act after
+                  bring-up, like arming. On, each policy node draws its own
+                  next goal on arrival or timeout and keeps going; it arms
+                  nothing. See docs/roam.md.
+
 Bringing the WHOLE stack up:
     This file now starts everything ROS-side, so it is the one command. It
     does NOT do the host-level cleanup that must happen first — killing the
@@ -171,7 +216,8 @@ Why the safety layer is not optional in practice:
 Failure mode:
     rm_safety comes up KILLED (safety_limits.yaml startup.start_killed), so
     launching this can never move the robot; motion needs an explicit
-    /safety/reset AND command_source:=policy. Both consumers publish zero on
+    /safety/reset AND command_source set to a policy row (m8v2, m4, or
+    policy for the upstream consumer). Every policy node publishes zero on
     any fault, and the scan bridge publishes nothing at all on a resampler
     fault, letting each consumer's deadman stop the robot.
 
@@ -181,14 +227,17 @@ Usage (on the robot, after colcon build + source install/setup.bash):
     # full stack, nothing can move (command_source defaults to teleop)
     ros2 launch rm_bringup ncp.launch.py
 
-    # full stack, policy allowed to drive — operator + kill switch present
-    ros2 launch rm_bringup ncp.launch.py command_source:=policy
+    # full stack, the M8-v2 policy allowed to drive — operator + kill switch
+    ros2 launch rm_bringup ncp.launch.py command_source:=m8v2
+
+    # the M4 policy alone (its node is the only one started)
+    ros2 launch rm_bringup ncp.launch.py profiles:=m4 command_source:=m4
 
     # the reactive debug rule, for proving the sensor path end to end
     ros2 launch rm_bringup ncp.launch.py consumer:=upstream mode:=debug
 
-    # plumbing only, no checkpoint
-    ros2 launch rm_bringup ncp.launch.py weights:=''
+    # plumbing only, no checkpoint (one profile: weights:= overrides one)
+    ros2 launch rm_bringup ncp.launch.py profiles:=m8v2 weights:=''
 """
 
 import pathlib
@@ -206,25 +255,53 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
+from rm_safety.command_sources import load_command_sources
+
 _LAUNCH_DIR = pathlib.Path(__file__).resolve().parent
 _REPO_ROOT = _LAUNCH_DIR.parents[2]
-_DEFAULT_INTERFACE_PATH = str(_REPO_ROOT / "config" / "interface.yaml")
 _DEFAULT_LIMITS_PATH = str(_REPO_ROOT / "config" / "safety_limits.yaml")
+_DEFAULT_TOPICS_PATH = str(_REPO_ROOT / "config" / "topics.yaml")
+_DEFAULT_ROAM_PATH = str(_REPO_ROOT / "config" / "roam.yaml")
+
+# The command-source table: every policy node's name, command topic and debug
+# stream come from here, and rm_safety and the dashboard read the same file
+# (both are handed _DEFAULT_TOPICS_PATH below). Loaded once per launch; a
+# malformed table fails the launch here, before any node starts, with the
+# loader's reason.
+_SOURCES = load_command_sources(_DEFAULT_TOPICS_PATH)
+
+# The row the UPSTREAM consumer (and the bench tools) publish on. No policy
+# node of ours stands behind it, which is why it is not a profile.
+_UPSTREAM_SOURCE = "policy"
+
+# Policy profiles: one trained checkpoint and the contract it was exported
+# against. The contract file is relative to config/, the checkpoint to
+# <upstream_path>/weights/. Adding a policy means adding a row here AND a
+# row with a node in config/topics.yaml command_sources, a contract file, a
+# checkpoint in the upstream repo, and a line in scripts/deploy_upstream.sh's
+# CRITICAL list.
+_PROFILES = {
+    "m8v2": ("interface.yaml", "actor.pt"),
+    "m4": ("interface_m4.yaml", "actor_m4.pt"),
+}
+# The profile the upstream consumer needs first in the list (the vendored
+# module is fixed at its beam count), and the first of the default list.
+_DEFAULT_PROFILE = "m8v2"
+_DEFAULT_PROFILES = "m8v2,m4"
+# Sentinel default for `weights` / `interface_config_path`: resolve from the
+# profile. Needed because '' already means "random weights".
+_FROM_PROFILE = "profile"
 
 # Sibling checkout convention, matching tests/unit/test_vendor_is_pristine.py.
 _DEFAULT_UPSTREAM_PATH = str(_REPO_ROOT.parent / "NCP-on-Rosmaster")
 
-# The trained checkpoint ships in the upstream repo, not this one — it is the
-# training stack's artefact and duplicating a 2 MB binary into two repos is how
-# they drift apart. Defaulting to it (rather than to "", random weights) is
-# deliberate: with the default the node FAILS TO START if the file is missing,
-# which is far better than silently exercising an untrained network in a run
-# the operator believes is testing a policy. Pass weights:='' for a plumbing
-# run. Note this default is a fixed path, NOT derived from `upstream_path`:
-# a launch-argument default cannot reference another launch argument.
-_DEFAULT_WEIGHTS_PATH = str(
-    _REPO_ROOT.parent / "NCP-on-Rosmaster" / "weights" / "actor.pt"
-)
+# The trained checkpoints ship in the upstream repo, not this one — they are
+# the training stack's artefacts and duplicating multi-MB binaries into two
+# repos is how they drift apart. Defaulting to the profile's checkpoint
+# (rather than to "", random weights) is deliberate: with the default the
+# node FAILS TO START if the file is missing, which is far better than
+# silently exercising an untrained network in a run the operator believes is
+# testing a policy. Pass weights:='' for a plumbing run.
 
 _DEFAULT_CALIBRATION_PATH = str(_REPO_ROOT / "config" / "base_calibration.yaml")
 
@@ -273,11 +350,8 @@ _LIDAR_PARAMS = {
     "fixed_resolution": True,
 }
 
-# The bridge's output. Both consumers read this, never the raw /scan.
+# The bridge's output. The upstream consumer reads this, never the raw /scan.
 _NCP_SCAN_TOPIC = "/ncp/scan"
-
-# rm_safety's policy INPUT. Never /cmd_vel — rm_safety is its sole publisher.
-_POLICY_CMD_TOPIC = "/policy/cmd_vel"
 
 
 def _refuse_if_stack_already_running(context, *args, **kwargs):
@@ -362,9 +436,16 @@ def _upstream_process(context, *args, **kwargs):
     if context.perform_substitution(LaunchConfiguration("consumer")) != "upstream":
         return []
 
+    first, _source, _interface, weights = _resolve_profiles(context)[0]
+    if first != _DEFAULT_PROFILE:
+        raise RuntimeError(
+            f"consumer:=upstream needs profiles:= to start with {_DEFAULT_PROFILE}: "
+            f"the scan bridge serves the first profile's beams and the vendored "
+            f"upstream module is fixed at {_PROFILES[_DEFAULT_PROFILE][0]}'s count "
+            f"(its node.py refuses any other scan length). Got {first!r} first."
+        )
     upstream = context.perform_substitution(LaunchConfiguration("upstream_path"))
     mode = context.perform_substitution(LaunchConfiguration("mode"))
-    weights = context.perform_substitution(LaunchConfiguration("weights"))
     obstacle_dist = context.perform_substitution(
         LaunchConfiguration("obstacle_dist")
     )
@@ -377,19 +458,149 @@ def _upstream_process(context, *args, **kwargs):
         "-p", "odom_topic:=/odom",
         "-p", f"obstacle_dist:={obstacle_dist}",
         # OVERRIDE. Upstream defaults cmd_topic to /cmd_vel, which would
-        # bypass rm_safety entirely at up to 2 m/s.
-        "-p", f"cmd_topic:={_POLICY_CMD_TOPIC}",
+        # bypass rm_safety entirely at up to 2 m/s. It publishes on the
+        # table's "policy" row, so command_source:=policy selects it.
+        "-p", f"cmd_topic:={_SOURCES[_UPSTREAM_SOURCE].topic}",
     ]
     if weights:
         cmd += ["-p", f"weights:={weights}"]
     return [ExecuteProcess(cmd=cmd, name="ncp_rosmaster", output="screen")]
 
 
+def _resolve_profiles(context):
+    """[(profile, its command_sources row, contract path, weights path)] in
+    the order `profiles:=` lists them, sentinels resolved. The first entry's
+    contract is what the scan bridge serves.
+
+    ONE place resolves the list, so the bridge, the policy nodes and the
+    upstream consumer can never disagree about which checkpoints, contracts
+    and topics are live.
+    """
+    raw = context.perform_substitution(LaunchConfiguration("profiles"))
+    names = [p.strip() for p in raw.split(",") if p.strip()]
+    if not names:
+        raise RuntimeError(
+            f"profiles:= must list at least one of {sorted(_PROFILES)}."
+        )
+    unknown = [p for p in names if p not in _PROFILES]
+    if unknown:
+        raise RuntimeError(
+            f"profiles:={raw!r}: {unknown} not in {sorted(_PROFILES)}."
+        )
+    if len(set(names)) != len(names):
+        raise RuntimeError(f"profiles:={raw!r} lists a profile twice.")
+
+    interface_override = context.perform_substitution(
+        LaunchConfiguration("interface_config_path")
+    )
+    weights_override = context.perform_substitution(LaunchConfiguration("weights"))
+    overridden = [
+        arg for arg, value in (
+            ("interface_config_path", interface_override),
+            ("weights", weights_override),
+        ) if value != _FROM_PROFILE
+    ]
+    if overridden and len(names) > 1:
+        raise RuntimeError(
+            f"{' and '.join(overridden)} override ONE profile; pass "
+            f"profiles:=<one of {names}> with it."
+        )
+    upstream = context.perform_substitution(LaunchConfiguration("upstream_path"))
+
+    resolved = []
+    for name in names:
+        source = _SOURCES.get(name)
+        if source is None or source.node is None:
+            raise RuntimeError(
+                f"profile {name!r} has no command_sources row with a node in "
+                f"config/topics.yaml. Every profile needs one: that row is "
+                f"its node name, command topic and debug stream."
+            )
+        interface_file, weights_file = _PROFILES[name]
+        interface = (
+            interface_override if interface_override != _FROM_PROFILE
+            else str(_REPO_ROOT / "config" / interface_file)
+        )
+        weights = (
+            weights_override if weights_override != _FROM_PROFILE
+            else str(pathlib.Path(upstream) / "weights" / weights_file)
+        )
+        resolved.append((name, source, interface, weights))
+    return resolved
+
+
+def _policy_consumer(context):
+    """The scan bridge, on the FIRST profile's contract, and (for
+    consumer:=policy_node) one policy_node per profile, each named and
+    topic'd from its config/topics.yaml row. Built here rather than as
+    static Node actions because everything depends on `profiles`."""
+    profiles = _resolve_profiles(context)
+    _first, _source, first_interface, _weights = profiles[0]
+    # A command_source naming a policy row whose node this launch does not
+    # start would come up forwarding nothing: zero forever with reason
+    # command_timeout. Fail-closed, but a confusing bring-up; refuse it here.
+    selected = context.perform_substitution(LaunchConfiguration("command_source"))
+    started = {name for name, _s, _i, _w in profiles}
+    row = _SOURCES.get(selected)
+    if row is not None and row.node is not None and selected not in started:
+        raise RuntimeError(
+            f"command_source:={selected} names {row.node}, but profiles:= "
+            f"({', '.join(started)}) does not start it. Add it to profiles:= "
+            f"or select a source that will be publishing."
+        )
+    nodes = [
+        Node(
+            package="rm_policy",
+            executable="scan_bridge_node",
+            name="ncp_scan_bridge",
+            output="screen",
+            parameters=[{
+                "scan_topic": "/scan",
+                "output_topic": _NCP_SCAN_TOPIC,
+                "interface_config_path": first_interface,
+            }],
+        ),
+    ]
+    if context.perform_substitution(LaunchConfiguration("consumer")) != "policy_node":
+        return nodes
+    for _name, source, interface, weights in profiles:
+        params = {
+            # RAW /scan, deliberately NOT the bridge output: policy_node
+            # resamples internally, and re-resampling an already-reduced
+            # scan (bin centres, slightly narrower than the arc) into the
+            # full arc faults every tick.
+            "scan_topic": "/scan",
+            "odom_topic": "/odom",
+            # Its own row of the table: rm_safety subscribes to exactly
+            # this topic under exactly this name.
+            "cmd_vel_topic": source.topic,
+            "debug_topic": source.debug,
+            "pose_source": _resolved_pose_source(
+                LaunchConfiguration("pose_source"), LaunchConfiguration("with_slam")
+            ),
+            "interface_config_path": interface,
+            "safety_limits_path": _DEFAULT_LIMITS_PATH,
+            # Read at startup whether or not roam is on, so a bad file fails
+            # the launch. `roam` itself is a runtime parameter, not a launch
+            # argument (see the docstring).
+            "roam_config_path": _DEFAULT_ROAM_PATH,
+        }
+        # An empty `weights` must be OMITTED, not passed: rclpy aborts on
+        # `-p weights:=` (see _upstream_process). Empty is the default
+        # inside policy_node and means random weights.
+        if weights:
+            params["weights"] = weights
+        nodes.append(Node(
+            package="rm_policy",
+            executable="policy_node",
+            name=source.node,
+            output="screen",
+            parameters=[params],
+        ))
+    return nodes
+
+
 def generate_launch_description() -> LaunchDescription:
-    consumer = LaunchConfiguration("consumer")
-    mode = LaunchConfiguration("mode")
-    upstream_path = LaunchConfiguration("upstream_path")
-    weights = LaunchConfiguration("weights")
     with_safety = LaunchConfiguration("with_safety")
     command_source = LaunchConfiguration("command_source")
     with_lidar = LaunchConfiguration("with_lidar")
@@ -404,12 +615,6 @@ def generate_launch_description() -> LaunchDescription:
     dashboard_port = LaunchConfiguration("dashboard_port")
     dashboard_controls = LaunchConfiguration("dashboard_controls")
     with_waypoint = LaunchConfiguration("with_waypoint")
-
-    # `upstream` is selected inside _upstream_process (an OpaqueFunction), so
-    # only the policy_node branch needs a launch-time condition here.
-    is_policy_node = IfCondition(
-        PythonExpression(["'", consumer, "' == 'policy_node'"])
-    )
 
     return LaunchDescription([
         # FIRST action: refuse to stack a second copy on a running one.
@@ -431,16 +636,30 @@ def generate_launch_description() -> LaunchDescription:
             description="Path to the NCP-on-Rosmaster checkout.",
         ),
         DeclareLaunchArgument(
-            "weights", default_value=_DEFAULT_WEIGHTS_PATH,
-            description="Trained actor state_dict. Defaults to the m4 "
-                        "checkpoint in the upstream checkout. Pass "
-                        "weights:='' for RANDOM WEIGHTS (plumbing runs).",
+            "profiles", default_value=_DEFAULT_PROFILES,
+            description="Comma-separated trained policies to run, each on "
+                        "its own command topic: " + ", ".join(
+                f"'{k}' ({v[0]}, {v[1]})" for k, v in _PROFILES.items()
+            ) + ". rm_safety forwards the one named by command_source; the "
+                "scan bridge serves the first listed.",
+        ),
+        DeclareLaunchArgument(
+            "interface_config_path", default_value=_FROM_PROFILE,
+            description="Contract file override for ONE profile (pass "
+                        "profiles:=<one>); default from the table.",
+        ),
+        DeclareLaunchArgument(
+            "weights", default_value=_FROM_PROFILE,
+            description="Trained actor state_dict for ONE profile (pass "
+                        "profiles:=<one>). Default: the profile's checkpoint "
+                        "in the upstream checkout. Pass weights:='' for "
+                        "RANDOM WEIGHTS (plumbing runs).",
         ),
         DeclareLaunchArgument(
             "obstacle_dist", default_value="0.9",
             description="Debug rule: spin away from anything closer than this "
                         "(metres). Upstream's own default is 1.5, which in a "
-                        "normal room keeps something inside the 180 deg arc "
+                        "normal room keeps something inside the 270 deg arc "
                         "almost always, so the robot spins continuously and "
                         "never cruises. 0.9 sits above safety's 0.50 m slow "
                         "zone, so the policy still turns away before the "
@@ -451,15 +670,17 @@ def generate_launch_description() -> LaunchDescription:
             description="Also launch safety.launch.py.",
         ),
         # Passed straight through to safety.launch.py. Defaults to "teleop",
-        # matching that file: with "teleop", rm_safety IGNORES /policy/cmd_vel
-        # entirely, so the whole NCP chain runs and publishes but CANNOT reach
+        # matching that file: with "teleop", rm_safety IGNORES every policy
+        # topic, so the whole NCP chain runs and publishes but CANNOT reach
         # the base driver. That is the correct default for bringing the stack
-        # up and watching it. Set "policy" only when you intend the policy to
-        # drive, with an operator and a kill switch present.
+        # up and watching it. Name a policy row only when you intend that
+        # policy to drive, with an operator and a kill switch present.
         DeclareLaunchArgument(
             "command_source", default_value="teleop",
-            description="rm_safety's active source: 'teleop' (default, policy "
-                        "cannot drive) or 'policy'.",
+            description="rm_safety's active source, a config/topics.yaml "
+                        "command_sources row: " + ", ".join(
+                f"'{n}'" for n in _SOURCES
+            ) + ". 'teleop' (default) means no policy can drive.",
         ),
         # LIDAR ZONE MASTER SWITCHES — passed through to safety.launch.py.
         #
@@ -617,22 +838,14 @@ def generate_launch_description() -> LaunchDescription:
             condition=IfCondition(with_safety),
             launch_arguments={
                 "command_source": command_source,
+                "topics_path": _DEFAULT_TOPICS_PATH,
                 "slow_zone_enabled": LaunchConfiguration("slow_zone_enabled"),
                 "stop_zone_enabled": LaunchConfiguration("stop_zone_enabled"),
             }.items(),
         ),
 
-        Node(
-            package="rm_policy",
-            executable="scan_bridge_node",
-            name="ncp_scan_bridge",
-            output="screen",
-            parameters=[{
-                "scan_topic": "/scan",
-                "output_topic": _NCP_SCAN_TOPIC,
-            }],
-        ),
-
+        # The scan bridge and one policy_node per profile, from the table.
+        OpaqueFunction(function=_policy_consumer),
         OpaqueFunction(function=_upstream_process),
 
         IncludeLaunchDescription(
@@ -660,26 +873,8 @@ def generate_launch_description() -> LaunchDescription:
             launch_arguments={
                 "port": dashboard_port,
                 "enable_controls": dashboard_controls,
+                "topics_path": _DEFAULT_TOPICS_PATH,
             }.items(),
         ),
 
-        Node(
-            condition=is_policy_node,
-            package="rm_policy",
-            executable="policy_node",
-            name="policy_node",
-            output="screen",
-            parameters=[{
-                # RAW /scan, deliberately NOT the bridge output: policy_node
-                # resamples internally, and re-resampling an already-reduced
-                # 174.375 deg scan into a 180 deg arc faults every tick.
-                "scan_topic": "/scan",
-                "odom_topic": "/odom",
-                "cmd_vel_topic": _POLICY_CMD_TOPIC,
-                "weights": weights,
-                "pose_source": _resolved_pose_source(pose_source, with_slam),
-                "interface_config_path": _DEFAULT_INTERFACE_PATH,
-                "safety_limits_path": _DEFAULT_LIMITS_PATH,
-            }],
-        ),
     ])

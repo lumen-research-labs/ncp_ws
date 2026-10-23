@@ -14,7 +14,7 @@
 | `safety.launch.py` | `rm_safety/safety_node` | Comes up KILLED regardless of arguments. |
 | `base.launch.py` | `rm_base/rm_base_node` | Defaults `dry_run:=true`, `control_mode:=open_loop`. |
 | `odom.launch.py` | `base_node_X3` + `imu_filter_madgwick` + EKF + `robot_state_publisher` | The vendor odom chain **without** the vendor driver. |
-| `slam.launch.py` | `slam_toolbox` + `scan_sanitizer_node` | Publishes `map → odom`. |
+| `slam.launch.py` | `slam_toolbox` + `scan_sanitizer_node` | Publishes `map → odom`. `slam_toolbox` respawns on exit, which is what the dashboard's RESET MAP relies on; a crash therefore also comes back with a fresh map. |
 | `dashboard.launch.py` | `rm_dashboard/dashboard_node` | For attaching to an already-running stack. |
 | `waypoint.launch.py` | `rm_waypoint/waypoint_node` | Off by default in `ncp.launch.py`. |
 | `teleop_joy.launch.py` | Yahboom gamepad, **remapped to `/teleop/cmd_vel`** | The vendor's own copy must be killed first. |
@@ -26,17 +26,27 @@
 ```
 /scan (TG30, ~2000 pts, 360°)
       │
-      ├─ scan_bridge_node ──► /ncp/scan (32 beams, 180°)   [upstream consumer only]
+      ├─ scan_bridge_node ──► /ncp/scan (first profile's beams)  [upstream consumer only]
       │
-      └─ consumer ──► /policy/cmd_vel ──► rm_safety ──► /cmd_vel ──► rm_base ──► wheels
+      ├─ policy_node_m8v2 ──► /policy/m8v2/cmd_vel ──┐
+      │                                               ├──► rm_safety ──► /cmd_vel ──► rm_base ──► wheels
+      └─ policy_node_m4   ──► /policy/m4/cmd_vel   ──┘    (command_source picks ONE row)
 ```
+
+Node names, command topics and debug streams come from `config/topics.yaml`
+`command_sources`, the table `rm_safety` validates `command_source` against
+and the dashboard draws its source buttons from (loader:
+`rm_safety/command_sources.py`). Every listed policy runs at once; switching
+the live one is a parameter set, never a restart.
 
 | argument | default | what it does |
 |---|---|---|
-| `command_source` | **`teleop`** | `policy` lets `/policy/cmd_vel` drive. Defaults to `teleop` so bringing the stack up to watch it **cannot** reach the base driver. |
+| `command_source` | **`teleop`** | A `config/topics.yaml` row: `teleop`, `policy`, `m8v2` or `m4`. Defaults to `teleop` so bringing the stack up to watch it **cannot** reach the base driver. Any other name is refused. |
 | `consumer` | `policy_node` | Or `upstream` — runs `NCP-on-Rosmaster/rosmaster/node.py` unmodified, the only way to get its `mode:=debug` reactive rule. |
 | `mode` | `debug` | Only meaningful for `consumer:=upstream`. `debug` = reactive rule drives, NCP runs in shadow. `ncp` = the network drives. |
-| `weights` | the real checkpoint | `weights:=''` is the explicit opt-in to **random weights**. |
+| `profiles` | **`m8v2,m4`** | Which trained policies to run, each as its own node on its own row: `m8v2` (720 beams over 270°, interface 4.0.0, `actor.pt`) and `m4` (32 over 180°, 3.0.0, `actor_m4.pt`). The scan bridge serves the first listed. `consumer:=upstream` needs `m8v2` first. The dashboard header shows which policy is live. |
+| `interface_config_path` | from the table | Contract file override for one profile; pass `profiles:=<one>` with it. |
+| `weights` | the profile's checkpoint | For one profile (`profiles:=<one>`). `weights:=''` is the explicit opt-in to **random weights**. A checkpoint of the other profile's width refuses to load. |
 | `dry_run` | **`false`** | Note this differs from `base.launch.py`'s own default of `true`: bringing up the full stack implies intent to drive. |
 | `control_mode` | `closed_loop` | The floor-validated path. |
 | `with_lidar` / `with_base` / `with_odom` | `true` | Turn off only if already running. |
@@ -44,6 +54,7 @@
 | `pose_source` | follows `with_slam` | Set explicitly to `odom` **with** `with_slam:=true` to run SLAM while still driving on odometry — the safe way to watch a map build before trusting it. |
 | `with_dashboard` | `true` | `dashboard_controls:=false` serves a read-only page. |
 | `with_waypoint` | **`false`** | The only autonomous motion path here that is not the policy. |
+| (roam) | runtime | Not a launch argument. Every policy node reads `config/roam.yaml`; `roam` is switched from the dashboard or `ros2 param set`. See [`docs/roam.md`](../../docs/roam.md). |
 | `obstacle_dist` | `0.9` | Debug rule only, overriding upstream's 1.5. |
 
 ### The threshold ordering that must be preserved
@@ -55,7 +66,7 @@
 ```
 
 The policy must react *before* the safety layer has to. Upstream's 1.5 m is
-measured across the whole 180° arc **including the sides**, so in a normal room
+measured across the whole 270° arc **including the sides**, so in a normal room
 something is nearly always inside it and the robot spins continuously instead
 of ever cruising (measured: 380 spin samples to 49 cruise).
 
@@ -111,7 +122,7 @@ ros2 topic info /teleop/cmd_vel   # -> 1 publisher
 
 ~31–39% of TG30 rays are the `0.0` no-return sentinel, and slam_toolbox does
 not know that. Untreated they are phantom hits at the sensor origin and scan
-matching is worthless. It is also **not** `/ncp/scan` — that is 32 beams
+matching is worthless. It is also **not** `/ncp/scan` — that is 720 beams
 reduced for the policy; scan matching wants every ray and the full 360°.
 
 SLAM is additive: it publishes `map → odom` *above* the untouched EKF chain. It

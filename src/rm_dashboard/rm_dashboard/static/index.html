@@ -79,9 +79,10 @@ canvas{width:100%;height:auto;display:block;border-radius:8px;background:#0a0e14
 .kv dt{color:var(--dim)} .kv dd{margin:0;font-family:var(--mono);text-align:right}
 
 /* ---------- bars ---------- */
-.obs{display:flex;align-items:flex-end;gap:1px;height:78px;
+.obs{display:flex;align-items:flex-end;gap:0;height:78px;
   background:#0a0e14;border-radius:6px;padding:5px}
-.obs b{flex:1;min-width:2px;border-radius:1px 1px 0 0;font-weight:400}
+.obs b{flex:1;min-width:0;border-radius:1px 1px 0 0;font-weight:400}
+.obs b.aux{flex:0 0 10px;margin-left:2px}
 .obslabels{display:flex;font-size:10px;color:var(--faint);margin-top:5px}
 
 /* ---------- table ---------- */
@@ -184,11 +185,11 @@ input[type=range]{accent-color:var(--accent)}
 
   <!-- ============ scan ============ -->
   <section class="panel">
-    <h2>Lidar — full scan vs the 32 beams the policy sees</h2>
+    <h2>Lidar — full scan vs the beams the policy sees</h2>
     <div class="scanwrap"><canvas id="scan" width="760" height="760"></canvas></div>
     <div class="legend">
       <span><i style="background:#3a4653"></i>/scan (raw, decimated)</span>
-      <span><i style="background:var(--accent)"></i>/ncp/scan (32 beams)</span>
+      <span><i style="background:var(--accent)"></i>/ncp/scan (bridge beams, first profile)</span>
       <span><i style="background:var(--bad)"></i>stop zone</span>
       <span><i style="background:var(--warn)"></i>slow zone</span>
       <span><i style="background:var(--goal)"></i>goal bearing</span>
@@ -264,6 +265,12 @@ input[type=range]{accent-color:var(--accent)}
           <dt>SLAM input (zeros)</dt><dd id="sanz">—</dd>
         </dl>
         <div class="spark" id="slamspark"></div>
+        <div style="display:flex;gap:8px;align-items:center;margin:8px 0">
+          <button class="act danger" id="resetmap">RESET MAP</button>
+          <span class="note">kills the robot, restarts slam_toolbox with an
+            empty map anchored on the odometry frame, re-fixes the policy goal
+            from the goal x / y fields. Use after the robot was carried.</span>
+        </div>
         <div class="note">
           <code>map&nbsp;→&nbsp;odom</code> IS the correction: how far SLAM has
           moved the odometry's idea of where the robot is. It should GROW as
@@ -312,12 +319,12 @@ input[type=range]{accent-color:var(--accent)}
 
   <!-- ============ observation ============ -->
   <section class="panel wide">
-    <h2>Observation — the 36 numbers the network actually consumed</h2>
+    <h2>Observation — the numbers the network actually consumed</h2>
     <div class="obs" id="obs"></div>
     <div class="obslabels">
-      <span style="flex:32">0–31 lidar (−1 touching · +1 clear)</span>
-      <span style="flex:2;text-align:center">32–33 goal</span>
-      <span style="flex:2;text-align:right">34–35 prev action</span>
+      <span style="flex:32" id="obslidar">lidar (−1 touching · +1 clear)</span>
+      <span style="flex:2;text-align:center">goal</span>
+      <span style="flex:2;text-align:right">prev action</span>
     </div>
     <div class="note" id="obsnote">
       Taken from <code>/ncp_debug</code>, i.e. the exact vector policy_node fed
@@ -341,22 +348,32 @@ input[type=range]{accent-color:var(--accent)}
   <!-- ============ controls + rates ============ -->
   <section class="panel">
     <h2>Controls</h2>
+    <!-- One button per row of config/topics.yaml command_sources, built from
+         the snapshot (renderSources), so the page offers exactly the names
+         rm_safety accepts. -->
     <div class="ctl" style="margin-bottom:10px">
       <span class="pill">command source</span>
-      <button class="act" id="src-teleop" data-src="teleop">teleop</button>
-      <button class="act" id="src-policy" data-src="policy">policy</button>
+      <span id="srcbtns" style="display:contents"></span>
     </div>
     <div class="ctl" style="margin-bottom:10px">
       <label class="inline">goal x</label><input type="number" id="gx" value="2.5" step="0.1">
       <label class="inline">y</label><input type="number" id="gy" value="0" step="0.1">
       <button class="act" id="setgoal">re-target from here</button>
     </div>
+    <div class="ctl" style="margin-bottom:10px">
+      <button class="act" id="roambtn">ROAM: —</button>
+      <span class="pill" id="roamstat">roam —</span>
+    </div>
     <div class="ctl">
       <button class="act danger" id="resetbtn">ARM (/safety/reset)</button>
     </div>
     <div class="note">
-      Changing the source force-kills, so arming is always a separate act.
-      Re-targeting also resets the CfC's recurrent state.
+      Changing the source force-kills, so arming is always a separate act. A
+      policy button is greyed until its node is publishing. Goals go to every
+      running policy, so the one you switch to is already aimed. Re-targeting
+      also resets each CfC's recurrent state. ROAM makes every running policy
+      draw its own next goal on arrival or timeout (config/roam.yaml); off
+      keeps the current goal and does not stop the robot.
     </div>
   </section>
 
@@ -432,19 +449,36 @@ function val(snap, topic){
   return (t && t.value) ? t.value : null;
 }
 function meta(snap, topic){ return (snap.topics && snap.topics[topic]) || null; }
+// The policy the page follows: the selected source when that is a policy
+// row, else the last selected one, else the first live one (the node decides,
+// rm_dashboard/sources.py). Everything policy-shaped on the page reads
+// through this rather than a fixed topic, because several policy nodes run
+// at once and rm_safety forwards only the selected one.
+function activePolicy(snap){ return snap.active_policy || {}; }
+function sourceRow(snap, name){
+  return (snap.sources||[]).find(s=>s.name===name) || null;
+}
+function isPolicySource(snap, name){
+  const r = sourceRow(snap, name); return !!r && r.kind === "policy";
+}
 
 /* ---------------- chain ---------------- */
-const CHAIN = [
-  {topic:"/scan",           label:"/scan",           get:v=>num(v.min_range_m,2)+" m min"},
-  {topic:"/ncp/scan",       label:"/ncp/scan",       get:v=>v.n+" beams"},
-  {topic:"/ncp_debug",      label:"policy",          get:v=>v.action?`${num(v.action[0])} , ${num(v.action[1])}`:(v.fault||"—")},
-  {topic:"/policy/cmd_vel", label:"/policy/cmd_vel", get:v=>`${num(v.vx)} , ${num(v.wz)}`},
-  {topic:"/safety/status",  label:"rm_safety",       get:v=>v.state_name},
-  {topic:"/cmd_vel",        label:"/cmd_vel",        get:v=>`${num(v.vx)} , ${num(v.wz)}`},
-  {topic:"/base/debug",     label:"wheels",          get:v=>v.dry_run?"DRY RUN":v.control_mode},
-];
+function chainFor(snap){
+  const ap = activePolicy(snap);
+  return [
+    {topic:"/scan",          label:"/scan",     get:v=>num(v.min_range_m,2)+" m min"},
+    {topic:"/ncp/scan",      label:"/ncp/scan", get:v=>v.n+" beams"},
+    {topic:ap.debug,         label:"policy "+(ap.name||"—"),
+       get:v=>v.action?`${num(v.action[0])} , ${num(v.action[1])}`:(v.fault||"—")},
+    {topic:ap.topic,         label:ap.topic||"/policy/…/cmd_vel", get:v=>`${num(v.vx)} , ${num(v.wz)}`},
+    {topic:"/safety/status", label:"rm_safety", get:v=>v.state_name},
+    {topic:"/cmd_vel",       label:"/cmd_vel",  get:v=>`${num(v.vx)} , ${num(v.wz)}`},
+    {topic:"/base/debug",    label:"wheels",    get:v=>v.dry_run?"DRY RUN":v.control_mode},
+  ];
+}
 function renderChain(snap){
   const el = $("chain");
+  const CHAIN = chainFor(snap);
   el.innerHTML = CHAIN.map((c,i)=>{
     const m = meta(snap,c.topic), v = m && m.value;
     let body = "—";
@@ -505,7 +539,7 @@ function renderScan(snap){
       ctx.fillRect(x-1.1,y-1.1,2.2,2.2);
     });
   }
-  // the 32 beams
+  // the policy beams
   const ncp = val(snap,"/ncp/scan");
   if(ncp && ncp.ranges){
     ctx.strokeStyle = "rgba(88,166,255,.5)"; ctx.lineWidth = 1.6;
@@ -518,8 +552,9 @@ function renderScan(snap){
       ctx.beginPath(); ctx.arc(x,y,3,0,7); ctx.fill();
     });
   }
-  // goal bearing
-  const dbg = val(snap,"/ncp_debug");
+  // goal bearing, from the active policy's own observation
+  const ap = activePolicy(snap);
+  const dbg = val(snap, ap.debug);
   if(dbg && dbg.goal_local_m){
     const [gx,gy] = dbg.goal_local_m;
     const a = Math.atan2(gy,gx), d = Math.hypot(gx,gy);
@@ -574,21 +609,86 @@ function renderSafety(snap){
   // Read back from rm_safety, not remembered from what this page last asked
   // for — see the node. "unknown" is an honest third state, not a default.
   $("safesrc").textContent = snap.command_source || "unknown";
-  // Highlight the source that lets the POLICY drive, since that is the one
+  // Highlight any source that lets a POLICY drive, since those are the ones
   // where an unexpected value has consequences.
   $("safesrc").style.color =
-    snap.command_source === "policy" ? "var(--accent)" : "";
-  for(const b of document.querySelectorAll("[data-src]"))
-    b.classList.toggle("on", snap.command_source === b.dataset.src);
+    isPolicySource(snap, snap.command_source) ? "var(--accent)" : "";
+}
+
+/* ---------------- source buttons ----------------
+   Built from the snapshot's table, once per change of the row list, then
+   kept in step every frame: `on` follows the source READ BACK from rm_safety,
+   and a policy button is greyed while its node is not publishing, because a
+   button for a silent source would select silence (and kill, as every
+   switch does). teleop is never greyed for that: nothing has to be
+   publishing for it to be the safe direction.                             */
+let srcKey = "";
+function renderSources(snap){
+  const rows = snap.sources || [];
+  const key = rows.map(r=>r.name).join(",");
+  if(key !== srcKey){
+    srcKey = key;
+    $("srcbtns").innerHTML = rows.map(r=>
+      `<button class="act" data-src="${r.name}" data-kind="${r.kind}">${r.name}</button>`
+    ).join("");
+    for(const b of document.querySelectorAll("[data-src]"))
+      b.onclick = () => askSource(b.dataset.src);
+  }
+  const en = snap.controls_enabled, svc = snap.services||{};
+  for(const b of document.querySelectorAll("[data-src]")){
+    const r = sourceRow(snap, b.dataset.src) || {};
+    const dead = r.kind === "policy" && !r.live;
+    b.disabled = !en || !svc.safety_params || dead;
+    b.classList.toggle("on", snap.command_source === r.name);
+    b.title = (r.description || "") +
+      (dead ? ` — greyed: nothing is publishing ${r.topic}` : "");
+  }
+}
+function askSource(v){
+  if(confirm(`Set command_source to '${v}'?\n\nThis force-kills the robot; `+
+             `you will need to ARM again afterwards.`)) post("source",{value:v});
+}
+
+/* ---------------- roam ---------------- */
+// The toggle and the pill follow the ACTIVE policy's own debug stream: the
+// node reports what it is doing; the page never remembers what it asked.
+function roamOf(snap, debugTopic){
+  if(!snap || !debugTopic) return null;
+  const d = val(snap, debugTopic);
+  return d && d.roam ? d.roam : null;
+}
+function renderRoam(snap){
+  const ap = activePolicy(snap), r = roamOf(snap, ap.debug);
+  const b = $("roambtn");
+  b.textContent = r ? (r.on ? "ROAM: on" : "ROAM: off") : "ROAM: —";
+  b.classList.toggle("on", !!(r && r.on));
+  // Each policy roams on its own. The command goes to every running one, so
+  // a disagreement means a node was restarted or set from a terminal: say so.
+  const differs = (snap.sources||[])
+    .filter(s => s.kind === "policy" && s.debug && s.name !== ap.name)
+    .map(s => ({name: s.name, roam: roamOf(snap, s.debug)}))
+    .filter(o => o.roam && !!o.roam.on !== !!(r && r.on))
+    .map(o => `${o.name} ${o.roam.on ? "on" : "off"}`);
+  $("roamstat").textContent = r
+    ? `${ap.name||"policy"} · roam ${r.on ? "on" : "off"} · goals ${r.n} · `+
+      `timeouts ${r.timeouts} · stalls ${r.stalls} · retreats ${r.retreats ?? 0} · `+
+      `last ${r.last_reason || "—"}`+
+      (r.retreating ? " · RETREATING: backing out of the stop zone" : "")+
+      (r.holding ? " · HOLDING: no free goal in view, jog into open floor" : "")+
+      (differs.length ? ` · differs: ${differs.join(", ")}` : "")
+    : `${ap.name||"policy"} · roam —`;
+  $("roamstat").style.color = r && r.holding ? "var(--warn)" : "";
 }
 
 /* ---------------- command table ---------------- */
 function renderCmd(snap){
+  const ap = activePolicy(snap);
+  const teleop = sourceRow(snap, "teleop") || {topic:"/teleop/cmd_vel"};
   const rows = [
-    ["policy raw (NCP)", (()=>{const d=val(snap,"/ncp_debug");
-       return d&&d.action?{vx:d.action[0],wz:d.action[1]}:null})(), meta(snap,"/ncp_debug")],
-    ["/policy/cmd_vel", val(snap,"/policy/cmd_vel"), meta(snap,"/policy/cmd_vel")],
-    ["/teleop/cmd_vel", val(snap,"/teleop/cmd_vel"), meta(snap,"/teleop/cmd_vel")],
+    [`policy raw (${ap.name||"—"})`, (()=>{const d=val(snap, ap.debug);
+       return d&&d.action?{vx:d.action[0],wz:d.action[1]}:null})(), meta(snap, ap.debug)],
+    [ap.topic||"/policy/…/cmd_vel", val(snap, ap.topic), meta(snap, ap.topic)],
+    [teleop.topic, val(snap, teleop.topic), meta(snap, teleop.topic)],
     ["/cmd_vel (out)",  val(snap,"/cmd_vel"),        meta(snap,"/cmd_vel")],
   ];
   $("cmdtbl").innerHTML = rows.map(([label,v,m])=>
@@ -599,27 +699,35 @@ function renderCmd(snap){
 
 /* ---------------- observation ---------------- */
 function renderObs(snap){
-  const d = val(snap,"/ncp_debug");
+  const ap = activePolicy(snap);
+  const d = val(snap, ap.debug);
   const el = $("obs");
+  const who = ap.node || ap.name || "the policy node";
   if(!d || !d.obs){
     el.innerHTML = "";
+    $("obslidar").textContent = "lidar (−1 touching · +1 clear)";
     $("obsnote").textContent = d && d.fault
-      ? "No observation this tick — policy_node fault: " + d.fault
-      : "No observation yet. policy_node publishes one only on a fault-free tick.";
+      ? `No observation this tick — ${who} fault: ` + d.fault
+      : `No observation yet. ${who} publishes one only on a fault-free tick.`;
     return;
   }
+  // Layout is [lidar(L), goal(2), prev action(2)] (config/interface.yaml);
+  // L follows the vector length so the page needs no contract constant.
+  const L = d.obs.length - 4;
+  $("obslidar").textContent = `0–${L-1} lidar (−1 touching · +1 clear)`;
   // Each value is in [-1,1]-ish; draw from a mid-line so sign is visible.
   el.innerHTML = d.obs.map((v,i)=>{
     const clamped = Math.max(-1.2, Math.min(1.2, v));
     const h = (clamped + 1.2) / 2.4 * 100;
-    const col = i<32 ? (v<-0.5 ? "var(--bad)" : v<0 ? "var(--warn)" : "var(--accent)")
-              : i<34 ? "var(--goal)" : "var(--accent2)";
-    return `<b style="height:${h.toFixed(1)}%;background:${col}" title="obs[${i}] = ${v}"></b>`;
+    const col = i<L ? (v<-0.5 ? "var(--bad)" : v<0 ? "var(--warn)" : "var(--accent)")
+              : i<L+2 ? "var(--goal)" : "var(--accent2)";
+    const cls = i<L ? "" : ' class="aux"';
+    return `<b${cls} style="height:${h.toFixed(1)}%;background:${col}" title="obs[${i}] = ${v}"></b>`;
   }).join("");
   $("obsnote").textContent =
-    `36 dims · lidar min ${num(Math.min(...d.obs.slice(0,32)),3)} · `+
-    `goal (${num(d.obs[32],3)}, ${num(d.obs[33],3)}) · `+
-    `prev action (${num(d.obs[34],3)}, ${num(d.obs[35],3)})`;
+    `${ap.name} · ${d.obs.length} dims · lidar min ${num(Math.min(...d.obs.slice(0,L)),3)} · `+
+    `goal (${num(d.obs[L],3)}, ${num(d.obs[L+1],3)}) · `+
+    `prev action (${num(d.obs[L+2],3)}, ${num(d.obs[L+3],3)})`;
 }
 
 /* ---------------- wheels ---------------- */
@@ -803,8 +911,9 @@ function renderMap(snap){
     ctx.stroke();
   }
 
-  // policy goal, in the map frame
-  const dbg = val(snap,"/ncp_debug");
+  // the active policy's goal, in the map frame
+  const ap = activePolicy(snap);
+  const dbg = val(snap, ap.debug);
   if(dbg && dbg.goal_world_m && dbg.pose_source === "map"){
     marker(ctx, mapView.toCanvas(dbg.goal_world_m[0], dbg.goal_world_m[1]),
            "#f0883e", "goal");
@@ -970,7 +1079,8 @@ function renderWaypoint(snap){
   if(w && w.dry_run) blockers.push("waypoint node is in DRY RUN");
   if(s && s.state_name === "KILLED") blockers.push("rm_safety is KILLED — arm it");
   if(snap.command_source && snap.command_source !== "teleop")
-    blockers.push(`command source is '${snap.command_source}', not teleop`);
+    blockers.push(`command source is '${snap.command_source}', not teleop`+
+                  (isPolicySource(snap, snap.command_source) ? " (a policy row)" : ""));
   $("wpnote").style.color = blockers.length ? "var(--warn)" : "";
   if(blockers.length){
     $("wpnote").textContent = "Will not move: " + blockers.join(" · ") +
@@ -990,23 +1100,35 @@ function renderHeader(snap){
   $("batt").textContent = v ? v.volts.toFixed(2)+" V" : "— V";
   $("battdot").className = "dot " + (v ? (v.level==="good"?"ok":v.level==="low"?"warn":"bad") : "");
   $("uptime").textContent = snap.uptime_s + "s";
-  const d = val(snap,"/ncp_debug");
+  const ap = activePolicy(snap);
+  const d = val(snap, ap.debug);
+  // Which policy the page follows, with its contract version and beam count
+  // next to its checkpoint hash, so the live policy is readable at a glance.
+  const prof = d && d.interface_version
+    ? ` · interface ${d.interface_version} · ${d.n_beams} beams` : "";
+  const name = ap.name ? ap.name + " · " : "";
   $("ckpt").textContent = d
-    ? (d.weights_sha256 ? "checkpoint " + d.weights_sha256 : "RANDOM WEIGHTS")
-    : "checkpoint —";
+    ? name + (d.weights_sha256 ? "checkpoint " + d.weights_sha256 : "RANDOM WEIGHTS") + prof
+    : name + "checkpoint —";
   $("ckpt").style.color = d && !d.weights_sha256 ? "var(--warn)" : "";
 
   const en = snap.controls_enabled, svc = snap.services||{};
   $("killbtn").disabled   = !en || !svc.kill;
   $("resetbtn").disabled  = !en || !svc.reset;
   $("setgoal").disabled   = !en || !svc.policy_params;
+  $("roambtn").disabled   = !en || !svc.policy_params;
   // Greyed out when rm_waypoint is not running, so the button is never a
   // control that silently does nothing.
   $("drivebtn").disabled  = !en || !svc.waypoint;
   $("wpcancel").disabled  = !en || !svc.waypoint_cancel;
+  // Needs exactly one slam_toolbox process and the policy in map mode; the
+  // node re-checks both and says which one refused.
+  const inMap = (snap.slam||{}).policy_pose_source === "map";
+  $("resetmap").disabled  = !en || !svc.reset_map || !inMap;
+  $("resetmap").title = !svc.reset_map ? "slam_toolbox is not running (or runs twice)"
+                      : !inMap ? "policy_node is not in map mode" : "";
   $("drivebtn").title = svc.waypoint ? ""
     : "rm_waypoint is not running — launch with with_waypoint:=true";
-  for(const b of document.querySelectorAll("[data-src]")) b.disabled = !en || !svc.safety_params;
   // The jog pad follows rm_waypoint's availability: greyed out when the node
   // is not running, so the keys are never a no-op you have to diagnose. If it
   // goes away mid-press, stop rather than leaving the page thinking it drives.
@@ -1016,8 +1138,8 @@ function renderHeader(snap){
 }
 
 function render(snap){
-  renderHeader(snap); renderChain(snap); renderScan(snap);
-  renderSafety(snap); renderCmd(snap); renderObs(snap);
+  renderHeader(snap); renderSources(snap); renderChain(snap); renderScan(snap);
+  renderSafety(snap); renderCmd(snap); renderObs(snap); renderRoam(snap);
   renderWheels(snap); renderRates(snap);
   renderSlam(snap); renderWaypoint(snap); renderMap(snap);
 
@@ -1053,17 +1175,36 @@ $("killbtn").onclick  = () => post("kill");
 // a confirm dialog in front of a stop button is a hazard, not a safeguard.
 $("resetbtn").onclick = () => {
   if(confirm("ARM the robot?\n\nThis clears the kill. If command_source is "+
-             "'policy' and the policy is publishing, the robot can move "+
+             "a policy row and that policy is publishing, the robot can move "+
              "immediately.")) post("reset");
 };
-for(const b of document.querySelectorAll("[data-src]")){
-  b.onclick = () => {
-    const v = b.dataset.src;
-    if(confirm(`Set command_source to '${v}'?\n\nThis force-kills the robot; `+
-               `you will need to ARM again afterwards.`)) post("source",{value:v});
-  };
-}
+// Source buttons are built by renderSources; their handler is askSource.
 $("setgoal").onclick = () => post("goal",{x:+$("gx").value, y:+$("gy").value});
+// ROAM asks before turning ON: every running policy then picks its own next
+// goal, and one that is ARMED and selected moves at the next hand-off with no
+// further press. Turning it OFF never asks (like cancel, it only removes
+// autonomy) and does not stop the robot: the current goal stays, KILL is the
+// stop. The payload is explicit, never a toggle, so a stale page cannot flip
+// it the wrong way.
+$("roambtn").onclick = () => {
+  const ap = latest ? activePolicy(latest) : {};
+  const r = roamOf(latest, ap.debug), on = !(r && r.on);
+  if(on && !confirm("Turn ROAM on for every running policy?\n\nEach policy "+
+      "will pick its own next goal at random in free space the lidar sees "+
+      "(config/roam.yaml) when it arrives, stalls or times out, and keep "+
+      "going. If the robot is ARMED on a policy source it will move at the "+
+      "next hand-off without another press. Refused unless both lidar "+
+      "zones are on. Keep the KILL button in reach.")) return;
+  post("roam",{on});
+};
+$("resetmap").onclick = () => {
+  if(confirm("RESET the SLAM map?\n\nThis KILLS the robot, restarts slam_toolbox "+
+             "with an empty map anchored on the odometry frame, cancels any waypoint "+
+             "run, and re-fixes every running policy's goal "+
+             "from the goal x / y fields. You will need to ARM again afterwards. "+
+             "Takes a few seconds."))
+    post("reset_map",{x:+$("gx").value, y:+$("gy").value});
+};
 
 // The waypoint frame follows the frame the MAP is in, which is the frame the
 // operator clicked in. Sent explicitly rather than defaulted, and refused by
@@ -1094,8 +1235,8 @@ $("setgoalmap").onclick = async () => {
   }
   const frame = (mapData && mapData.frame_id) || "map";
   if(!confirm(`Set the POLICY goal to (${x.toFixed(2)}, ${y.toFixed(2)}) in `+
-              `'${frame}'?\n\nThis re-targets the NCP and resets its `+
-              `recurrent state. It does not arm and it does not drive.`)) return;
+              `'${frame}'?\n\nThis re-targets every running policy and resets `+
+              `their recurrent state. It does not arm and it does not drive.`)) return;
   await post("goal_map",{x, y, frame});
 };
 

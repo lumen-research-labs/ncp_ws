@@ -17,10 +17,10 @@ operator present with the kill switch in hand for any live/hardware step.
 2. **Replay tests** (`tests/replay/`) — run nodes/modules against committed
    fixture bags in `tests/fixtures/`. This is where interface drift between
    training-time and deployment-time preprocessing would show up.
-3. **Interface check** — if `scripts/check_interface.py` exists and a live
-   system or bag is available in this environment, run it. If not (e.g. no
-   robot reachable from this environment), report that it was skipped and
-   why, don't fail silently.
+3. **Contract check** — `tests/unit/test_lidar_contract.py` (part of the
+   unit tier) pins each profile's contract file, the launch profile table
+   and policy_node's supported versions against each other. There is no
+   separate script; the old `scripts/check_interface.py` stub is archived.
 4. **Build** — `colcon build --symlink-install` for the relevant package(s)
    if a workspace build hasn't been confirmed already this session.
 

@@ -97,7 +97,8 @@ ncp_ws/
 ├── config/
 │   ├── interface.yaml      # THE FROZEN CONTRACT — obs/action shape, units, control rate
 │   ├── safety_limits.yaml  # clamps, e-stop distances, timeouts
-│   └── topics.yaml         # canonical topic names
+│   └── topics.yaml         # the command-source table: the rows rm_safety
+│                           #   forwards; the launch and dashboard read it too
 ├── src/
 │   ├── rm_interfaces/  # custom msg/srv defs (ROBOT + WORKSTATION)
 │   ├── rm_safety/      # ROBOT — sole publisher of /cmd_vel
@@ -107,8 +108,11 @@ ncp_ws/
 │   ├── rm_dashboard/   # ROBOT — live web view. SUBSCRIBE-ONLY, publishes nothing
 │   ├── rm_waypoint/    # ROBOT — go-to-waypoint repositioning; publishes
 │   │                   #   /teleop/cmd_vel ONLY (an input to rm_safety)
-│   └── rm_tools/       # WORKSTATION only — bag analysis, export, schema check
-├── scripts/            # deploy.sh, fetch_bags.sh, check_interface.py
+│   └── rm_interfaces/  # BOTH — custom msg/srv
+├── scripts/            # deploy_to_robot.sh, deploy_upstream.sh, prep_robot.sh,
+│                       #   run_stack.sh, stack_down.sh, bench_*.sh + diagnostics/
+├── archive/            # retired code and docs, indexed in archive/README.md;
+│                       #   COLCON_IGNORE'd, never imported, never linked
 └── tests/
     ├── unit/           # pure-python, no ROS runtime
     ├── replay/         # nodes run against recorded bags
@@ -116,14 +120,17 @@ ncp_ws/
 ```
 
 Key interfaces / contracts:
-- **`/cmd_vel`** — published ONLY by `rm_safety`. All other sources
-  (`/policy/cmd_vel`, `/teleop/cmd_vel`) are inputs to the safety node, not
-  direct paths to the base driver.
+- **`/cmd_vel`** — published ONLY by `rm_safety`. All other sources (the
+  rows of `config/topics.yaml` `command_sources`: `/teleop/cmd_vel`,
+  `/policy/cmd_vel`, `/policy/m8v2/cmd_vel`, `/policy/m4/cmd_vel`) are
+  inputs to the safety node, not direct paths to the base driver.
+  `rm_safety/command_sources.py` is the table's loader; `rm_safety`
+  subscribes to every row and forwards the one named by `command_source`.
 - **`config/interface.yaml`** — the frozen obs/action contract. A shared
   schema loader (imported by both robot and workstation code) is the single
   source of ordering — never hand-written twice. `interface_version` bumps
   on any change; the policy node refuses to start on a version mismatch.
-- **`rm_tools`** — never a runtime dependency of `rm_safety` or `rm_policy`.
+- **`archive/`** — not part of the codebase: never built, imported, tested or linked (see the cruft rule in Daniel's CODING_PROMPT.md).
 
 Fail-closed is the governing principle everywhere: any error (stale message,
 NaN, exception) → publish zero velocity, never let the last command persist.
@@ -1598,7 +1605,345 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   the next drive, so the second half of A is contaminated — run B used the
   dashboard jog instead and had no e-stop at all.
 
+- 2026-10-08 (Daniel's first session on a new workstation, Pop!_OS + ROS 2
+  Jazzy, no torch): **bernard-1 BROUGHT UP, DRIVEN, AND THE 4.0.0 CONTRACT
+  BUILT.** Workstation: repo cloned, workstation target built under Jazzy,
+  446 tests green; NCP-on-Rosmaster found at `~/lumen/ncp` and symlinked to
+  the sibling path; `~/.ssh/lumen` works as `jetson@bernard-1`. Network:
+  RobotLab (Tenda, 192.168.4.0/24, no WAN) overlaps the lab WiFi
+  (192.168.4.0/22), so the laptop reaches the robot over an Ethernet cable
+  with a host-route-only NetworkManager profile (`robotlab-wired`, see the
+  offline handbook Part A) and keeps internet on WiFi. A 223-page offline
+  handbook PDF of all repo docs now lives at
+  `~/lumen/ncp_physical/ncp_ws_offline_handbook.pdf`.
+  Robot: booted with the usual post-power-cut state (clock in May,
+  `rosmaster_main.py` on ttyUSB1, `/dev/rplidar` -> base board); clock
+  pushed, `prep_robot.sh` ready, 490 tests green on the robot, full stack up
+  (16 nodes, one `/cmd_vel` publisher, all rates nominal, 11.0 V). Operator
+  drove four dashboard waypoints (two ARRIVED) and then ran the M4 policy
+  armed; battery read 10.8 V "low" by the end.
+  * **BUG FOUND, NOT YET FIXED:** `rm_waypoint/waypoint_node.py` `_finish`
+    picks `info` vs `warn` on one line; rclpy keys log call sites by line and
+    raises `ValueError('Logger severity cannot be changed between calls.')`
+    on the first ABORT after an ARRIVED. The tick handler fails closed (robot
+    stops) but overwrites the real abort reason (almost certainly the
+    6 s / 5 cm progress watchdog) with the logger error. Fix: two call sites.
+  * **OPEN ITEM 2 CLOSED:** the breakaway kick fires on hardware — 6
+    `front_right: stalled — applying breakaway kick` lines in
+    `~/stack_20261008_094055.log` on the robot, zero `still not turning after
+    3 breakaway kicks`.
+  * **INTERFACE 4.0.0 (branch `feat/720-beam-contract`, commits 62b45ac,
+    5bf9c71, f2dbff2; upstream `~/lumen/ncp` `feat/720-beam-270fov` @
+    bc1099d):** 720 beams over 270 deg, 724-dim observation, checkpoint
+    M8-v2 `s1436792` (sha256 `71cc50aeb734…`, 63% held-out, official BARN
+    0.219) exported on the training box (max action diff vs SB3 0.0).
+    Measured on the recorded TG30 fixtures: 2.1 rays per 0.375 deg bin, so
+    strict nearest-ray leaves 5.4-8.3% of bins empty; a +/-2-bin search
+    window leaves 1.2-1.4%. The 270 deg arc includes the chassis standoffs
+    (0.23 m at -119 deg on the open scan), masked via
+    `self_occlusion_zones_deg` with the safety file's sectors. New
+    `lidar_contract.py` reads the lidar block once for both nodes. 474
+    workstation tests green. **HARDWARE-VERIFIED in dry run (same day,
+    after the robot came back from a charge):** both deploys hash-verified,
+    519 tests green on the robot, stack up with 15 nodes and one `/cmd_vel`
+    publisher; `policy_node` logged `checkpoint sha256=71cc50aeb734…` and
+    accepted 4.0.0; the bridge logged `720 beams over 270 deg, search window
+    +/-2 bins, 2 self-occlusion zone(s)`; `/ncp/scan` spans -134.8125 to
+    +134.8125 deg at 0.375 deg (720 ranges); `/ncp_debug` carries a 724-dim
+    obs with the new hash and no fault; rates /scan 10.1, /ncp/scan 10.1,
+    /policy/cmd_vel 5.0, /cmd_vel 20.0 Hz. On a real scan the policy asked
+    for v 1.03 m/s, w 0.63 rad/s (clamped to 0.25 / 0.8 by rm_safety).
+    **Not yet driven armed** — that is the operator's next act. Battery
+    10.8 V at launch.
+  * **RESET MAP (branch `feat/dashboard-reset-map` on top of the 4.0.0
+    branch, commits b913f52 + a docs fix):** slam_toolbox 2.6.9 has no reset
+    service, so `slam.launch.py` now launches it `respawn=True` and the
+    dashboard's `reset_map` command kills the robot, cancels any waypoint,
+    SIGTERMs the one `async_slam_toolbox_node` (found by argv[0] basename in
+    /proc; refuses on 0 or 2), waits for a `map -> odom` stamped after the
+    kill, re-fixes the policy goal from the page's goal x/y, resets the
+    SLAM health counters, and returns KILLED. **Verified on hardware:**
+    pid 67924 -> 70432 in 2.8 s, goal re-fixed, 0 errors, counters reset.
+    Finding: the new map is anchored on the ODOM frame (map->odom restarts
+    at zero), so the robot's map pose after a reset equals its odom pose.
+    Consequence of respawn: a slam_toolbox crash also comes back with a
+    fresh map; the health panel's counters starting over is the tell.
+  * **POLICY PROFILES (branch `feat/policy-profiles`, commit 0cd2e67 on top
+    of the reset-map branch; upstream 97f293b adds `weights/actor_m4.pt`):**
+    `run_stack.sh profile:=m4` runs the M4 policy (3.0.0,
+    `config/interface_m4.yaml`, 32 beams over 180 deg, obs 36);
+    `profile:=m8v2` (default) the M8-v2 one. The policy modules now take
+    the layout from the contract (`lidar_contract.obs_dim`), policy_node
+    accepts {3.0.0, 4.0.0} and builds the network to the contract width, so
+    a mismatched contract/checkpoint pair refuses to start; the dashboard
+    header shows `checkpoint · interface · beams`. `consumer:=upstream` is
+    refused on m4 (vendored module fixed at 720). 499 workstation tests,
+    546 on the robot. **HARDWARE-VERIFIED 2026-10-09:** both checkpoints
+    deployed hash-verified; `profile:=m4 dry_run:=true` came up with the
+    bridge at 32 beams over 180 deg (window 0, no zones), `policy_node
+    checkpoint sha256=3c9bf0ee112b…`, `/ncp_debug` interface 3.0.0 / 32
+    beams / obs 36, 15 nodes, one `/cmd_vel` publisher, 0 errors; the
+    default profile relaunched live (KILLED) with 720 / 270 / 724 / sha
+    `71cc50aeb734…`, 16 nodes, 0 errors; the dashboard header showed
+    `checkpoint 71cc50aeb734 · interface 4.0.0 · 720 beams`. Battery was
+    10.5 V ("low") at that bring-up.
+  * **CRUFT ARCHIVED (commit 68fc5ea, per the new cruft rule in Daniel's
+    CODING_PROMPT.md):** `scripts/check_interface.py` (stub), `src/rm_tools`
+    (empty placeholder; workstation build is `rm_interfaces` alone now),
+    the never-implemented 2.0.0 contract doc, the Phase 1 session log, and
+    three `.gitkeep`s. All under `archive/` with an index; `COLCON_IGNORE`
+    and `tests/unit/test_archive_is_dead.py` keep it out of the codebase.
+    Candidate left in place: `docs/dev_env_setup.md` (previous operator's
+    Arch + Docker workstation).
+
+- 2026-10-09: **"NCP FAST DOES LOOP-DE-LOOPS" — DIAGNOSED ON HARDWARE, AND THE
+  CLAMP NOW SCALES THE WHOLE COMMAND.** Operator ran M8-v2 armed; it circled
+  left instead of heading for the goal. Probed the network on the robot's
+  CPU with a real scan (tests/fixtures/tg30_open_scan.yaml) and the goal
+  placed ahead / 90 deg left / 90 deg right / behind:
+  * **M8-v2 IGNORES THE GOAL.** Identical action (v +1.20, wz +0.36) for
+    every placement, including directly behind. Not a normalization artefact
+    — the goal dims' VecNormalize std is 0.82 / 0.45 and the normalized
+    values ranged -1.5..+1.4, nowhere near the +-10 clip. Learned
+    indifference: BARN's goal is always 10 m straight ahead down the
+    corridor (`GOAL_OFFSET = [0, 10]` in barn_gym/env.py), so goal bearing
+    carried no information the lidar did not. Reversing the scan flips the
+    turn: it is a corridor runner steering toward free space. **Re-targeting
+    cannot change its behaviour; evaluate it on an obstacle course.**
+    M4 by contrast DOES respond (wz 0.44 goal-left vs 0.14 goal-right).
+  * **The loops themselves were the per-axis clamp.** 1.2 m/s with
+    0.36 rad/s is a 3.3 m-radius arc; capping vx to 0.25 while passing wz
+    made it a 0.7 m circle (5x tighter). M4 never showed it because its
+    requested speed (~0.3-0.5) sat near the clamp.
+  * **The "always left" was the room:** live sector means showed the right
+    side and dead ahead at 0.3-0.5 m and the left side at 1.4-4.9 m.
+  * **FIX (branch `fix/uniform-velocity-clamp`, on top of
+    feat/policy-profiles):** `safety_logic.clamp_velocity` applies ONE scale
+    factor to vx, vy, wz — the largest s <= 1 that fits every axis — so the
+    commanded curvature survives at the capped speed. Never looser than
+    per-axis (final per-axis clamp guards rounding). Slow zone unchanged
+    (still vx alone, so turning away stays possible). 506 workstation tests.
+    `docs/safety_validation.md` §3d records it as unsigned. Consequence to
+    expect: the policy's whole motion is ~5x slower in time than it was
+    trained for; its recurrent dynamics do not know that.
+  * Noted, not yet fixed: on one sample the extreme right-edge policy bin
+    read 0.15 m — the chassis standoff leaking past the mask's -135 edge via
+    the search window. Widen the right zone past the arc edge.
+
+- 2026-10-13: **SWITCH THE LIVE POLICY FROM THE DASHBOARD (branch
+  `feat/source-per-policy` on top of fix/uniform-velocity-clamp; commits
+  8e69291, 380dae0, e84a98a, d763433, c7ff2a5).** `config/topics.yaml`
+  `command_sources` is now a live table of rows (`teleop`, `policy`, `m8v2`,
+  `m4`: topic, kind, and for our policy nodes a node name and debug stream),
+  loaded and validated by the new `rm_safety/command_sources.py` (refuses
+  `/cmd_vel` as an input, duplicate topics/streams/nodes, a missing or
+  mis-kinded `teleop` row, malformed rows). `safety_node` subscribes to every
+  row into its own buffer, forwards only the row `command_source` names, and
+  validates that name against the table at startup and on every runtime set
+  (still force-killing on change); the policy-only lateral check follows the
+  row's kind; `safety_logic.py` untouched. `ncp.launch.py profile:=` became
+  `profiles:=` (default `m8v2,m4`): one `policy_node_<name>` per profile on
+  its row's topic and debug stream, the scan bridge on the first listed,
+  `consumer:=upstream` on the `policy` row and needing `m8v2` first. The
+  dashboard builds one source button per row (a policy button greys until its
+  node publishes), follows an ACTIVE policy for the header, observation,
+  chain and command table (`rm_dashboard/sources.py`: the selected source if
+  a policy row, else the last selected, else the first live), and sends goal
+  re-targets, map-click goals and RESET MAP's re-fix to EVERY running policy
+  through its own `/<node>/set_parameters_atomically` (map clicks converted
+  against each policy's own pose); jog and waypoint refuse while any policy
+  row is selected. `record_run.sh` records every row's topics; `pose_ab.py`
+  gained `--policy`. Cruft archived (c7ff2a5): the three unread
+  `topics.yaml` keys. Safety-reviewer pass: no Critical; its warnings fixed
+  in 6c5b102 (whole-set parameter validation, stale-pose refusal on map
+  clicks, `/cmd_vel` refused as a debug stream, duplicate YAML rows refused,
+  launch refuses a `command_source` whose node it does not start). 570
+  workstation tests. **HARDWARE-VERIFIED the same evening:** deployed
+  6c5b102, 617 robot-tier tests, 17 nodes with `policy_node_m8v2` +
+  `policy_node_m4`, one `/cmd_vel` publisher, both policy topics and both
+  debug streams at 5.0 Hz, `/cmd_vel` 19.9 Hz, zero errors, CPU 42% idle
+  with both policies, 11.8 V; the safety start line names all four sources
+  and both checkpoint hashes are logged. Daniel switched `teleop -> m4` from
+  the page (force-killed as designed), armed, and drove M4; every re-target
+  landed on both nodes, map clicks converted per node. Design note: the
+  loader lives in `rm_safety` because the safety node is the table's
+  authority; the launch and the dashboard import it, never the reverse.
+  * **M4 "not aimed at the goal", measured live:** with the goal 1.65 m
+    BEHIND the robot (bearing -148 deg, normalised goal x -1.28, below the
+    -0.92 floor BARN ever produced) M4 asked for v +1.0 with wz alternating
+    +0.59/-0.28 (the known stationary limit cycle). Off-distribution: BARN's
+    goal is always ahead and episodes end on arrival. M4's goal response is
+    weak (+-0.15 rad/s modulation), the uniform clamp makes heading converge
+    4x slower than its dynamics expect, and the 0.4 m arrival latch misses
+    by half a metre, so the goal falls behind. Options offered: wider
+    `goal_reached_dist`, a fail-closed `goal_behind` guard, or retraining
+    with random goal bearings (the only real fix).
+  * **"Freezes when close" was the SLOW ZONE**, not the policy: live status
+    `SLOW / slow_zone / 0.30 m` while M4 asked for 1 m/s; no `GOAL REACHED`
+    all session. I had launched with both zones ON; Daniel chose BOTH OFF
+    (the launch default, the 2026-08-31 decision) and the stack was restarted
+    that way (KILL is the only stop; clamps, watchdogs and kill remain).
+  * **TRAP: `stack_down.sh` kills the SSH session that runs it** when that
+    session's command line sources `/home/jetson/ncp_ws/install/...` (the
+    catch-all `pkill -f` on the install prefix matches the remote shell).
+    Run it via `ssh bernard-1 bash -s <<EOF` with the sourcing inside, or
+    without sourcing the install on the command line. Recorded in the
+    robot-ssh skill.
+
+- 2026-10-23: **ROAM MODE (branch `feat/roam-mode` on top of
+  feat/source-per-policy; commits 844e165 plan, 64f1bda, b6e2322, 9b39e6c,
+  97e77f2).** Daniel asked for a mode where "waypoints are just set randomly
+  and the thing can run", and "if the robot takes too long the thing should
+  just switch the goal anyway". `policy_node` gained a runtime bool parameter
+  `roam`: on arrival (after `dwell_s`) or when a goal has been current for
+  `timeout_s` without arrival, the node draws a random robot-frame offset
+  within `config/roam.yaml` (1.0-2.5 m, within 45 deg of ahead, dwell 1 s,
+  timeout 30 s, seed 0) and fixes it from its current pose. A timed-out
+  goal is abandoned, never retried. `rm_policy/roam.py` is the pure half
+  (limits loader, `RoamSequencer` with the clocks; switching on restarts
+  them so an old goal gets a full timeout). `_fix_goal` is now the ONE
+  place the goal is written (first odom pose, first map pose, parameter
+  set, roam hand-off); it also zeroes the fed-back previous action, since a
+  new goal is a new episode. `/ncp_debug/<p>` carries a `roam` block (on,
+  n, timeouts, last_reason, goal_age_s). The launch hands every policy
+  node `config/roam.yaml`; `roam` is NOT a launch argument. The dashboard
+  got a `roam` command through the new `_set_on_policies` aggregation (the
+  `_retarget` loop generalised; result key `retargeted` -> `applied`), a
+  ROAM button that confirms on enable only, and a pill from the active
+  policy's debug stream. `docs/roam.md` is the how-to. 611 workstation
+  tests. **DEPLOYED to bernard-1 (70f4b77) and DRY-RUN VERIFIED the same
+  day** after the robot came back a second time: 7 packages built in 10 s,
+  stack up with 0 errors, both policy nodes log `roam off; limits from
+  config/roam.yaml: 1.0-2.5 m within +-45.0 deg`. With rm_safety KILLED and
+  the source on `teleop`: `ros2 param set /policy_node_m4 roam true` logged
+  `roam ON ...; current goal kept`, 30 s later `goal fixed (roam #1 timeout
+  after 30 s; totals 1 hand-offs, 1 timeouts) at (2.083, 0.894) in map`
+  (offset 2.26 m at 23 deg, inside the limits), `/cmd_vel` stayed at zero
+  with exactly one publisher, and `roam false` logged `roam OFF after 1
+  hand-off(s), 1 timeout(s); current goal kept`.
+  * **THE FIRST LIVE RUN DROVE INTO A WALL** (same day, Daniel on `m4`).
+    The goal was drawn BLIND (a random distance and bearing with no look at
+    the lidar) and both lidar zones are OFF by default in `ncp.launch.py`,
+    so nothing stood between a goal behind a wall and the wall but KILL. My
+    design, and wrong for a mode whose point is to keep going: "open floor
+    all round" is not a precaution after the robot has turned twice. Fixed
+    the same day (b6e3f4c and the dashboard commit after it): (1) the draw
+    must land in free space the lidar sees: the strip to the goal plus
+    0.5 m clearance, 0.2 m half-width, must hold no return, no-return rays
+    are UNKNOWN not free (half the rays over the strip must be valid), up
+    to 32 random candidates then the shortest leg across the cone, and with
+    none free the node HOLDS the current goal, warns, and retries at 1 Hz
+    (`holding`, `held` on the debug stream; 26 ms worst case per draw on a
+    2020-ray scan); (2) a progress watchdog, rm_waypoint's rule: 10 s
+    without 5 cm closer and the goal is abandoned as `stalled`, `timeout_s`
+    30 s stays the ceiling; (3) the dashboard REFUSES ROAM on unless
+    `safety_node` reports both zones on, read live at the press, and
+    `roam.yaml` and `docs/roam.md` say to launch with
+    `stop_zone_enabled:=true slow_zone_enabled:=true`. A shell
+    `ros2 param set roam true` bypasses the dashboard guard; the node cannot
+    see the zones (settled: no safety state in policy_node), so the doc
+    carries the rule.
+  * **RETREAT OUT OF A STOP-ZONE E-STOP (same day, Daniel: "if it does
+    emergency stop, go along the most recent path backwards a bit and reset
+    the goal"; "things won't be moving").** A safety-review pass (the
+    rm-safety-reviewer brief, run as a Plan agent) rejected my draft: a
+    reverse that outlives its source (the latch branch returns before the
+    command-timeout check), no ramp in that branch, a yaw tolerance the
+    actor's own `v < 0` output could satisfy, a release range above the
+    slow zone that never clears in this room, and commanded-velocity
+    integration as "distance". The shipped design (e3f758b and the
+    rm_policy commit after it): in `safety_logic` precedence 3 a FRESH,
+    PURE, STRAIGHT reverse (vx < 0, vy and wz exactly 0) passes capped to
+    `estop.retreat_max_vx` (0.12, the only measured reverse speed) and
+    ramped, as SLOW / `stop_zone_retreat`, latch kept; a carried
+    `retreat_clear_count` climbs only on ticks where that reverse passes
+    with the wide-arc min_range >= `retreat_release_range_m` (0.30) and at
+    `retreat_release_ticks` (10) the latch clears on its own; a clear scan
+    with no reverse never releases. `SafetyStatus` gained `command_topic`.
+    `policy_node` subscribes `/safety/status` for this one decision
+    (`rm_policy/retreat.py`): on a fresh STOPPED/stop_zone while roaming,
+    selected, with its last request forward, it publishes straight reverse
+    without the network until the latch releases or `retreat_m` (0.3) is
+    covered, then roam draws (`retreated`); timeout 8 s holds and warns;
+    kill, stale inputs, roam off, source change or a pose jump abort with
+    zero. One retreat per goal, 20 s cooldown. Recorded as UNSIGNED in
+    docs/safety_validation.md 3e. First live try: the robot sat PINNED in the
+    slow band (min_range 0.20 m, policy asking 0.84, rm_safety passing 0.009)
+    with no latch and no retreat: the slow scale reaches zero exactly at the
+    stop boundary, so a forward push never latches, and the slow zone scaled
+    reverse like forward. Fixed the same day: a pure straight reverse in the
+    slow band passes capped to retreat_max_vx instead of scaled, and the
+    retreat also starts when SLOW with min_range < retreat_pinned_range_m
+    (0.30) and no goal progress for progress_window_s (`pinned`). Second
+    live try: retreat, then forward into the same wall, again and again.
+    The log shows why: every stall drew its goal on draw 56 of the sweep,
+    i.e. BEHIND the robot (nothing ahead was free), and M4 cannot steer to
+    a goal off its nose, so it pushed forward and stalled. Daniel: "maybe
+    it needs to turn around". Added a TURN phase (`TurnController`): after
+    any roam hand-off whose goal is more than turn_tolerance_deg (15) off
+    the nose the node turns in place at turn_wz (0.5 rad/s, above the
+    dead band) until the goal is within tolerance, only with nothing
+    then the policy starts with the goal ahead; a retreat cancels a turn;
+    the roam clocks restart when the turn is done. Third live try: pinned
+    again with the draw holding and the retreat refused by my
+    one-retreat-per-goal rule, so nothing moved. Daniel: "turn 90 to 180",
+    then "turn to whatever angle will give it the most open space; if
+    things are close it doesn't matter much since this can purely rotate".
+    Now: a retreat always ends in a RECOVERY TURN toward the deepest
+    robot-width free strip in the scan (any angle, `recovery_bearing`), the
+    goal is drawn after it, the per-goal rule is gone (the 20 s cooldown
+    bounds retreats), and turn_clear_m is 0.0 by his decision (the corners
+    sweep 0.23 m; a touch while rotating in place is accepted).
+  * **Second live run (zones on): the robot reached its first goal and HELD
+    there** ("no candidate goal in free space"). The captured scan
+    (`tests/fixtures/tg30_roam_hold_scan.yaml`, 2020 rays, 29 % no-returns)
+    shows two things. (a) The lidar's own standoffs at 0.07 m and the
+    chassis corners at 0.19-0.23 m are in every scan, and a 0.07 m return
+    lies inside the strip of EVERY bearing within 90 deg of it, so the
+    whole circle read blocked: returns under `self_radius_m` (0.25 m) are
+    now the robot's own body, never obstacles (1645ff3). (b) The robot sat
+    in clutter (objects 0.41 m to both sides, 1.0 m ahead) where no 1.0 m
+    leg with 0.5 m clearance existed in ANY direction; the shortest leg is
+    now 0.6 m (above the 0.4 m latch), the clearance 0.3 m (the stop zone
+    is on for roam), and the fallback tries the shortest leg all round,
+    nearest heading first, before holding. Verified against a fresh scan
+    from the same spot: draws of 0.6-0.7 m ahead, free. Daniel is placing
+    physical obstacles along the glass wall (the lidar does not see glass),
+    so no map-frame fence was built. **The live run continues.**
+  * Also this day: the M9 Gazebo fine-tune finished on the box 2026-10-17
+    (best 0.52 in Gazebo vs 0.46 zero-shot; M9 still not exported to the
+    robot), the three repos were pushed to GitHub (`lumen-research-labs/
+    ncp_ws` five branches, `NCP-on-Rosmaster` `feat/720-beam-270fov`, new
+    private `optomotive`), and bernard-1 came back after a week off the
+    network (clock pushed, stack up with the default profiles).
+
 ## 4. Current Goal
+
+**INTERFACE 4.0.0 — THE FULL-SENSOR POLICY (2026-10-08, branch
+`feat/720-beam-contract`).** The observation is now 724 dims: 720 lidar beams
+over 270 deg (BARN's native UST-10LX layout) + 2 goal + 2 previous action, and
+the checkpoint is **M8-v2 snapshot `s1436792`** (sha256 `71cc50aeb734…`, 63%
+held-out, official BARN 0.219 — the project best), exported from the training
+box with max action diff vs SB3 of 0.0. What changed in code: the vendored
+`ncp_policy.py` (BEAMS/FOV_DEG only; architecture unchanged), a `±2-bin
+search window` and `self_occlusion_zones_deg` in `scan_resampler` (the TG30
+contributes ~2 rays per 0.375 deg bin with ~30% dropout, and the 270 deg arc
+now sees the chassis standoffs the 180 deg arc excluded), `lidar_contract.py`
+so `policy_node` and `scan_bridge_node` read the lidar block from
+`interface.yaml` in one place and refuse to start if it disagrees with the
+vendored constants. Safety, base, clamps and zones are untouched. Upstream
+`~/lumen/ncp` carries the matching change on `feat/720-beam-270fov` @
+`bc1099d`. Hardware status is in the §3 entry for 2026-10-08. **Both policies
+run at once (branch `feat/source-per-policy`, 2026-10-13): `ncp.launch.py
+profiles:=m8v2,m4` (the default) starts `policy_node_m8v2` and
+`policy_node_m4` on their own `config/topics.yaml` rows, and `command_source`
+(`teleop` / `policy` / `m8v2` / `m4`, the dashboard's source buttons) picks
+the one `rm_safety` forwards. A switch is a parameter set, force-kills as
+before, and never restarts the stack. Goals re-target every running policy.
+The dashboard header names the policy the page follows.** Roam (the
+dashboard's ROAM button, or `ros2 param set /policy_node_m4 roam true`) lets
+each policy node draw its own next goal on arrival or timeout; see
+`docs/roam.md` (2026-10-23, not yet driven on hardware).
 
 **THE NCP DEBUG TEST HAS RUN END TO END ON HARDWARE (2026-08-29 s2).** One
 command brings up the whole stack, the policy drives the wheels through
@@ -1754,7 +2099,29 @@ Items 1, 2b, 3, 4 and 7 of the previous list are DONE. What remains:
 10. Check whether bernard-2 has the same firmware sign fault (if yes it is
    systemic).
 
-### Robot state at end of 2026-08-29 session 8 (LATEST)
+### Robot state at end of 2026-10-23 (LATEST)
+
+bernard-1 on `192.168.4.100` over the wired RobotLab link. `~/ncp_ws` on the
+robot is at `feat/roam-mode` **8738ef9**, colcon-built, **763 robot tests**.
+The stack was brought up by the agent with
+`bash scripts/run_stack.sh stop_zone_enabled:=true slow_zone_enabled:=true`
+(ROAM needs both zones on; the dashboard refuses it otherwise) and left
+KILLED, source `teleop`, ROAM off. To roam: dashboard, select `m4`, ROAM
+(confirm), ARM, KILL in hand. The robot dropped off the network twice during
+the day (battery suspected); it was back each time.
+
+What roam does now, in order, when it meets something: stalls the goal
+(10 s, no progress), backs straight out (rm_safety passes only that under the
+latch or pinned in the slow band), turns in place toward the deepest free
+strip the scan shows, draws a new goal ahead in free space, drives. Owed:
+the live run of that whole sequence (the retreat and the recovery turn have
+run their unit, replay and dry-run tests, not the floor), `retreat_m`,
+`timeout_s`, `progress_window_s` set from a real run, the yaw-at-0.15 m open
+item, M9's export (not deployed), and the Phase 2 sign-off rows for the
+retreat (safety_validation.md 3e). A fresh workstation: `docs/workstation_setup.md`
+and `scripts/setup_workstation.sh`.
+
+### Robot state at end of 2026-08-29 session 8
 
 bernard-1 on its static IP `192.168.4.100`, **fresh battery 12.1 V**, clock
 pushed from the workstation. `~/ncp_ws` is at the deployed branch, colcon-built
@@ -1812,7 +2179,7 @@ and deployed; workstation and robot verified byte-identical for every file
 touched. Results sheet is `~/ncp_ws/velocity_accuracy.csv` on the robot
 (pre-correction copy at `.csv.bak`).
 
-Offline work available any time: the 3.0.0 contract doc refresh, a clear-path
+Offline work available any time: a clear-path
 open-space bag (operator), `ros2 topic delay` latency capture.
 
 Settled, do not re-open:
@@ -2043,6 +2410,52 @@ Settled, do not re-open:
 - **`bench_down.sh` RESTARTS the vendor `Mcnamu_driver_X3`**, which then holds
   the base-board serial port. Always re-run `prep_robot.sh` after it
   (2026-08-29).
+- **The velocity clamps scale the WHOLE command by one factor** (operator,
+  2026-10-09). Capping axes independently reshapes the command — a 3.3 m arc
+  became a 0.7 m circle — and that is what "NCP FAST loops" was. Never looser
+  than per-axis. The slow zone still scales vx alone on purpose.
+- **M8-v2 does not steer to the goal** (measured 2026-10-09): identical
+  actions for a goal ahead, beside or behind. BARN's goal is always straight
+  ahead, so the network learned corridor-running from the lidar. Judge it on
+  an obstacle course; goal-seeking needs retraining with randomized goal
+  bearings.
+- **ROAM on asks; ROAM off never asks and never stops the robot** (operator,
+  2026-10-23). Roam is a parameter set on the policy nodes, routed exactly
+  like a goal; it cannot arm or select a source. Off keeps the current goal.
+  KILL is the stop. A timed-out goal switches anyway and is never retried.
+- **`policy_node` does not read `/safety/status`** (2026-10-23). The
+  proposer's behaviour must not depend on the arbiter's state, and "not
+  driving" is also true of the unselected policy node, so a roam pause on
+  KILLED would be a half-truth. Timeouts count while killed; read them over
+  an armed window.
+- **`_fix_goal` is the one place the goal is written** (2026-10-23): first
+  odom pose, first map pose, parameter set, roam hand-off. A new goal clears
+  the latch, resets the recurrent state and zeroes the fed-back previous
+  action. Do not add a fifth writer.
+- **A latched robot may back STRAIGHT out under a fresh pure-reverse command,
+  and the latch releases only after N clear ticks DURING that reverse**
+  (operator, 2026-10-23; unsigned, safety_validation.md 3e). Nothing else
+  re-arms it: an obstacle that walks away still needs RESET. No yaw and no
+  strafe under the latch, ever: the stop radius sits inside the chassis
+  corners and the actor's own output can be `v < 0`.
+- **`policy_node` reads `/safety/status` for exactly one decision, the
+  retreat** (2026-10-23, re-opening the same-day "no safety state" item for
+  that input only). No pause on KILLED, no arming, no source logic from it;
+  pinned by `tests/unit/test_retreat.py`.
+- **"ROAM off never stops the robot" has one footnote:** ROAM off during a
+  retreat ends the reverse (zero published) on a robot that is in a latched
+  e-stop.
+- **OPEN: yaw at the 0.15 m stop radius can sweep a chassis corner into the
+  obstacle.** `safety_logic`'s "yaw is not scaled in the slow zone"
+  justification was written for 0.35 m; at 0.15 m the corners (0.19-0.23 m
+  from the lidar) lie outside the stop circle. Found by the 2026-10-23
+  review; not fixed; noted in the code.
+- **ROAM runs with BOTH lidar zones ON** (2026-10-23, after the wall). The
+  launch's zones-off default is for evaluating a policy on a corridor with
+  an operator's goal, not for an autonomous goal loop. The dashboard refuses
+  ROAM on otherwise and `roam.yaml` says why. The draw is free-space-checked
+  against the lidar, but that keeps the GOAL out of walls; the path to it
+  is still the policy's, and the policy's avoidance is what it is.
 
 ### Remote-command gotchas
 

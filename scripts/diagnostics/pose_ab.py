@@ -54,10 +54,12 @@ Preconditions, CHECKED INSIDE THE MEASUREMENT (not asserted in a print):
 Subscribes:
     /tf, /tf_static via tf2   map -> odom (the correction), map -> base_footprint
     /odom            [nav_msgs/Odometry]      pose + twist, distance driven
-    /policy/cmd_vel  [geometry_msgs/Twist]    yaw sign flips (the limit cycle)
+    <policy row>     [geometry_msgs/Twist]    yaw sign flips (the limit cycle);
+                                              --policy names the
+                                              config/topics.yaml row
     /safety/status   [rm_interfaces/SafetyStatus]  reason distribution
     /scan_sanitized  [sensor_msgs/LaserScan]  zero count — SLAM's real input
-    /ncp_debug       [std_msgs/String]        policy_node's own pose_source
+    <its debug>      [std_msgs/String]        that policy node's own pose_source
 
 Publishes:
     nothing. Ever.
@@ -73,6 +75,7 @@ Failure mode:
 from __future__ import annotations
 
 import argparse
+import pathlib
 import csv
 import json
 import math
@@ -97,6 +100,9 @@ from rm_interfaces.msg import SafetyStatus
 # it means the CSV and the dashboard panel cannot disagree about what counts
 # as a loop closure.
 from rm_dashboard.slam_health import SlamHealth
+
+# The repo this script lives in: scripts/diagnostics/pose_ab.py -> parents[2].
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 _MAP_FRAME = "map"
 _ODOM_FRAME = "odom"
@@ -162,7 +168,7 @@ def _yaw_from_quat(q) -> float:
 
 
 class PoseAB(rclpy.node.Node):
-    def __init__(self) -> None:
+    def __init__(self, policy_topic: str, debug_topic: str) -> None:
         super().__init__("pose_ab")
 
         self._tf_buffer = tf2_ros.Buffer()
@@ -219,10 +225,10 @@ class PoseAB(rclpy.node.Node):
         # path would silently receive nothing from /scan_sanitized — the
         # mismatch class that has cost this project two sessions.
         self.create_subscription(Odometry, "/odom", self._on_odom, 10)
-        self.create_subscription(Twist, "/policy/cmd_vel", self._on_policy, 10)
+        self.create_subscription(Twist, policy_topic, self._on_policy, 10)
         self.create_subscription(SafetyStatus, "/safety/status", self._on_status, 10)
         self.create_subscription(LaserScan, "/scan_sanitized", self._on_scan, 10)
-        self.create_subscription(String, "/ncp_debug", self._on_debug, 10)
+        self.create_subscription(String, debug_topic, self._on_debug, 10)
 
     # -- callbacks ---------------------------------------------------------
 
@@ -501,10 +507,24 @@ def main(argv=None) -> int:
     parser.add_argument("--force", action="store_true",
                         help="record even if a precondition fails. Do not use "
                              "to get past a duplicate stack — fix the stack.")
+    parser.add_argument("--policy", default="m8v2",
+                        help="which config/topics.yaml policy row to watch "
+                             "(its command topic and debug stream); default m8v2")
     args = parser.parse_args(argv)
 
+    # The row's topics come from the same table rm_safety and the launch use.
+    sys.path.insert(0, str(_REPO_ROOT / "src" / "rm_safety"))
+    from rm_safety.command_sources import load_command_sources
+    sources = load_command_sources(str(_REPO_ROOT / "config" / "topics.yaml"))
+    source = sources.get(args.policy)
+    if source is None or not source.is_policy or not source.debug:
+        print(f"--policy must name a policy row with a debug stream: "
+              f"{sorted(n for n, s in sources.items() if s.is_policy and s.debug)}",
+              file=sys.stderr)
+        return 2
+
     rclpy.init()
-    node = PoseAB()
+    node = PoseAB(source.topic, source.debug)
     try:
         # Let discovery settle before judging what is running: a fresh node
         # sees an empty graph for the first second or so, and "0 /cmd_vel

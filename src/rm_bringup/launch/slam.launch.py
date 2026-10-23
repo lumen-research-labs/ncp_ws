@@ -37,7 +37,7 @@ Launch arguments:
                  scan_sanitizer node this file also starts. NOT the raw /scan:
                  ~31-39% of rays are that sentinel and slam_toolbox does not
                  know it means "nothing there". NOT /ncp/scan either — that is
-                 32 beams over the forward 180 deg, reduced for the policy;
+                 720 beams over the forward 270 deg, reduced for the policy;
                  scan matching wants every ray and the full 360 deg.
 
 Failure mode:
@@ -76,7 +76,7 @@ def generate_launch_description() -> LaunchDescription:
                         "sanitizer's docstring; ~31-39%% of TG30 rays are a "
                         "0.0 no-return sentinel that slam_toolbox does not "
                         "know about. NEVER /ncp/scan either: that is the "
-                        "reduced 32-beam forward-180 policy input.",
+                        "reduced 720-beam forward-270 policy input.",
         ),
 
         # Full-resolution /scan with the 0.0 no-return sentinel rewritten to
@@ -94,11 +94,23 @@ def generate_launch_description() -> LaunchDescription:
                 "output_topic": "/scan_sanitized",
             }],
         ),
+        # respawn=True is what makes the dashboard's RESET MAP control work:
+        # slam_toolbox 2.6.9 has no reset service, so a fresh map is a restart
+        # of this process. The dashboard terminates it and the launch system
+        # brings it back here with the same parameters and an empty pose
+        # graph. Consequence worth knowing: a slam_toolbox CRASH also comes
+        # back silently with a fresh map. The dashboard's SLAM panel shows it
+        # (correction history and loop-closure count start over) and the
+        # launch log records the exit. stack_down.sh is unaffected: it stops
+        # the launch parent before the children, and a shutting-down launch
+        # does not respawn.
         Node(
             package="slam_toolbox",
             executable="async_slam_toolbox_node",
             name="slam_toolbox",
             output="screen",
+            respawn=True,
+            respawn_delay=0.5,
             parameters=[
                 LaunchConfiguration("params_file"),
                 # use_sim_time false is explicit, not inherited: bernard-1 has

@@ -133,6 +133,10 @@ more"**:
 
 **Never "simplify" this into a start/stop pair.**
 
+Since 2026-10-23 a pure straight reverse also passes rm_safety's stop-zone
+latch at a capped speed (the S key backs a latched robot out without RESET);
+see `rm_safety/README.md`, "Stop-zone retreat".
+
 Unlike an autonomous waypoint, jog **allows reverse** — backing out of a corner
 is exactly what repositioning needs, and a human is watching. A jog cancels an
 active waypoint.
@@ -175,7 +179,7 @@ about what the wheels do — `rm_safety` would zero the command anyway — but t
 operator is told the run is over instead of watching a controller command a
 robot that is not listening.
 
-A waypoint sent while `command_source == "policy"` is **refused up front**,
+A waypoint sent while `command_source` names a policy row is **refused up front**,
 rather than accepted, never moving, and then aborting with a stall complaint.
 
 A waypoint in the wrong frame is **refused, not converted** — silently

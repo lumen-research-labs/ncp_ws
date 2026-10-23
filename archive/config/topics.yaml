@@ -1,0 +1,18 @@
+# Keys retired from config/topics.yaml on 2026-10-13 (last live in commit
+# 7238808). Nothing ever read them, and each named a topic that does not
+# exist in this stack: rm_policy has no dry-run debug topic, no node publishes
+# /policy/status, and /cpt/* belongs to the previous team's stack, which must
+# never run alongside rm_safety (the warning about that stays in the live
+# file's header). Kept here, verbatim, so the reasoning is one `cat` away.
+
+debug:
+  # Where rm_policy publishes when dry_run is true (which is the default).
+  policy_cmd_vel_debug: /policy/cmd_vel_debug
+
+status:
+  policy: /policy/status
+
+foreign:
+  # Topics owned by the previous team's stack. Listed so nothing of ours ever
+  # collides with them. We do not publish or subscribe to any of these.
+  cpt_namespace: /cpt/*

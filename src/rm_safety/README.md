@@ -20,6 +20,7 @@ from that one fact.
 |---|---|
 | `rm_safety/safety_logic.py` | The decision core. **Pure**: no ROS, no I/O, no clock reads, no logging. One function, `evaluate()`, takes a snapshot and returns a `Decision`. |
 | `rm_safety/safety_node.py` | The ROS2 shell. Owns the timer, the subscriptions, the services, the kill-state file — and the sole `/cmd_vel` publisher. |
+| `rm_safety/command_sources.py` | The command-source table, loaded and validated from `config/topics.yaml`. Pure. `ncp.launch.py` and `rm_dashboard` import it so all three agree on every name and topic; nothing here imports them. |
 
 The split is deliberate and must not be collapsed. `safety_logic` has no clock
 and no I/O, so every safety decision in the system is reachable from a unit
@@ -31,22 +32,26 @@ and the replay tier possible.
 ## The pipeline
 
 ```
-/policy/cmd_vel  ─┐
-/teleop/cmd_vel  ─┤
-/scan            ─┼──►  safety_node  ──►  safety_logic.evaluate()  ──►  /cmd_vel
-/odom            ─┘                                    │
-                                                       └──►  /safety/status
+/teleop/cmd_vel       ─┐  one subscription per row of
+/policy/cmd_vel       ─┤  config/topics.yaml command_sources
+/policy/m8v2/cmd_vel  ─┤
+/policy/m4/cmd_vel    ─┼──►  safety_node  ──►  safety_logic.evaluate()  ──►  /cmd_vel
+/scan                 ─┤                                    │
+/odom                 ─┘                                    └──►  /safety/status
 ```
 
 **Only ONE command input is live at a time**, selected by the `command_source`
-parameter (`"teleop"` or `"policy"`). The other is ignored entirely — it is not
-merged, arbitrated, or fallen back to.
+parameter, which names a row of the table (`teleop`, `policy`, `m8v2`, `m4`).
+The others are ignored entirely. They are not merged, arbitrated, or fallen
+back to. The row's `kind` (`teleop` or `policy`) decides whether the
+policy-only checks apply, so a new policy row gets the lateral-velocity check
+without any change here.
 
 ### Topics and services
 
 | | |
 |---|---|
-| Subscribes | `/policy/cmd_vel`, `/teleop/cmd_vel` (Twist) · `/scan` (LaserScan) · `/odom` (Odometry) |
+| Subscribes | every `command_sources` row's `topic` (Twist) · `/scan` (LaserScan) · `/odom` (Odometry) |
 | Publishes | **`/cmd_vel`** (Twist) @ 20 Hz — sole publisher · `/safety/status` (`rm_interfaces/SafetyStatus`) @ 10 Hz |
 | Services | `/safety/kill` (`std_srvs/Trigger`) · `/safety/reset` (`std_srvs/Trigger`) |
 
@@ -68,6 +73,7 @@ Every one of them produces **zero velocity** except the last two.
 | 2 | `/scan` older than `scan_timeout_ms`, **or** no valid return anywhere in the monitored arcs | `STOPPED` | `scan_stale` |
 | 3 | `/odom` older than `odom_timeout_ms` | `STOPPED` | `odom_stale` |
 | 4 | Obstacle inside `stop_zone_m` for `consecutive_scans_to_trigger` scans — **latches** | `STOPPED` | `stop_zone` |
+| 4a | Latched, and the source sends a fresh, pure, straight reverse: passed at `<= retreat_max_vx`, ramped, latch kept (see "Stop-zone retreat") | `SLOW` | `stop_zone_retreat` |
 | 5 | Active command source silent for `command_timeout_ms` | `STOPPED` | `command_timeout` |
 | 6 | Obstacle inside `slow_zone_m` | `SLOW` | `slow_zone` / `stop_zone_prelatch` |
 | 7 | Nominal — clamp, acceleration-limit, pass through | `OK` | `ok` |
@@ -108,6 +114,15 @@ Arming stays a separate, explicit act. Every *other* parameter on this node is
 read once at startup and a runtime `param set` is **rejected** with a reason —
 not accepted and silently ignored, which is what it used to do.
 
+The value is validated against the table at startup and on every set. A name
+that is not a row is refused with the row names in the reason. The table
+itself (`topics_path`, default `config/topics.yaml`) is read once; a table
+that names `/cmd_vel` as an input or a debug stream, lists one topic or one
+row twice, or lacks a `teleop` row is fatal at startup. A set that carries
+several parameters is validated whole before `command_source` is applied, so
+the forwarded row and the readable one cannot disagree.
+`tests/unit/test_command_sources.py` pins the rows and the refusals.
+
 ### Two zones, two arcs
 
 The slow zone and the stop zone have **separate arcs**, and this is not an
@@ -128,11 +143,11 @@ couplings are pinned by `tests/unit/test_safety_arc_split.py`.
 
 ### The lateral clamps stay, even though the policy has no lateral action
 
-Interface 3.0.0 has a 2-dim action `[vx, wz]` — no strafe. But `max_vy` and the
+Interface 4.0.0 has a 2-dim action `[vx, wz]` — no strafe. But `max_vy` and the
 lateral e-stop arcs remain, because **`/teleop/cmd_vel` is also an input** and
 an operator may legitimately strafe while repositioning. A non-zero `linear.y`
-arriving on `/policy/cmd_vel` is treated as a **bug, not a command**: zeroed and
-warned about, never silently clamped.
+arriving on any `policy`-kind row is treated as a **bug, not a command**: zeroed
+and warned about (naming the topic), never silently clamped.
 
 ### The authority gap is intentional
 
@@ -202,7 +217,9 @@ hard is always safe; ramping down a stop is not.
 `config/safety_limits.yaml` is the **only** source of numeric limits. No numeric
 literal appears in a logic body. The node loads it at runtime via
 `Limits.from_dict()` and **raises on init** if it cannot be read or parsed — it
-never starts in an unknown-limits state.
+never starts in an unknown-limits state. `config/topics.yaml` is the only
+source of command-source names and topics, loaded the same way through
+`command_sources.load_command_sources()`.
 
 ## Failure mode
 
@@ -221,3 +238,34 @@ Twist best-effort.
   real `evaluate()` with the real `safety_limits.yaml`, ROS-free.
 - Hardware tier: `docs/safety_validation.md` §3. **Operator only** — never run
   by an agent.
+
+## Stop-zone retreat (2026-10-23, not signed off)
+
+The one exception to "latched means zero", added for ROAM so a robot that
+creeps to within `stop_zone_m` of a wall can back itself out instead of
+waiting for a human. While the stop zone holds the robot, a command that is
+**fresh** (within `command_timeout_ms`), **pure** (`vy` and `wz` exactly
+zero) and **reverse** (`vx < 0`) passes, capped to `retreat_max_vx` and
+ramped by the acceleration limiter, as `SLOW` / `stop_zone_retreat`. Anything
+else stays zero. Straight only: the stop radius sits inside the chassis
+corners, so any yaw sweeps a corner through the obstacle, and the trained
+actor's own output can be `vx < 0`, so a yaw tolerance would pass a network
+tick through a latched e-stop. Every source gets it, the jog included.
+
+**The latch releases itself only during such a retreat.** A counter climbs on
+each tick the reverse is passed with the wide-arc `min_range` at or above
+`retreat_release_range_m`, resets on any other tick, and at
+`retreat_release_ticks` the latch clears; `safety_node` logs the edge. A clear
+scan with no reverse commanded never releases: Phase 2's "no auto-resume"
+holds for everything but a commanded retreat. The rear is unmonitored, so this
+is a blind reverse the operator accepts for a static scene with KILL in hand.
+The same reverse passes capped, unscaled, in the slow band (precedence 6): the
+slow cone looks forward only, and the slow scale reaches zero exactly at the
+stop boundary, so a robot pinned there by a forward push would otherwise never
+back out. `retreat_max_vx: 0` (or the key absent) switches the provision off.
+Recorded in `docs/safety_validation.md` §3e as unsigned.
+
+## Clamps scale the whole command (2026-10-09)
+
+`safety_logic.clamp_velocity` applies one factor to `vx`, `vy` and `wz`, the largest factor that brings every axis inside its cap. The old per-axis clamp kept each axis legal but changed the command's shape. The M8-v2 policy asks for about 1.2 m/s with 0.36 rad/s, a 3.3 m-radius arc; capping `vx` alone made that 0.25 m/s with 0.36 rad/s, a 0.7 m circle, and the robot looped where the policy meant to arc. Uniform scaling keeps the curvature at the capped speed. It is never looser than per-axis clamping. The slow zone is unchanged and still scales `vx` alone, because a robot near an obstacle must keep its ability to turn away.
+

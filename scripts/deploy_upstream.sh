@@ -11,7 +11,7 @@
 #
 # Why it exists at all: bernard-1 has NO INTERNET (RobotLab has no WAN
 # uplink), so `git pull` on the robot cannot reach GitHub. The workstation is
-# the only route by which the 2 MB `weights/actor.pt` gets onto the robot.
+# the only route by which the checkpoints in `weights/` get onto the robot.
 #
 # Mechanism: `tar | ssh tar -x`. Chosen over rsync because rsync's presence on
 # a JetPack image is not guaranteed and a missing binary would fail late,
@@ -24,7 +24,8 @@
 # then the robot runs a different policy than the workstation believes. So
 # every transferred file's sha256 is compared afterwards, and the script exits
 # non-zero on any mismatch. The checkpoint hash printed here is the same one
-# policy_node logs at startup and publishes on /ncp_debug, so all three can be
+# policy_node logs at startup and publishes on its debug stream
+# (/ncp_debug/<profile>), so all three can be
 # eyeballed against each other.
 #
 # Transfers ONLY. Never builds, never launches, never touches a ROS node.
@@ -94,7 +95,8 @@ SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8)
 CRITICAL=(
   "rosmaster/policy.py"
   "rosmaster/node.py"
-  "weights/actor.pt"
+  "weights/actor.pt"       # m8v2 profile (default)
+  "weights/actor_m4.pt"    # m4 profile (profile:=m4)
 )
 
 echo "==> Source: ${SRC}"
@@ -103,7 +105,7 @@ echo "==> Source: ${SRC}"
 for f in "${CRITICAL[@]}"; do
   if [[ ! -f "${SRC}/${f}" ]]; then
     echo "ERROR: missing '${f}' in ${SRC}." >&2
-    if [[ "$f" == "weights/actor.pt" ]]; then
+    if [[ "$f" == weights/*.pt ]]; then
       echo "       The trained checkpoint is not in this checkout. Pull the" >&2
       echo "       upstream repo on the WORKSTATION first (it has internet);" >&2
       echo "       the robot cannot fetch it itself." >&2
@@ -171,6 +173,6 @@ CKPT_SHA="$(sha256sum "${SRC}/weights/actor.pt" | cut -d' ' -f1)"
 echo "==> Deployed and verified."
 echo "    checkpoint sha256 = ${CKPT_SHA}"
 echo "    policy_node logs this same hash at startup and publishes its first"
-echo "    12 chars on /ncp_debug. If they ever disagree, the robot is running"
+echo "    12 chars on /ncp_debug/<profile>. If they ever disagree, the robot is running"
 echo "    a different checkpoint than this workstation thinks."
 echo "    Not built, not launched -- those remain operator-supervised steps."

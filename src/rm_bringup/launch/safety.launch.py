@@ -6,14 +6,21 @@ What it does:
     `config/safety_limits.yaml`.  The node itself loads all numeric limits from
     that YAML at runtime (no limits are duplicated here); this launch file only
     sets the three node-level parameters that are NOT part of the limits file:
-    `command_source`, `safety_loop_rate_hz`, and `safety_limits_path`.
+    `command_source`, `safety_loop_rate_hz`, `safety_limits_path` and
+    `topics_path`.
 
 Launch arguments:
-    command_source        (default "teleop")  — active command source. MUST stay
-                                                 "teleop" until Phase 4 sign-off;
-                                                 "policy" lets /policy/cmd_vel
-                                                 drive.  There is no trained
-                                                 policy in Phase 2/3.
+    command_source        (default "teleop")  — active command source: a row
+                                                 name from config/topics.yaml
+                                                 `command_sources` (teleop,
+                                                 policy, m8v2, m4). "teleop"
+                                                 means no policy can drive;
+                                                 the node refuses any name
+                                                 that is not a row.
+    topics_path           (default: in-repo    — absolute path to
+                           config/topics.yaml)    config/topics.yaml, the
+                                                 command-source table the node
+                                                 subscribes from.
     safety_loop_rate_hz   (default "20.0")     — control-loop rate. Kept at 20 Hz
                                                  because it must be
                                                  >= publishing.zero_publish_rate_hz
@@ -66,12 +73,16 @@ from launch_ros.actions import Node
 _DEFAULT_LIMITS_PATH = str(
     pathlib.Path(__file__).resolve().parents[3] / "config" / "safety_limits.yaml"
 )
+_DEFAULT_TOPICS_PATH = str(
+    pathlib.Path(__file__).resolve().parents[3] / "config" / "topics.yaml"
+)
 
 
 def generate_launch_description() -> LaunchDescription:
     command_source = LaunchConfiguration("command_source")
     safety_loop_rate_hz = LaunchConfiguration("safety_loop_rate_hz")
     safety_limits_path = LaunchConfiguration("safety_limits_path")
+    topics_path = LaunchConfiguration("topics_path")
     slow_zone_enabled = LaunchConfiguration("slow_zone_enabled")
     stop_zone_enabled = LaunchConfiguration("stop_zone_enabled")
 
@@ -79,8 +90,9 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             "command_source",
             default_value="teleop",
-            description="Active command source: 'teleop' (default) or 'policy'. "
-                        "Keep 'teleop' until Phase 4 sign-off.",
+            description="Active command source: a config/topics.yaml "
+                        "command_sources row name. 'teleop' (default) means "
+                        "no policy can drive.",
         ),
         DeclareLaunchArgument(
             "safety_loop_rate_hz",
@@ -92,6 +104,12 @@ def generate_launch_description() -> LaunchDescription:
             "safety_limits_path",
             default_value=_DEFAULT_LIMITS_PATH,
             description="Absolute path to config/safety_limits.yaml.",
+        ),
+        DeclareLaunchArgument(
+            "topics_path",
+            default_value=_DEFAULT_TOPICS_PATH,
+            description="Absolute path to config/topics.yaml, the "
+                        "command-source table.",
         ),
         # --------------------------------------------------------------
         # LIDAR ZONE MASTER SWITCHES. Both default "true"; passing "false"
@@ -127,6 +145,7 @@ def generate_launch_description() -> LaunchDescription:
                 "command_source": command_source,
                 "safety_loop_rate_hz": safety_loop_rate_hz,
                 "safety_limits_path": safety_limits_path,
+                "topics_path": topics_path,
                 "slow_zone_enabled": slow_zone_enabled,
                 "stop_zone_enabled": stop_zone_enabled,
             }],

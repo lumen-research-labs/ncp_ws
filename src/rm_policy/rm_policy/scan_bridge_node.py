@@ -1,17 +1,17 @@
 """
-scan_bridge_node.py — republish the raw TG30 scan as the 32-beam/180 deg
+scan_bridge_node.py — republish the raw TG30 scan as the 720-beam/270 deg
 LaserScan the trained NCP was trained on.
 
 What it does:
     Subscribes to the robot's real `/scan` (YDLIDAR TG30: ~1982 points over
     a full 360 deg, no-returns encoded as 0.0) and publishes a SYNTHETIC
     `sensor_msgs/LaserScan` on `/ncp/scan` containing exactly
-    `ncp_policy.BEAMS` (32) ranges across the forward `ncp_policy.FOV_DEG`
-    (180) degrees, right -> left, in metres.
+    `ncp_policy.BEAMS` (720) ranges across the forward `ncp_policy.FOV_DEG`
+    (270) degrees, right -> left, in metres.
 
     This exists so that `NCP-on-Rosmaster/rosmaster/node.py` can run
     COMPLETELY UNMODIFIED against real hardware. That node hard-refuses any
-    scan whose length is not 32 (`if len(msg.ranges) != policy.BEAMS:
+    scan whose length is not `policy.BEAMS` (`if len(msg.ranges) != policy.BEAMS:
     return`), so pointed at the raw TG30 it never builds an observation, its
     1 s deadman never clears, and it publishes zero forever -- in BOTH
     `mode:=debug` and `mode:=ncp`. Rather than fork the upstream node (whose
@@ -22,21 +22,28 @@ What it does:
     the ROS wrapper around it. In particular the TG30's 0.0-no-return
     sentinel is handled there (mapped to range_max BEFORE pooling), which is
     the one thing upstream's `prepare_scan` -- which only maps non-finite --
-    would get wrong on this hardware.
+    would get wrong on this hardware. The range bounds, the nearest-ray
+    search window and the self-occlusion zones come from the lidar block of
+    config/interface.yaml, read through `rm_policy.lidar_contract`, so this
+    node and policy_node reduce the scan identically.
 
     Synthetic geometry is chosen so upstream's own `policy.check_scan()`
-    passes cleanly: 32 bin CENTRES spaced 180/32 = 5.625 deg apart span
-    174.375 deg (within its 10 deg tolerance of 180) and are centred on
+    passes cleanly: 720 bin CENTRES spaced 270/720 = 0.375 deg apart span
+    269.625 deg (within its 10 deg tolerance of 270) and are centred on
     0 rad (straight ahead, REP-103).
 
 Subscribes:  /scan      [sensor_msgs/LaserScan]  ~10.07 Hz, raw TG30
-Publishes:   /ncp/scan  [sensor_msgs/LaserScan]  same rate, 32 beams
-Parameters:  scan_topic     (str, "/scan")       raw input
-Parameters:  output_topic   (str, "/ncp/scan")   32-beam output
-Parameters:  range_min      (float, 0.01)        TG30 spec floor
-Parameters:  range_max      (float, 30.0)        TG30 spec reach. NOT the
-                            training clip (5.0) -- upstream's build_obs
-                            applies that itself. Do not reconcile the two.
+Publishes:   /ncp/scan  [sensor_msgs/LaserScan]  same rate, 720 beams
+Parameters:  scan_topic             (str, "/scan")       raw input
+Parameters:  output_topic           (str, "/ncp/scan")   720-beam output
+Parameters:  interface_config_path  (str, <repo-relative default>) — path to
+                            config/interface.yaml. Its lidar block supplies
+                            range_min_m / range_max_m (the TG30 spec bounds,
+                            NOT the 5.0 m training clip, which upstream's
+                            build_obs applies itself), the search window and
+                            the self-occlusion zones. Refuses to start if the
+                            file cannot be read or its bin count / arc differ
+                            from the vendored checkpoint module.
 
 Failure mode:
     Fail-closed by SILENCE. On any resampler fault (empty scan, bad angle
@@ -52,50 +59,77 @@ Failure mode:
 from __future__ import annotations
 
 import math
+import pathlib
 
 import rclpy
 import rclpy.node
+import yaml
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
 
 from rm_policy import scan_resampler
+from rm_policy.lidar_contract import lidar_contract_from
 from rm_policy.vendor import ncp_policy
 
 _DEFAULT_SCAN_TOPIC = "/scan"
 _DEFAULT_OUTPUT_TOPIC = "/ncp/scan"
 
-# TG30 spec bounds. The 5.0 m training clip is applied downstream by
-# ncp_policy.build_obs; mapping no-returns to 30.0 here and letting that clip
-# take them to 5.0 is exactly equivalent to "nothing detected".
-_DEFAULT_RANGE_MIN_M = 0.01
-_DEFAULT_RANGE_MAX_M = 30.0
+# Same resolution convention as policy_node: valid in a standard colcon
+# workspace where the package source tree is adjacent to config/.
+_THIS_DIR = pathlib.Path(__file__).parent.resolve()
+_DEFAULT_INTERFACE_CONFIG_PATH = str(_THIS_DIR.parents[2] / "config" / "interface.yaml")
 
 _WARN_THROTTLE_SEC = 5.0
 
 
 class ScanBridgeNode(rclpy.node.Node):
-    """Raw 360 deg TG30 scan in, 32-beam/180 deg synthetic scan out."""
+    """Raw 360 deg TG30 scan in, 720-beam/270 deg synthetic scan out."""
 
     def __init__(self) -> None:
         super().__init__("ncp_scan_bridge")
 
         self.declare_parameter("scan_topic", _DEFAULT_SCAN_TOPIC)
         self.declare_parameter("output_topic", _DEFAULT_OUTPUT_TOPIC)
-        self.declare_parameter("range_min", _DEFAULT_RANGE_MIN_M)
-        self.declare_parameter("range_max", _DEFAULT_RANGE_MAX_M)
+        self.declare_parameter("interface_config_path", _DEFAULT_INTERFACE_CONFIG_PATH)
 
         scan_topic = self.get_parameter("scan_topic").value
         output_topic = self.get_parameter("output_topic").value
-        self._range_min = float(self.get_parameter("range_min").value)
-        self._range_max = float(self.get_parameter("range_max").value)
+        interface_config_path = self.get_parameter("interface_config_path").value
 
-        self._n_beams = ncp_policy.BEAMS
-        self._arc_deg = ncp_policy.FOV_DEG
+        # The lidar block of the contract. Fatal if unreadable or if it
+        # disagrees with the vendored checkpoint module about the layout:
+        # upstream's node would refuse every scan, and silently.
+        try:
+            with open(interface_config_path, "r", encoding="utf-8") as fh:
+                interface_cfg = yaml.safe_load(fh)
+            self._lidar = lidar_contract_from(interface_cfg)
+        except (OSError, yaml.YAMLError, ValueError) as exc:
+            raise RuntimeError(
+                f"ncp_scan_bridge: cannot read the lidar contract from "
+                f"{interface_config_path!r}: {exc}"
+            ) from exc
+        self._range_min = self._lidar.range_min_m
+        self._range_max = self._lidar.range_max_m
+
+        # Geometry follows the CONTRACT (the active profile). The vendored
+        # module's constants only matter to the upstream consumer, whose
+        # node.py refuses any scan that is not ncp_policy.BEAMS long; the
+        # launch refuses consumer:=upstream on any other profile, so this
+        # is a warning for the operator reading the log, not a refusal.
+        self._n_beams = self._lidar.n_beams
+        self._arc_deg = self._lidar.arc_deg
+        if (self._n_beams, self._arc_deg) != (ncp_policy.BEAMS, ncp_policy.FOV_DEG):
+            self.get_logger().warn(
+                f"ncp_scan_bridge: profile is {self._n_beams} beams over "
+                f"{self._arc_deg:.0f} deg; the vendored upstream module expects "
+                f"{ncp_policy.BEAMS} over {ncp_policy.FOV_DEG:.0f}, so "
+                f"consumer:=upstream cannot use this /ncp/scan."
+            )
 
         # Synthetic geometry: bin CENTRES, not bin edges. Bin i spans
-        # [-90 + i*w, -90 + (i+1)*w] deg, so its centre is at
-        # -90 + (i + 0.5)*w. Publishing centres is what makes the output
-        # read as "a 32-beam lidar", which is what check_scan validates.
+        # [-135 + i*w, -135 + (i+1)*w] deg, so its centre is at
+        # -135 + (i + 0.5)*w. Publishing centres is what makes the output
+        # read as "a 720-beam lidar", which is what check_scan validates.
         bin_width = math.radians(self._arc_deg) / self._n_beams
         self._angle_min = -math.radians(self._arc_deg) / 2.0 + bin_width / 2.0
         self._angle_increment = bin_width
@@ -134,7 +168,9 @@ class ScanBridgeNode(rclpy.node.Node):
         self.get_logger().info(
             f"ncp_scan_bridge: {scan_topic} -> {output_topic}, "
             f"{self._n_beams} beams over {self._arc_deg:.0f} deg, "
-            f"range [{self._range_min}, {self._range_max}] m"
+            f"range [{self._range_min}, {self._range_max}] m, "
+            f"search window +/-{self._lidar.search_window_bins} bins, "
+            f"{len(self._lidar.mask_zones_deg)} self-occlusion zone(s)"
         )
 
     def _on_scan(self, msg: LaserScan) -> None:
@@ -147,6 +183,8 @@ class ScanBridgeNode(rclpy.node.Node):
             range_min=self._range_min,
             range_max=self._range_max,
             sampling=scan_resampler.SAMPLING_NEAREST_RAY,
+            search_window_bins=self._lidar.search_window_bins,
+            mask_zones_deg=self._lidar.mask_zones_deg,
         )
         if result.fault is not None or result.bins is None:
             # Publish NOTHING. See the module docstring's failure mode: the

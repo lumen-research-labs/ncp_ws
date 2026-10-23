@@ -6,10 +6,16 @@ as similar to, if not an exact copy of, what's on the NCP-on-Rosmaster repo."*
 
 | | |
 |---|---|
-| Source repo | `LumenLabs/NCP-on-Rosmaster` |
+| Source repo | `LumenLabs/NCP-on-Rosmaster` (local checkout `~/lumen/ncp`) |
 | Source path | `rosmaster/policy.py` |
-| Commit | `69785c85a281f2e624db9548a7335d3fa76fe56e` (branch `main`, clean tree) |
-| Vendored | 2026-08-29 (re-vendored; first vendored 2026-08-27 @ `0ad548c`) |
+| Commit | `97f293b` (branch `feat/720-beam-270fov`, clean tree; docstring-only change on top of `bc1099d`, which carried the 720/270 constants) |
+| Vendored | 2026-10-08 (re-vendored; previously 2026-08-29 @ `69785c8`, first 2026-08-27 @ `0ad548c`) |
+
+## Re-vendoring 2026-10-08 — interface 4.0.0, 720 beams over 270°
+
+Only two constants changed: `BEAMS` 32 → 720 and `FOV_DEG` 180 → 270, the native BARN UST-10LX layout the M7 and M8 runs trained on. `OBS_DIM` follows (36 → 724). The `NcpActor` architecture is unchanged; its input layer width follows `OBS_DIM`. `weights/actor.pt` upstream is now the M8-v2 snapshot `s1436792` (63% held-out success, official BARN 0.219), sha256 `71cc50aeb734…`, exported on the training box by the generalized `weights/export_from_sb3.py` with max action difference against SB3 of 0.0.
+
+A 3.0.0 checkpoint can no longer load: `load_state_dict` is strict and raises at node startup, never driving on a shape mismatch.
 
 ## Re-vendoring 2026-08-29 — the actor architecture CHANGED
 

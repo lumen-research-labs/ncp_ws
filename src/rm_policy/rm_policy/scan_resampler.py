@@ -6,13 +6,20 @@ What it does:
     The YDLIDAR TG30 publishes ~1982-2020 points over a full 360 degrees at a
     resolution the trained policy neither expects nor was trained on. This
     module bins the forward arc of one raw scan into a caller-specified number
-    of equal-angle sectors, taking the MINIMUM range in each sector (never the
-    mean — a narrow obstacle must never be averaged away), and returns the
-    result in METERS, UNNORMALIZED. It is the only thing standing between raw
-    scans and any policy/NCP inference code, and is deliberately parameterized
-    (n_bins, arc_deg, range_min, range_max) rather than hardcoding either the
-    36-bin rm_policy contract or the NCP repo's own bin count, since the two
-    consumers may want different vector lengths from the same physical scan.
+    of equal-angle sectors and reduces each sector to ONE range: the real
+    return nearest the sector centre (default, training-faithful) or the
+    sector minimum (never the mean — a narrow obstacle must never be averaged
+    away). It returns METERS, UNNORMALIZED. It is the only thing standing
+    between raw scans and any policy/NCP inference code, and is deliberately
+    parameterized (n_bins, arc_deg, range_min, range_max) rather than
+    hardcoding any one contract's bin count, since consumers may want
+    different vector lengths from the same physical scan.
+
+    Two options added for interface 4.0.0 (720 bins over 270 deg, ~2 TG30
+    rays per bin), both off by default so older callers are unchanged:
+    `search_window_bins` lets a bin with no real return borrow the nearest
+    real return from neighbouring bins, and `mask_zones_deg` blanks angular
+    sectors where the robot sees its own chassis. See `resample_forward_arc`.
 
 Subscribes to:  (nothing — pure module; the caller passes plain arrays/floats)
 Publishes:      (nothing — pure module; the caller acts on the return value)
@@ -52,9 +59,10 @@ Failure mode:
 
 from __future__ import annotations
 
+import bisect
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------------
 # Result container
@@ -92,14 +100,15 @@ class ScanResampleResult:
 # Sampling modes. See `resample_forward_arc`.
 #
 # TRAINING FIDELITY (governing principle, operator 2026-08-27): the policy was
-# trained on `--beams 32 --fov 180`, i.e. exactly ONE ray per beam direction.
-# The TG30 delivers ~1000 rays across the same arc, so ~31 real rays fall in
-# every output bin and they must be reduced somehow. The two ways differ in a
+# trained on a simulated lidar with exactly ONE ray per beam direction (32 over
+# 180 deg for the M4 checkpoint, 720 over 270 deg since interface 4.0.0). The
+# TG30 delivers more rays than that across the same arc (~31 per bin at 32
+# bins, ~2 at 720), and they must be reduced somehow. The two ways differ in a
 # way that matters:
 #
 #   SAMPLING_NEAREST_RAY (default) — take the single REAL RETURN closest to the
 #       bin's CENTRE angle, discarding the rest. This reconstructs what a clean
-#       32-beam lidar pointed in that direction would have reported, so the
+#       one-ray-per-bin lidar pointed in that direction would have reported, so the
 #       observation distribution matches training. A thin obstacle between
 #       sampled rays is invisible to the POLICY — exactly as it was invisible
 #       in simulation.
@@ -116,11 +125,11 @@ class ScanResampleResult:
 #       If a bin contains no real return at all, it falls back to range_max:
 #       genuinely nothing was detected anywhere in that sector.
 #
-#   SAMPLING_MIN_POOL — take the nearest return anywhere in the bin's 5.625 deg
-#       cone. Strictly more conservative, and the right choice for a SAFETY
-#       input, but it reports obstacles as closer and wider than any 32-beam
-#       lidar would, which is a systematic shift away from what the network saw
-#       in training.
+#   SAMPLING_MIN_POOL — take the nearest return anywhere in the bin's cone.
+#       Strictly more conservative, and the right choice for a SAFETY input,
+#       but it reports obstacles as closer and wider than the training lidar
+#       would, which is a systematic shift away from what the network saw in
+#       training.
 #
 # We can afford the faithful option because this module feeds the POLICY only.
 # rm_safety independently computes its e-stop from the FULL-RESOLUTION scan
@@ -176,6 +185,8 @@ def resample_forward_arc(
     range_min: float,
     range_max: float,
     sampling: str = SAMPLING_NEAREST_RAY,
+    search_window_bins: int = 0,
+    mask_zones_deg: Sequence[Sequence[float]] = (),
 ) -> ScanResampleResult:
     """Bin one raw LaserScan's ranges into `n_bins` forward-arc sectors.
 
@@ -230,6 +241,28 @@ def resample_forward_arc(
     range_max:
         Sensor/contract maximum valid range, meters. No-return rays are
         mapped to this value. Must be > `range_min`.
+    search_window_bins:
+        SAMPLING_NEAREST_RAY only. A bin that contains no real return may
+        fall back to the real return nearest its centre within this many
+        neighbouring bins on either side, i.e. any ray with
+        |angle - centre| <= (search_window_bins + 0.5) * bin_width, including
+        rays just outside the arc edge. 0 (default) disables the fallback and
+        reproduces the strict per-bin behaviour exactly. Rays inside the bin
+        always win over the fallback. Why it exists: at 720 bins over 270 deg
+        the TG30 contributes ~2 rays per bin with ~30% dropout, so 5-8% of
+        bins would otherwise read range_max ("clear") while a real return
+        sits a fraction of a degree away; +/-2 bins cuts that to ~1.3% on the
+        recorded fixtures. Simulation had no dropout at all. Ignored in
+        SAMPLING_MIN_POOL mode, which already uses every ray in the bin.
+    mask_zones_deg:
+        Angular sectors `[lo_deg, hi_deg]` (wrapped angle, REP-103, inclusive)
+        whose rays are treated as no-returns in BOTH sampling modes: they
+        still count as member rays (so they never cause an empty_bin fault)
+        but never contribute a range and never feed the search-window
+        fallback. For chassis self-hits the training sensor could not see:
+        its 0.1 m min_range put the chassis inside a dead zone, so those
+        directions read "clear" in simulation. The caller sources the list
+        from config/interface.yaml `self_occlusion_zones_deg`.
 
     Returns
     -------
@@ -249,6 +282,9 @@ def resample_forward_arc(
                                   non-finite.
     "arc_exceeds_scan_coverage" - the requested forward arc is wider than the
                                   angular span the scan array actually covers.
+    "invalid_search_window" - `search_window_bins` is not a non-negative int.
+    "invalid_mask_zone"     - a mask zone is not a `[lo, hi]` pair of finite
+                                  degrees with lo <= hi.
     "empty_bin:<index>"     - bin `<index>` (0-based) received zero member
                                   rays after arc selection.
     "internal_error"        - an unexpected exception was caught; fail closed
@@ -264,6 +300,8 @@ def resample_forward_arc(
             range_min=range_min,
             range_max=range_max,
             sampling=sampling,
+            search_window_bins=search_window_bins,
+            mask_zones_deg=mask_zones_deg,
         )
     except Exception:
         return ScanResampleResult(bins=None, fault="internal_error")
@@ -279,6 +317,8 @@ def _resample_forward_arc_inner(
     range_min: float,
     range_max: float,
     sampling: str = SAMPLING_NEAREST_RAY,
+    search_window_bins: int = 0,
+    mask_zones_deg: Sequence[Sequence[float]] = (),
 ) -> ScanResampleResult:
     """Inner implementation of `resample_forward_arc`; exceptions propagate."""
 
@@ -308,6 +348,21 @@ def _resample_forward_arc_inner(
     if sampling not in _VALID_SAMPLING:
         return ScanResampleResult(bins=None, fault="invalid_sampling_mode")
 
+    if not isinstance(search_window_bins, int) or search_window_bins < 0:
+        return ScanResampleResult(bins=None, fault="invalid_search_window")
+
+    zones_rad: List[Tuple[float, float]] = []
+    for zone in mask_zones_deg:
+        try:
+            if len(zone) != 2:
+                raise ValueError
+            lo, hi = float(zone[0]), float(zone[1])
+        except (TypeError, ValueError):
+            return ScanResampleResult(bins=None, fault="invalid_mask_zone")
+        if not (math.isfinite(lo) and math.isfinite(hi)) or lo > hi:
+            return ScanResampleResult(bins=None, fault="invalid_mask_zone")
+        zones_rad.append((math.radians(lo), math.radians(hi)))
+
     n_points = len(ranges)
     scan_span_rad = (n_points - 1) * angle_increment
     arc_rad = math.radians(arc_deg)
@@ -317,6 +372,16 @@ def _resample_forward_arc_inner(
     half_arc = arc_rad / 2.0
     bin_width = arc_rad / n_bins
 
+    # The search-window fallback may borrow rays up to `window_rad` beyond the
+    # arc edge, so candidate collection uses a slightly wider arc. Capped at
+    # pi because angles are wrapped to (-pi, pi].
+    window_rad = (
+        search_window_bins * bin_width
+        if sampling == SAMPLING_NEAREST_RAY and search_window_bins > 0
+        else 0.0
+    )
+    ext_half = min(half_arc + window_rad, math.pi)
+
     # bin_min  : running minimum range (SAMPLING_MIN_POOL)
     # bin_pick  : range of the ray nearest the bin centre (SAMPLING_NEAREST_RAY)
     # bin_best  : |angle - bin_centre| of that ray, for comparison
@@ -325,11 +390,32 @@ def _resample_forward_arc_inner(
     bin_pick: List[float] = [math.inf] * n_bins
     bin_best: List[float] = [math.inf] * n_bins
     bin_count: List[int] = [0] * n_bins
+    # (angle, range) of every real, unmasked ray in the extended arc — the
+    # pool the search-window fallback draws from. Empty when the window is 0.
+    candidates: List[Tuple[float, float]] = []
 
     for i in range(n_points):
         raw_angle = angle_min + i * angle_increment
         # Wrap to (-pi, pi], matching rm_safety.safety_logic.min_range_in_arcs.
         angle = (raw_angle + math.pi) % (2.0 * math.pi) - math.pi
+
+        if angle < -ext_half or angle > ext_half:
+            continue
+
+        r = ranges[i]
+        # A masked ray is a no-return for every purpose below: the robot is
+        # looking at itself, and the training sensor saw "clear" there.
+        usable = not _is_no_return(r, range_min) and not any(
+            lo <= angle <= hi for lo, hi in zones_rad
+        )
+        r_effective = r if usable else range_max
+        # Also clip any absurdly-large-but-finite return to range_max, so a
+        # sensor value beyond spec never leaks past the contract ceiling.
+        if r_effective > range_max:
+            r_effective = range_max
+
+        if usable and window_rad > 0.0:
+            candidates.append((angle, r_effective))
 
         if angle < -half_arc or angle > half_arc:
             continue
@@ -344,22 +430,15 @@ def _resample_forward_arc_inner(
         if idx < 0:
             idx = 0
 
-        r = ranges[i]
-        r_effective = range_max if _is_no_return(r, range_min) else r
-        # Also clip any absurdly-large-but-finite return to range_max, so a
-        # sensor value beyond spec never leaks past the contract ceiling.
-        if r_effective > range_max:
-            r_effective = range_max
-
         bin_count[idx] += 1
         if r_effective < bin_min[idx]:
             bin_min[idx] = r_effective
 
-        # Nearest-to-centre bookkeeping: which single ray a CLEAN 32-beam lidar
-        # pointed at this bin's centre would have returned. Dropouts are
-        # skipped rather than accepted — see SAMPLING_NEAREST_RAY above. Note
-        # this tests the RAW value, so a no-return never wins the centre slot.
-        if not _is_no_return(r, range_min):
+        # Nearest-to-centre bookkeeping: which single ray a CLEAN lidar with
+        # one beam per bin, pointed at this bin's centre, would have returned.
+        # Dropouts and masked rays are skipped rather than accepted — see
+        # SAMPLING_NEAREST_RAY above — so neither ever wins the centre slot.
+        if usable:
             bin_centre = -half_arc + (idx + 0.5) * bin_width
             offset = abs(angle - bin_centre)
             if offset < bin_best[idx]:
@@ -371,12 +450,31 @@ def _resample_forward_arc_inner(
             return ScanResampleResult(bins=None, fault=f"empty_bin:{idx}")
 
     if sampling == SAMPLING_MIN_POOL:
-        selected = bin_min
-    else:
-        # A bin with rays but no real return anywhere: nothing was detected in
-        # that sector, which is range_max. bin_pick is still inf there because
-        # no candidate ever won the centre slot.
-        selected = [
-            range_max if math.isinf(v) else v for v in bin_pick
-        ]
+        return ScanResampleResult(bins=bin_min, fault=None)
+
+    if window_rad > 0.0 and candidates:
+        # Fallback for bins that have rays but no real, unmasked return: take
+        # the candidate nearest the bin centre within reach. Candidates are
+        # sorted by angle, so the nearest is one of the two around the
+        # insertion point. Bins that already picked a ray are untouched.
+        candidates.sort()
+        cand_angles = [a for a, _ in candidates]
+        reach = window_rad + bin_width / 2.0
+        for idx in range(n_bins):
+            if not math.isinf(bin_pick[idx]):
+                continue
+            bin_centre = -half_arc + (idx + 0.5) * bin_width
+            j = bisect.bisect_left(cand_angles, bin_centre)
+            best_offset = math.inf
+            for k in (j - 1, j):
+                if 0 <= k < len(candidates):
+                    offset = abs(cand_angles[k] - bin_centre)
+                    if offset <= reach and offset < best_offset:
+                        best_offset = offset
+                        bin_pick[idx] = candidates[k][1]
+
+    # A bin with rays but no real return anywhere in reach: nothing was
+    # detected in that sector, which is range_max. bin_pick is still inf
+    # there because no candidate ever won the centre slot.
+    selected = [range_max if math.isinf(v) else v for v in bin_pick]
     return ScanResampleResult(bins=selected, fault=None)

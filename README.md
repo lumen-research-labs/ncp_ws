@@ -8,6 +8,25 @@ with a frozen observation/action interface and full logging.
 > stop mechanism short of pulling the battery. Everything in this workspace is
 > shaped by that fact.
 
+## New to this repo? Do this first
+
+On an Ubuntu 24.04 (or Pop!_OS) machine with ROS 2 installed:
+
+```bash
+mkdir -p ~/lumen && cd ~/lumen
+git clone git@github.com:lumen-research-labs/ncp_ws.git
+cd ncp_ws && git checkout feat/roam-mode          # the branch the robot runs
+bash scripts/setup_workstation.sh                 # packages, the upstream checkout beside, tests, build
+```
+
+Then read, in order: [`docs/workstation_setup.md`](docs/workstation_setup.md)
+(what the script did, the robot SSH key and the wired lab link),
+[`docs/operating_guide.md`](docs/operating_guide.md) (bring the robot up, arm it,
+the dashboard at `http://192.168.4.100:8080`), and [`docs/roam.md`](docs/roam.md)
+(the robot picks its own goals). `CLAUDE.md` section 4 says where the robot and
+the code stand today. The training side lives in the
+[optomotive](https://github.com/lumen-research-labs/optomotive) repo.
+
 ---
 
 ## Start here
@@ -20,7 +39,7 @@ with a frozen observation/action interface and full logging.
 | work on one package | `src/rm_*/README.md` |
 | see the phase plan and sign-off gates | [`BUILD-PLAN.md`](BUILD-PLAN.md) |
 | **bring the base up on a NEW robot** — the per-robot calibration procedure | [`docs/calibration.md`](docs/calibration.md) |
-| set up the dev workstation | [`docs/dev_env_setup.md`](docs/dev_env_setup.md) |
+| set up a workstation (fresh PC) | [`docs/workstation_setup.md`](docs/workstation_setup.md) |
 | check the safety sign-off record | [`docs/safety_validation.md`](docs/safety_validation.md) |
 
 `BUILD-PLAN.md` is the authority on scope and phase gates.
@@ -52,8 +71,9 @@ Checked in deliberately, so the knowledge is not stuck on one laptop:
 
 **`/cmd_vel` has exactly one publisher: `rm_safety`.**
 
-Command sources (`/policy/cmd_vel`, `/teleop/cmd_vel`) are *inputs* to the
-safety node and have no route to the base driver. That includes manual
+Command sources (`/policy/m8v2/cmd_vel`, `/policy/m4/cmd_vel`,
+`/policy/cmd_vel`, `/teleop/cmd_vel`, the rows of `config/topics.yaml`) are
+*inputs* to the safety node and have no route to the base driver. That includes manual
 driving — the gamepad, waypoints and the WASD jog all publish
 `/teleop/cmd_vel`, so they sit behind the same clamps, e-stop arcs,
 acceleration limiter and kill as the policy.
@@ -66,8 +86,9 @@ letting the last command persist.
 ## The stack
 
 ```
-YDLIDAR TG30 ──► /scan ──┬──► policy_node ──► /policy/cmd_vel ──┐
-                         │                                       ├──► rm_safety ──► /cmd_vel ──► rm_base ──► wheels
+YDLIDAR TG30 ──► /scan ──┬──► policy_node_m8v2 ──► /policy/m8v2/cmd_vel ──┐
+                         ├──► policy_node_m4   ──► /policy/m4/cmd_vel   ──┤  (command_source picks ONE)
+                         │                                                 ├──► rm_safety ──► /cmd_vel ──► rm_base ──► wheels
                          ├──► scan_sanitizer ──► slam_toolbox     │
                          │                       (pose)           │
                          └──► rm_safety (e-stop, full resolution)  │
@@ -89,7 +110,6 @@ YDLIDAR TG30 ──► /scan ──┬──► policy_node ──► /policy/cm
 | [`rm_dashboard`](src/rm_dashboard/README.md) | robot | Live web view. Subscribe-only. |
 | [`rm_waypoint`](src/rm_waypoint/README.md) | robot | Waypoints + WASD jog, for repositioning. |
 | [`rm_interfaces`](src/rm_interfaces/README.md) | both | Custom msg/srv. |
-| [`rm_tools`](src/rm_tools/README.md) | workstation | Offline analysis. Never a robot runtime dependency. |
 
 ---
 
@@ -103,7 +123,7 @@ YDLIDAR TG30 ──► /scan ──┬──► policy_node ──► /policy/cm
 | `ROS_DOMAIN_ID` | **28** (both machines) |
 | Lidar | YDLIDAR **TG30** (TOF), 360°, ~10.1 Hz. Encodes no-returns as `0.0`, not `inf`. |
 | Robots | `bernard-1` at `192.168.4.100` (the working unit) · `bernard-2` at `bernard-2.local` |
-| Interface version | **3.0.0** — 36-dim observation, 2-dim action `[vx, wz]` |
+| Policies | `m8v2`: interface **4.0.0**, 724-dim observation, 720 beams over 270° · `m4`: interface 3.0.0, 36-dim, 32 beams over 180°. Both run by default; `command_source` (a dashboard button) picks the one that drives. Action is `[vx, wz]` in both. |
 
 `bernard-1` has **no internet** and its clock resets ~3 months behind on every
 boot. Everything reaches it from the workstation over LAN.
@@ -131,7 +151,7 @@ colcon build --symlink-install --packages-select \
   rm_interfaces rm_safety rm_policy rm_base rm_bringup rm_dashboard rm_waypoint
 
 # Workstation
-colcon build --symlink-install --packages-select rm_interfaces rm_tools
+colcon build --symlink-install --packages-select rm_interfaces
 ```
 
 ---
@@ -151,7 +171,7 @@ Nothing can move yet — `rm_safety` starts **KILLED** and `command_source`
 defaults to `teleop`. Arming takes two deliberate acts:
 
 ```bash
-ros2 param set /safety_node command_source policy   # this force-kills
+ros2 param set /safety_node command_source m8v2   # or m4; this force-kills
 ros2 service call /safety/reset std_srvs/srv/Trigger
 ```
 
@@ -172,15 +192,17 @@ Full procedure, including verification and troubleshooting:
 BUILD-PLAN.md   the authority on scope and phase gates
 CLAUDE.md       the working-state project brain and session log
 config/         interface.yaml (THE contract), safety_limits.yaml,
-                base_calibration.yaml, waypoint.yaml, slam_toolbox.yaml,
-                topics.yaml, fastdds_unicast_peers.xml
-docs/           architecture, operating_guide, interface_contract,
-                safety_validation, deployment, dev_env_setup
-src/            the eight rm_* packages (see the table above)
-scripts/        deploy_to_robot.sh, deploy_upstream.sh, prep_robot.sh,
+                base_calibration.yaml, waypoint.yaml, roam.yaml,
+                slam_toolbox.yaml, topics.yaml, fastdds_unicast_peers.xml
+docs/           architecture, operating_guide, roam, interface_contract,
+                safety_validation, deployment, workstation_setup
+src/            the seven rm_* packages (see the table above)
+scripts/        setup_workstation.sh (a fresh PC), deploy_to_robot.sh,
+                deploy_upstream.sh, prep_robot.sh,
                 run_stack.sh, stack_down.sh, bench_up/down.sh,
                 record_run.sh, fetch_bags.sh + diagnostics/
 tests/          unit (no ROS runtime) -> replay (fixtures) -> hardware (human only)
+archive/        retired code and docs, indexed in archive/README.md; never built or imported
 ```
 
 ## Testing

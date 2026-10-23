@@ -11,6 +11,18 @@
 # against this value and refuses to start on a mismatch.
 
 # CHANGE LOG
+# 4.0.0 (2026-10-08, operator decision) — the full-sensor policy family.
+#   The M7/M8 runs trained on BARN's native sensor layout and M8-v2 is the
+#   project's best checkpoint, so the contract follows it.
+#     * Lidar block 32 -> 720 beams over 270 deg (0.375 deg per bin). The
+#       observation is 724 dims: 720 lidar + 2 goal + 2 previous action.
+#     * Sampling stays nearest_valid_ray, with a +/-2-bin search window
+#       (nearest_ray_search_window_bins) because a 0.375 deg bin holds only
+#       ~2 TG30 rays and the sensor drops ~30% of them.
+#     * self_occlusion_zones_deg is populated: the 270 deg arc now includes
+#       the chassis standoffs the 180 deg arc excluded.
+#     * Goal, previous_action, action bounds, control rate: unchanged.
+#     * Checkpoint provenance recorded in the `checkpoint` block below.
 # 3.0.0 (2026-08-27, operator decision) — adopt the TRAINED policy's contract.
 #   A trained checkpoint now exists (LumenLabs/NCP-on-Rosmaster, a CfC/AutoNCP
 #   Neural Circuit Policy). Its input layer is physically wired to a specific
@@ -38,7 +50,22 @@
 #   * IMU block removed from the observation, 48 -> 41 dims. Rationale in the
 #     observation section; this also retires the imu_link frame blocker.
 # 1.0.0 — initial draft.
-interface_version: "3.0.0"
+interface_version: "4.0.0"
+
+checkpoint:
+  # The trained network this contract describes. policy_node logs the sha256
+  # of the weights it loaded at startup and publishes the first 12 characters
+  # on /ncp_debug; scripts/deploy_upstream.sh verifies the same hash on both
+  # ends. All three must agree.
+  file: NCP-on-Rosmaster/weights/actor.pt
+  sha256: 71cc50aeb734bb2adf2c30e4912f98a8bf6ced88bff85c51e4491d23bd68166a
+  run: m8v2                          # optomotive arch-comparison, M8-v2 phase B
+  snapshot: s1436792
+  trained_on: "--beams 720 --fov 270, v in [-1, 2] m/s, w in [-3.14, 3.14] rad/s, 5 Hz"
+  heldout_success: 0.63              # 100 held-out BARN worlds, Gazebo
+  official_barn_metric: 0.219        # official docker eval, 50 worlds x 2
+  exported: 2026-10-08 by weights/export_from_sb3.py (max action diff vs SB3 0.0)
+  previous: m4 3c9bf0ee112b (32 beams / 180 deg, 36-dim, interface 3.0.0)
 
 network:
   # CONFIRMED 2026-08-08 from the Jetson host's own login banner:
@@ -119,47 +146,54 @@ observation:
   # Order is load-bearing. The vector is built in exactly this order by the
   # shared schema loader; nothing hand-writes this ordering a second time.
   #
-  # 3.0.0: this layout is DICTATED BY THE TRAINED CHECKPOINT. The CfC input
-  # layer has exactly 36 inputs in exactly this order. Changing any of it
+  # 4.0.0: this layout is DICTATED BY THE TRAINED CHECKPOINT. The CfC input
+  # layer has exactly 724 inputs in exactly this order. Changing any of it
   # without retraining produces a policy that is silently reading the wrong
   # numbers — it will still run, and the output will still look like a
   # plausible (v, w). There is no runtime error for getting this wrong.
   # Source of truth for the formulas: src/rm_policy/rm_policy/vendor/ncp_policy.py
-  # (build_obs), vendored from NCP-on-Rosmaster @ 69785c8.
+  # (build_obs), vendored from NCP-on-Rosmaster @ bc1099d.
   layout:
     - name: lidar_ranges
       source_topic: /scan
       source_topic_type: sensor_msgs/LaserScan
       measured_rate_hz: 10.07        # bernard-1, 2026-08-27, std dev 1.1 ms
-      shape: [32]                    # 3.0.0: was 36 in 2.0.0
+      shape: [720]                   # 4.0.0: was 32 in 3.0.0, 36 in 2.0.0
       units: dimensionless           # normalized; raw source is meters
-      arc_deg: 180                   # forward arc only; robot is blind behind
-      bin_deg: 5.625                 # 180 / 32 — NOT 10 deg as in 2.0.0
-      sampling: nearest_valid_ray    # 3.0.0 — see sampling_rationale below
+      arc_deg: 270                   # 4.0.0: BARN's native 270 deg; was 180
+      bin_deg: 0.375                 # 270 / 720
+      sampling: nearest_valid_ray    # see sampling_rationale below
+      nearest_ray_search_window_bins: 2   # 4.0.0 — see window_rationale
       sampling_rationale: >-
         TRAINING FIDELITY (governing principle, operator 2026-08-27). The
-        policy trained on `--beams 32 --fov 180`: exactly ONE ray per beam
-        direction. The TG30 delivers ~1000 rays across the same arc, so ~31
-        real rays fall in each output bin and must be reduced. We take the
-        single REAL RETURN nearest the bin's centre angle, reconstructing what
-        a clean 32-beam lidar would have reported — NOT a min-pool over the
-        5.625 deg cone. Min-pooling reports obstacles closer and wider than any
-        32-beam lidar would; measured against nearest_valid_ray on real TG30
-        scans it shifts the normalized observation by a mean of 0.03-0.19 on a
-        [-1, 1] range, with individual bins differing by up to 1.05. That is a
-        systematic distribution shift away from training, not a rounding
-        detail. 2.0.0 specified `pooling: min` for a 36-bin layout that was
-        never implemented; it is superseded, not violated.
+        policy trained on `--beams 720 --fov 270`: exactly ONE ray per beam
+        direction, no dropout. The TG30 delivers ~1514 rays across the same
+        arc, about 2.1 per output bin. We take the single REAL RETURN nearest
+        the bin's centre angle, reconstructing what a clean 720-beam lidar
+        would have reported — NOT a min-pool over the bin. Min-pooling
+        reports obstacles closer and wider than the training sensor did
+        (measured at 32 bins: a mean shift of 0.03-0.19 on a [-1, 1] range,
+        individual bins differing by up to 1.05), a systematic distribution
+        shift away from training. Implemented by rm_policy.scan_resampler.
+      window_rationale: >-
+        With ~2 rays per bin and the TG30's 28-39% dropout, strict per-bin
+        sampling leaves bins with NO real return at all: measured on the
+        recorded fixtures, 5.4-8.3% of the 720 bins would read range_max
+        ("clear") while a real return sits a fraction of a degree away.
+        Simulation never produced that. A bin with no real return may
+        therefore borrow the real return nearest its centre within
+        +/-2 bins (+/-0.75 deg, reach 0.9375 deg), which leaves 1.2-1.4% of
+        bins empty on the same fixtures. Rays inside the bin always win; the
+        window is a fallback, never a smoothing.
       dropout_handling_note: >-
         "REAL RETURN" is load-bearing. Accepting whatever ray sits nearest the
-        centre would inherit the TG30's ~39% dropout rate: measured on
-        tg30_open_scan.yaml, 5 of 32 bins (16%) have a DROPOUT as their centre
-        ray and would be reported as range_max ("clear") while neighbouring
-        rays in the same bin see a real obstacle at 0.5-3 m. Simulation had NO
-        dropout, so that failure mode did not exist in training. Skipping
-        dropouts in favour of the nearest real return is therefore the MORE
-        faithful choice, not a safety compromise. A bin with no real return
-        anywhere falls back to range_max — genuinely nothing detected.
+        centre would inherit the TG30's dropout rate: a dropout centre ray
+        would be reported as range_max ("clear") while a neighbouring ray sees
+        a real obstacle. Simulation had NO dropout, so that failure mode did
+        not exist in training. Skipping dropouts in favour of the nearest
+        real return is therefore the MORE faithful choice, not a safety
+        compromise. A bin with no real return anywhere within reach falls
+        back to range_max — genuinely nothing detected.
       safety_separation_note: >-
         This fidelity is only affordable because this block feeds the POLICY
         ONLY. rm_safety computes its e-stop independently from the
@@ -171,11 +205,12 @@ observation:
         instead of fidelity.
       ordering: right_to_left        # ascending angle; bin 0 = starboard
       preprocessing: >-
-        Forward 180 deg arc only, min-pooled into 32 equal bins of 5.625 deg
-        (min, NOT mean, so a narrow obstacle is never averaged away). Ordered
-        right -> left, i.e. ascending angle, bin 0 covering the most negative
-        angles. Implemented by rm_policy.scan_resampler, which returns METERS;
-        normalization happens downstream in ncp_policy.build_obs.
+        Forward 270 deg arc only, reduced to 720 equal bins of 0.375 deg by
+        nearest_valid_ray with a +/-2-bin search window, after the
+        self-occlusion zones below are blanked. Ordered right -> left, i.e.
+        ascending angle, bin 0 covering the most negative angles. Implemented
+        by rm_policy.scan_resampler, which returns METERS; normalization
+        happens downstream in ncp_policy.build_obs.
       normalization: >-
         clip to [0, laser_clip_m] then (x - laser_clip_m/2) / laser_clip_m * 2,
         giving [-1, 1]. -1 means "touching", +1 means "clear to the clip
@@ -198,7 +233,7 @@ observation:
       # is touching a wall", across a third of the policy's field of view.
       # OWNERSHIP (changed 2026-08-27): this masking is done ONLY by
       # rm_policy.scan_resampler, which maps 0.0 / sub-range_min / negative /
-      # inf / NaN to range_max BEFORE the 32-vector is built. It is deliberately
+      # inf / NaN to range_max BEFORE the 720-vector is built. It is deliberately
       # NOT done in vendor/ncp_policy.py: that file is a BYTE-EXACT copy of
       # upstream (operator requirement — see vendor/VENDOR.md) and carries zero
       # local edits, so the protection has to live in code we own. Consequence:
@@ -214,7 +249,17 @@ observation:
       no_return_encoding: zero       # TG30 always emits 0.0; driver flag inert
       range_min_m: 0.01
       range_max_m: 30.0              # sensor ceiling for resampling, see note
-      self_occlusion_zones_deg: []   # none — operator confirmed 2026-08-14
+      # 4.0.0: the 270 deg arc reaches the chassis standoffs the 180 deg arc
+      # excluded. These are the sectors config/safety_limits.yaml masks for
+      # the e-stop (measured ~97-118 deg and ~-99 to -130 deg, standoffs
+      # reading 0.106-0.125 m). The training sensor had a 0.1 m min_range
+      # that put the Jackal chassis in a dead zone, so those directions read
+      # "clear" in simulation; blanking them here (rays become no-returns,
+      # never fed to the window fallback) reproduces that. Same numbers as
+      # the safety file on purpose; the two paths stay independent.
+      self_occlusion_zones_deg:
+        - [92.0, 123.0]
+        - [-135.0, -97.0]
       empty_bin_policy: fault        # never range_max — that would be fail-open
 
     - name: goal_local
@@ -309,12 +354,11 @@ observation:
     # Re-adding this is an interface_version bump AND requires retraining.
     # ------------------------------------------------------------------
 
-  total_dim: 36              # 32 lidar + 2 goal_local + 2 previous_action
+  total_dim: 724             # 720 lidar + 2 goal_local + 2 previous_action
   dtype: float32
-  shape_collision_warning: >-
-    36 is the TOTAL observation width in 3.0.0. It was also the LIDAR BIN COUNT
-    in 2.0.0. These are unrelated numbers that happen to coincide. In 3.0.0 the
-    lidar block is 32. Any code or document saying "36 bins" is pre-3.0.0.
+  layout_note: >-
+    4.0.0: 724 = 720 + 2 + 2. Any code or document saying "36 dims" or "32
+    beams" is 3.0.0 (the M4 checkpoint) and any saying "36 bins" is 2.0.0.
 
   normalization:
     note: >-
@@ -411,7 +455,7 @@ coordinate_frames:
       translation_m: [0.043, 0.000, 0.110]
       rotation_rpy_deg: [0.0, 0.0, 0.0]
     note: >-
-      No rotation, so lidar 0 deg == robot forward and our forward-180 arc maps
+      No rotation, so lidar 0 deg == robot forward and our forward-270 arc maps
       directly onto scan angles with no offset. 4.3 cm forward, 11 cm up.
   imu_link:
     definition: IMU sensing origin.

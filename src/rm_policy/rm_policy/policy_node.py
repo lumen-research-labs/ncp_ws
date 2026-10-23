@@ -17,10 +17,27 @@ What it does:
          goal does not exist and this node MUST NOT drive — no default goal
          vector is ever substituted (interface.yaml `goal_local.failure_mode`
          is explicit that a plausible-looking goal is worse than no goal).
-      3. Calls `rm_policy.observation_builder` to assemble the 36-element
-         observation (32 lidar + 2 dynamic robot-frame goal + 2 previous
-         action). This node does not build or normalize the vector itself —
-         see the ASSUMED API note below.
+         With `roam` on (a runtime parameter) a finished goal is replaced:
+         `dwell_s` after arrival, `timeout_s` after a fix with no arrival,
+         or `progress_window_s` without the goal distance shrinking, the
+         node draws a random robot-frame offset within `config/roam.yaml`
+         that the raw scan shows to be in free space, and fixes it from the
+         current pose exactly as a re-target would (`rm_policy/roam.py`). A
+         goal the robot takes too long to reach switches anyway; a finished
+         goal is never retried; with no free candidate in view the current
+         goal is held and the node says so. If rm_safety's stop zone
+         latches while roaming and this node is the selected source, it
+         backs STRAIGHT out at `retreat_vx` (the one command rm_safety
+         passes under its latch), without running the network, until the
+         latch releases or `retreat_m` is covered, then draws the next goal
+         (reason `retreated`). One retreat per goal, with a cooldown; a
+         timeout holds and warns; a kill, a stale input or a pose jump
+         aborts it with zero published.
+      3. Calls `rm_policy.observation_builder` to assemble the 724-element
+         observation (720 lidar + 2 dynamic robot-frame goal + 2 previous
+         action), with the lidar geometry, search window and self-occlusion
+         zones read from config/interface.yaml at startup. This node does
+         not build or normalize the vector itself.
       4. Calls `rm_policy.policy_runner.PolicyRunner.act()` to get `(v, w)`
          in PRE-SCALED PHYSICAL UNITS (m/s, rad/s). The trained actor's
          linear head + clip already produced final units — this node must
@@ -49,6 +66,10 @@ What it does:
 
 Subscribes:  /scan   [sensor_msgs/LaserScan]   @ ~10.07 Hz (interface.yaml)
 Subscribes:  /odom   [nav_msgs/Odometry]       @ ~10.74 Hz (interface.yaml)
+Subscribes:  /safety/status [rm_interfaces/SafetyStatus] @ 10 Hz — read for
+                              ONE purpose: the retreat out of a stop-zone
+                              e-stop while roaming (rm_policy/retreat.py).
+                              Nothing else here acts on the safety state.
 Publishes:   /policy/cmd_vel  [geometry_msgs/Twist]  @ control.rate_hz (5 Hz)
 Publishes:   /ncp_debug       [std_msgs/String]      @ control.rate_hz (5 Hz)
 Parameters:  scan_topic       (str, "/scan")
@@ -79,15 +100,24 @@ Parameters:  pose_source      (str, "odom") — "odom" reads the pose from /odom
                               MAP frame on the first usable pose, so it stops
                               migrating with odometry drift. Read once at
                               startup; a runtime set is REJECTED.
+Parameters:  roam             (bool, false) — SETTABLE AT RUNTIME. On: the
+                              node draws its own next goal on arrival (after
+                              a dwell) or on a timeout. Off: the current goal
+                              is kept; nothing stops. Arms nothing.
+Parameters:  roam_config_path (str, <repo-relative default>) — path to
+                              config/roam.yaml, read once at startup whether
+                              or not roam is on.
 Failure mode:
     - Node refuses to construct (raises, never starts spinning) if:
         * `config/interface.yaml` cannot be read, or its `interface_version`
-          does not match `_EXPECTED_INTERFACE_VERSION` — a version mismatch
+          is not in `_SUPPORTED_INTERFACE_VERSIONS` — a version mismatch
           means the model and this code disagree about vector layout, which
           has no runtime error otherwise.
         * `config/safety_limits.yaml` cannot be read.
         * `cmd_vel_topic` resolves to `/cmd_vel`.
         * `weights` is non-empty and fails to load (see policy_runner.py).
+        * `config/roam.yaml` is missing, lacks a key, is incoherent, or its
+          `range_min_m` does not exceed `goal_reached_dist` (see roam.py).
     - Before the first `/odom` message: goal undefined -> publish zero every
       tick, throttled warning. No motion is possible on startup.
     - `pose_source:="map"` and the map -> base_footprint transform missing,
@@ -132,19 +162,30 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
 import tf2_ros
+from rm_policy.lidar_contract import lidar_contract_from
 from rm_policy.observation_builder import build_observation
 from rm_policy.policy_runner import PolicyRunner
 from rm_policy.pose_source import Pose2D, detect_pose_jump, pose_is_usable
+from rm_interfaces.msg import SafetyStatus
+from rm_policy.retreat import (
+    ABORTED, DISTANCE, NOT_CLEAR, RELEASED, STARTED, TIMEOUT as RETREAT_TIMEOUT,
+    TURNED, RetreatController, RetreatLimits, SafetyView, TurnController, TurnLimits,
+)
+from rm_policy.roam import (
+    RoamSequencer, Scan, load_roam_limits, nearest_return, recovery_bearing,
+)
 from rm_policy.vendor import ncp_policy
 
 # ---------------------------------------------------------------------------
-# Interface-contract version this node was written against. Loaded-and-checked
-# against config/interface.yaml's own `interface_version` at startup — see
-# `_load_interface_config`. A mismatch means the observation/action layout
-# this code assumes and the layout the checkpoint/contract actually specifies
-# have silently diverged, which otherwise produces no runtime error.
+# Interface-contract versions this node can run: one per policy profile
+# (3.0.0 = m4, 32 beams over 180 deg; 4.0.0 = m8v2, 720 over 270). The
+# contract file's `interface_version` must be one of these, and the network
+# is then built to that contract's width, so a checkpoint for the other
+# profile fails its strict load at startup. A layout this code has never seen
+# is refused outright: a mismatch produces no runtime error, only wrong
+# numbers.
 # ---------------------------------------------------------------------------
-_EXPECTED_INTERFACE_VERSION: str = "3.0.0"
+_SUPPORTED_INTERFACE_VERSIONS = ("3.0.0", "4.0.0")
 
 # ---------------------------------------------------------------------------
 # Default config paths — only valid in a standard colcon workspace layout
@@ -155,6 +196,7 @@ _EXPECTED_INTERFACE_VERSION: str = "3.0.0"
 _THIS_DIR = pathlib.Path(__file__).parent.resolve()
 _DEFAULT_INTERFACE_CONFIG_PATH = str(_THIS_DIR.parents[2] / "config" / "interface.yaml")
 _DEFAULT_SAFETY_LIMITS_PATH = str(_THIS_DIR.parents[2] / "config" / "safety_limits.yaml")
+_DEFAULT_ROAM_CONFIG_PATH = str(_THIS_DIR.parents[2] / "config" / "roam.yaml")
 
 # ---------------------------------------------------------------------------
 # Default topic names.
@@ -187,11 +229,10 @@ _DEFAULT_GOAL_Y_M: float = 0.0
 # applied). Matches policy_runner.PolicyRunner's own default.
 _DEFAULT_WEIGHTS_PATH: str = ""
 
-# Where the goal block sits in the 36-dim observation, and the constant its
-# normalization divides by. Both are fixed by the trained checkpoint
-# (config/interface.yaml observation.layout: 32 lidar, then goal_local, then
-# previous_action; `normalization: "xy / 5.0 - 1.0"`). Used ONLY to invert the
-# normalization for the debug stream — never to build the vector.
+# The goal block sits right after the lidar block (index `n_beams` of the
+# active contract), and `_GOAL_NORM_SCALE_M` is the constant its
+# normalization divides by (`normalization: "xy / 5.0 - 1.0"`). Used ONLY to
+# invert the normalization for the debug stream — never to build the vector.
 # Pose sources. "odom" reads the pose straight from /odom (the pre-SLAM
 # behaviour and still the default). "map" looks up map -> base_footprint via
 # TF, which is what slam_toolbox corrects. See pose_source.py.
@@ -204,7 +245,6 @@ _POSE_SOURCE_MAP: str = "map"
 _MAP_FRAME: str = "map"
 _BASE_FRAME: str = "base_footprint"
 
-_GOAL_SLICE_START: int = 32
 _GOAL_NORM_SCALE_M: float = 5.0
 
 # Throttle period (seconds) for repeated warning logs so a sustained fault
@@ -249,6 +289,8 @@ class PolicyNode(rclpy.node.Node):
         self.declare_parameter("safety_limits_path", _DEFAULT_SAFETY_LIMITS_PATH)
         self.declare_parameter("pose_source", _POSE_SOURCE_ODOM)
         self.declare_parameter("goal_reached_dist", ncp_policy.SUCCESS_DIST)
+        self.declare_parameter("roam", False)
+        self.declare_parameter("roam_config_path", _DEFAULT_ROAM_CONFIG_PATH)
 
         scan_topic = self._get_str_param("scan_topic")
         odom_topic = self._get_str_param("odom_topic")
@@ -260,6 +302,8 @@ class PolicyNode(rclpy.node.Node):
         interface_config_path = self._get_str_param("interface_config_path")
         safety_limits_path = self._get_str_param("safety_limits_path")
         self._goal_reached_dist = self._get_double_param("goal_reached_dist")
+        roam_config_path = self._get_str_param("roam_config_path")
+        roam_on = bool(self.get_parameter("roam").get_parameter_value().bool_value)
         self._pose_source = self._get_str_param("pose_source")
         if self._pose_source not in (_POSE_SOURCE_ODOM, _POSE_SOURCE_MAP):
             raise ValueError(
@@ -286,15 +330,16 @@ class PolicyNode(rclpy.node.Node):
         # wrong observation/action contract.
         # ------------------------------------------------------------------
         interface_cfg = self._load_yaml(interface_config_path, "interface.yaml")
-        interface_version = interface_cfg.get("interface_version")
-        if interface_version != _EXPECTED_INTERFACE_VERSION:
+        interface_version = str(interface_cfg.get("interface_version"))
+        if interface_version not in _SUPPORTED_INTERFACE_VERSIONS:
             raise RuntimeError(
-                f"policy_node: interface_version mismatch — this node was "
-                f"written against {_EXPECTED_INTERFACE_VERSION!r}, but "
-                f"{interface_config_path!r} declares {interface_version!r}. "
-                f"Refusing to start: the model and the code disagree about "
-                f"the observation/action vector layout."
+                f"policy_node: interface_version {interface_version!r} in "
+                f"{interface_config_path!r} is not one this node supports "
+                f"({', '.join(_SUPPORTED_INTERFACE_VERSIONS)}). Refusing to "
+                f"start: the model and the code disagree about the "
+                f"observation/action vector layout."
             )
+        self._interface_version = interface_version
         try:
             self._control_rate_hz: float = float(interface_cfg["control"]["rate_hz"])
         except (KeyError, TypeError, ValueError) as exc:
@@ -302,6 +347,21 @@ class PolicyNode(rclpy.node.Node):
                 f"policy_node: interface.yaml missing/invalid "
                 f"control.rate_hz: {exc}"
             ) from exc
+
+        # The lidar block: bin count, arc, range bounds, search window and
+        # self-occlusion zones. Its width (`obs_dim`) is what the network is
+        # built to, below; the contract's `total_dim` must say the same.
+        try:
+            self._lidar = lidar_contract_from(interface_cfg)
+        except ValueError as exc:
+            raise RuntimeError(f"policy_node: {exc}") from exc
+        total_dim = interface_cfg.get("observation", {}).get("total_dim")
+        if total_dim != self._lidar.obs_dim:
+            raise RuntimeError(
+                f"policy_node: {interface_config_path!r} declares total_dim "
+                f"{total_dim!r} but its lidar block implies "
+                f"{self._lidar.obs_dim} ({self._lidar.n_beams} + 4). Refusing to start."
+            )
 
         # ------------------------------------------------------------------
         # Load config/safety_limits.yaml — ONLY for the scan/odom staleness
@@ -334,11 +394,64 @@ class PolicyNode(rclpy.node.Node):
         self._pose_max_age_s: float = self._odom_timeout_ms / 1000.0
 
         # ------------------------------------------------------------------
+        # Roam limits — read whether or not roam is on, so a bad file refuses
+        # the node here rather than failing the first ROAM press. A goal drawn
+        # inside the arrival radius would hand off every dwell without
+        # driving, so the shortest leg must clear goal_reached_dist.
+        # ------------------------------------------------------------------
+        try:
+            roam_limits = load_roam_limits(roam_config_path)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"policy_node: {exc}") from exc
+        if roam_limits.range_min_m <= self._goal_reached_dist:
+            raise RuntimeError(
+                f"policy_node: {roam_config_path!r} range_min_m "
+                f"{roam_limits.range_min_m} must exceed goal_reached_dist "
+                f"{self._goal_reached_dist}: a goal drawn inside the arrival "
+                f"radius would hand off every dwell without driving."
+            )
+
+        # ------------------------------------------------------------------
         # Policy runner — constructed (and weights loaded, if given) before
         # any subscription/timer exists, so a bad weights file prevents the
         # node from starting at all.
         # ------------------------------------------------------------------
-        self._runner = PolicyRunner(weights_path=weights_path)
+        self._runner = PolicyRunner(
+            weights_path=weights_path, obs_dim=self._lidar.obs_dim,
+        )
+
+        # The roam sequencer owns the hand-off clocks and the next-goal draw.
+        # Built before any subscription: the first /odom callback can fix a
+        # goal, and every fix tells the sequencer.
+        self._roam = RoamSequencer(roam_limits)
+        self._roam.set_on(roam_on, time.monotonic())
+        # The retreat out of a stop-zone e-stop (rm_policy/retreat.py). The
+        # safety status it reads is bounded by the same age as the pose.
+        self._retreat = RetreatController(
+            RetreatLimits(
+                retreat_vx=roam_limits.retreat_vx, retreat_m=roam_limits.retreat_m,
+                retreat_timeout_s=roam_limits.retreat_timeout_s,
+                retreat_cooldown_s=roam_limits.retreat_cooldown_s,
+                retreat_pinned_range_m=roam_limits.retreat_pinned_range_m,
+                retreat_pinned_after_s=roam_limits.progress_window_s,
+            ),
+            status_max_age_s=self._odom_timeout_ms / 1000.0,
+        )
+        self._turn = TurnController(TurnLimits(
+            turn_wz=roam_limits.turn_wz, turn_tolerance_deg=roam_limits.turn_tolerance_deg,
+            turn_timeout_s=roam_limits.turn_timeout_s, turn_clear_m=roam_limits.turn_clear_m,
+        ))
+        # The recovery turn's target yaw after a retreat; None while the turn
+        # (if any) is a face-the-goal turn.
+        self._turn_target_yaw: Optional[float] = None
+        self._cmd_vel_topic = cmd_vel_topic
+        # The last /safety/status: state, reason, the forwarded input topic,
+        # and the monotonic time it arrived. None until the first message.
+        self._safety_state: Optional[int] = None
+        self._safety_reason: str = ""
+        self._safety_topic: str = ""
+        self._safety_min_range: float = math.inf
+        self._safety_stamp: Optional[float] = None
 
         # ------------------------------------------------------------------
         # Sensor state — everything starts "never received" (infinitely
@@ -408,6 +521,13 @@ class PolicyNode(rclpy.node.Node):
         # while the safety layer had already gone quiet, which is a confusing
         # disagreement to debug and buys nothing.
         self.create_subscription(Odometry, odom_topic, self._odom_cb, sensor_qos)
+        # /safety/status feeds EXACTLY ONE decision here: the retreat out of
+        # a stop-zone e-stop (retreat.py). Nothing else in this node reads
+        # it: no pause on KILLED, no arming, no source logic. The decision
+        # "policy_node reads no safety state" (2026-10-23) is re-opened for
+        # this one input and pinned to it by a test. Depth 10, the
+        # publisher's own profile.
+        self.create_subscription(SafetyStatus, "/safety/status", self._safety_cb, 10)
 
         # TF, only in map mode. Creating a TransformListener spawns a
         # subscription to /tf and /tf_static, so it is not free; in odom mode
@@ -433,6 +553,13 @@ class PolicyNode(rclpy.node.Node):
             f"rate={self._control_rate_hz} Hz, weights={weights_path or '<random>'!r}, "
             f"goal_offset=({self._goal_offset_x}, {self._goal_offset_y}) m — "
             f"NOT YET APPLIED (undefined until the first /odom message)."
+        )
+        self.get_logger().info(
+            f"policy_node: roam {'ON' if roam_on else 'off'}; limits from "
+            f"{roam_config_path!r}: {roam_limits.range_min_m}-"
+            f"{roam_limits.range_max_m} m within +-{roam_limits.bearing_cap_deg} "
+            f"deg, dwell {roam_limits.dwell_s} s, timeout {roam_limits.timeout_s} s, "
+            f"seed {roam_limits.seed}."
         )
         # Provenance, logged once at full length. The short form goes out on
         # /ncp_debug every tick; this is the line to grep when asking months
@@ -553,7 +680,7 @@ class PolicyNode(rclpy.node.Node):
         """Runtime re-targeting: setting `goal_x`/`goal_y` re-fixes the goal
         from the robot's CURRENT pose.
 
-        Only the goal offsets are settable. Topics, the weights path and the
+        Only the goal offsets and `roam` are settable. Topics, the weights path and the
         config paths are structural — changing them at runtime would mean a
         half-reconfigured node, so a set is REJECTED rather than accepted and
         ignored (the failure mode this project already hit once with
@@ -572,7 +699,14 @@ class PolicyNode(rclpy.node.Node):
         goal that no longer exists.
         """
         offsets = {}
+        roam: Optional[bool] = None
         for param in params:
+            if param.name == "roam":
+                # Declared bool: rclpy refuses a set of another type before
+                # this callback runs. Applied after the goal, below, so a
+                # mixed atomic set starts both clocks at the same instant.
+                roam = bool(param.value)
+                continue
             if param.name not in ("goal_x", "goal_y"):
                 return SetParametersResult(
                     successful=False,
@@ -588,38 +722,146 @@ class PolicyNode(rclpy.node.Node):
                 )
             offsets[param.name] = value
 
-        self._goal_offset_x = offsets.get("goal_x", self._goal_offset_x)
-        self._goal_offset_y = offsets.get("goal_y", self._goal_offset_y)
+        if offsets:
+            self._goal_offset_x = offsets.get("goal_x", self._goal_offset_x)
+            self._goal_offset_y = offsets.get("goal_y", self._goal_offset_y)
+            if self._odom_stamp is None:
+                # No pose yet, so there is nothing to re-fix against. The
+                # offsets are stored and the normal first-/odom path will
+                # apply them — this is not an error, and it must NOT invent
+                # a pose.
+                self.get_logger().warn(
+                    "policy_node: goal offset updated to "
+                    f"({self._goal_offset_x}, {self._goal_offset_y}) but no /odom "
+                    "has arrived — goal stays UNDEFINED until it does."
+                )
+            else:
+                self._fix_goal(self._goal_offset_x, self._goal_offset_y,
+                               why="parameter set")
+        if roam is not None:
+            self._set_roam(roam)
+        return SetParametersResult(successful=True)
 
-        if self._odom_stamp is None:
-            # No pose yet, so there is nothing to re-fix against. The offsets
-            # are stored and the normal first-/odom path will apply them —
-            # this is not an error, and it must NOT invent a pose.
-            self.get_logger().warn(
-                "policy_node: goal offset updated to "
-                f"({self._goal_offset_x}, {self._goal_offset_y}) but no /odom "
-                "has arrived — goal stays UNDEFINED until it does."
+    def _set_roam(self, on: bool) -> None:
+        """Switch roam. Logged either way; the current goal is always kept.
+
+        Switching off never stops the robot: it drives to the current goal
+        and latches there as it always did. KILL is the stop.
+        """
+        changed = self._roam.set_on(on, time.monotonic())
+        lim = self._roam.limits
+        if on:
+            self.get_logger().info(
+                f"policy_node: roam ON{'' if changed else ' (already on)'}: "
+                f"next goal drawn {lim.dwell_s} s after arrival, "
+                f"{lim.timeout_s} s after a fix with no arrival, or after "
+                f"{lim.progress_window_s} s without {lim.progress_min_m} m of "
+                f"progress; {lim.range_min_m}-{lim.range_max_m} m within "
+                f"+-{lim.bearing_cap_deg} deg, in free space ({lim.clearance_m} m "
+                f"clearance, {lim.corridor_half_width_m} m half-width), seed "
+                f"{lim.seed}; current goal kept."
             )
-            return SetParametersResult(successful=True)
+        else:
+            self.get_logger().info(
+                f"policy_node: roam OFF{'' if changed else ' (already off)'} after "
+                f"{self._roam.n} hand-off(s), {self._roam.timeouts} timeout(s), "
+                f"{self._roam.stalls} stall(s), {self._roam.held} held; "
+                f"current goal kept, the robot stops there."
+            )
 
-        dx, dy = _rotate_2d(
-            self._goal_offset_x, self._goal_offset_y, self._robot_yaw
-        )
+    def _fix_goal(self, offset_x: float, offset_y: float, why: str) -> None:
+        """Fix the goal from the CURRENT pose. The ONE place the goal is written.
+
+        `(offset_x, offset_y)` is a robot-frame offset, rotated by the current
+        yaw and added to the current position: a one-time frame conversion
+        done at fix time. It is NOT the per-tick robot-frame `local_goal()`
+        transform that observation_builder performs every tick against this
+        fixed point (interface.yaml goal_local.preprocessing). The two are
+        different operations, and this one is not part of the frozen per-tick
+        observation formula, so computing it here duplicates nothing
+        observation_builder owns.
+
+        A new goal is a new episode: the arrival latch clears (or the robot
+        would sit still having "already arrived" somewhere it no longer is),
+        the recurrent state resets (a CfC carries its history, and the
+        objective changing underneath it is exactly the discontinuity
+        `PolicyRunner.reset()` exists for), and the fed-back previous action
+        returns to the zero a training episode starts from (interface.yaml
+        previous_action init_note). Callers: the first /odom pose, the first
+        map pose, a parameter set, and a roam hand-off.
+        """
+        dx, dy = _rotate_2d(offset_x, offset_y, self._robot_yaw)
         self._goal_world_x = self._robot_x + dx
         self._goal_world_y = self._robot_y + dy
-        # A new goal is a new episode: clear the arrival latch, or the robot
-        # would sit still having "already arrived" somewhere it no longer is.
         self._goal_reached = False
+        self._prev_action_v = 0.0
+        self._prev_action_w = 0.0
         self._runner.reset()
+        self._roam.goal_fixed(time.monotonic())
+        self._retreat.goal_fixed()
+        self._turn.cancel("new goal")
+        frame = _MAP_FRAME if self._pose_source == _POSE_SOURCE_MAP else "odom"
         self.get_logger().info(
-            f"policy_node: re-targeted to offset "
-            f"({self._goal_offset_x}, {self._goal_offset_y}) m from the current "
-            f"pose — goal now ({self._goal_world_x:.3f}, "
-            f"{self._goal_world_y:.3f}) in "
-            f"{_MAP_FRAME if self._pose_source == _POSE_SOURCE_MAP else 'odom'}"
-            f"; recurrent state reset."
+            f"policy_node: goal fixed ({why}) at ({self._goal_world_x:.3f}, "
+            f"{self._goal_world_y:.3f}) in {frame} from pose "
+            f"({self._robot_x:.3f}, {self._robot_y:.3f}, yaw {self._robot_yaw:.3f}) "
+            f"+ offset ({offset_x:.2f}, {offset_y:.2f}) m; recurrent state reset."
         )
-        return SetParametersResult(successful=True)
+
+    def _safety_cb(self, msg: SafetyStatus) -> None:
+        self._safety_state = int(msg.state)
+        self._safety_reason = str(msg.reason)
+        self._safety_topic = str(msg.command_topic)
+        self._safety_min_range = float(msg.min_range)
+        self._safety_stamp = time.monotonic()
+
+    def _safety_view(self, now: float) -> SafetyView:
+        age = math.inf if self._safety_stamp is None else now - self._safety_stamp
+        return SafetyView(self._safety_state, self._safety_reason, age,
+                          self._safety_topic, self._safety_min_range)
+
+    def _goal_bearing(self) -> float:
+        """The fixed goal's bearing in the robot frame, radians, +left."""
+        dx = self._goal_world_x - self._robot_x
+        dy = self._goal_world_y - self._robot_y
+        lx, ly = _rotate_2d(dx, dy, -self._robot_yaw)
+        return math.atan2(ly, lx)
+
+    def _after_roam_handoff(self, now: float) -> None:
+        """A roam hand-off just fixed a goal: if it lies off the nose, turn
+        toward it first. The policy cannot steer to a goal beside or behind
+        it (M4 pushes forward instead), and the draw's fallback puts goals
+        there whenever nothing ahead is free."""
+        bearing = self._goal_bearing()
+        if self._turn.needed(bearing):
+            self._turn.start(now)
+            self.get_logger().info(
+                f"policy_node: turn START: the new goal is "
+                f"{math.degrees(bearing):+.0f} deg off the nose; turning in place at "
+                f"{self._turn.limits.turn_wz} rad/s to within "
+                f"{self._turn.limits.turn_tolerance_deg} deg."
+            )
+
+    def _publish_turn(self, wz: float) -> None:
+        """The turn's command: yaw only, through the one publisher;
+        `previous_action` untouched, as for the retreat."""
+        cmd = Twist()
+        cmd.linear.x = 0.0
+        cmd.linear.y = 0.0
+        cmd.angular.z = float(wz)
+        self._cmd_pub.publish(cmd)
+        self._publish_debug(fault=None, action=(0.0, float(wz)))
+
+    def _publish_reverse(self, vx: float) -> None:
+        """The retreat's command: straight reverse, nothing else, through the
+        one publisher. `previous_action` is left alone: this is not the
+        policy's request and must not enter its fed-back history."""
+        cmd = Twist()
+        cmd.linear.x = float(vx)
+        cmd.linear.y = 0.0
+        cmd.angular.z = 0.0
+        self._cmd_pub.publish(cmd)
+        self._publish_debug(fault=None, action=(float(vx), 0.0))
 
     def _scan_cb(self, msg: LaserScan) -> None:
         self._scan_ranges = list(msg.ranges)
@@ -638,25 +880,10 @@ class PolicyNode(rclpy.node.Node):
         self._odom_stamp = time.monotonic()
 
         if self._goal_world_x is None and self._pose_source == _POSE_SOURCE_ODOM:
-            # Fix the goal ONCE, from the first /odom message: start position
-            # plus the launch-parameter (goal_x, goal_y) offset, rotated by
-            # the start yaw into the world (odom) frame. This is a one-time
-            # frame conversion done here at "start pose capture" time — it is
-            # NOT the per-tick robot-frame `local_goal()` transform that
-            # observation_builder performs every tick against this fixed
-            # point (see interface.yaml goal_local.preprocessing). The two
-            # are different operations and this one is not part of the
-            # frozen per-tick observation formula, so computing it here does
-            # not duplicate anything observation_builder owns.
-            dx, dy = _rotate_2d(self._goal_offset_x, self._goal_offset_y, yaw)
-            self._goal_world_x = pos.x + dx
-            self._goal_world_y = pos.y + dy
-            self.get_logger().info(
-                f"policy_node: goal fixed at odom-frame "
-                f"({self._goal_world_x:.3f}, {self._goal_world_y:.3f}) m "
-                f"(start ({pos.x:.3f}, {pos.y:.3f}), yaw {yaw:.3f} rad, "
-                f"offset ({self._goal_offset_x}, {self._goal_offset_y}) m)."
-            )
+            # Fix the goal ONCE, from the first /odom message: the start pose
+            # was just written to self._robot_*. See _fix_goal.
+            self._fix_goal(self._goal_offset_x, self._goal_offset_y,
+                           why="first /odom pose")
 
     # ------------------------------------------------------------------
     # Publish helpers
@@ -714,7 +941,14 @@ class PolicyNode(rclpy.node.Node):
             # "the goal is drifting" and "the goal is fixed in a corrected
             # frame" look identical on a plot until you know which mode ran.
             "pose_source": self._pose_source,
+            "interface_version": self._interface_version,
+            "n_beams": self._lidar.n_beams,
             "goal_reached": self._goal_reached,
+            # What roam is doing: on/off, hand-offs, timeouts, the last
+            # reason and the age of the current goal, so the timeout is
+            # visible before it fires.
+            "roam": {**self._roam.status(time.monotonic()), **self._retreat.status(),
+                     **self._turn.status()},
             "weights": self._runner.weights_path or None,
             # Short hash is enough to tell two checkpoints apart at a glance
             # while keeping this message small at 5 Hz; the full hash is in
@@ -824,6 +1058,11 @@ class PolicyNode(rclpy.node.Node):
         jump = detect_pose_jump(self._prev_pose, pose)
         if jump is not None:
             self._runner.reset()
+            if self._retreat.abort("pose_jump", now) is not None:
+                self.get_logger().warn(
+                    "policy_node: retreat ABORTED: the pose jumped mid-reverse, "
+                    "so the start pose is in another frame. Current goal kept."
+                )
             self.get_logger().warn(
                 f"policy_node: pose discontinuity ({jump}) — recurrent state "
                 f"reset. Expected on a SLAM loop closure; investigate if it "
@@ -838,16 +1077,129 @@ class PolicyNode(rclpy.node.Node):
         # the odom frame migrates with the odometry drift; one fixed in the
         # map frame does not.
         if self._goal_world_x is None and self._pose_source == _POSE_SOURCE_MAP:
-            dx, dy = _rotate_2d(
-                self._goal_offset_x, self._goal_offset_y, pose.yaw
+            self._fix_goal(self._goal_offset_x, self._goal_offset_y,
+                           why=f"first {_MAP_FRAME} pose")
+
+        # The raw scan as the roam draw reads it (the scan watchdog above
+        # guarantees it is fresh); built once for the retreat and for roam.
+        scan = Scan(self._scan_ranges, self._scan_angle_min,
+                    self._scan_angle_increment, self._lidar.range_min_m)
+
+        # ------------------------------------------------------------------
+        # RETREAT out of a stop-zone e-stop (2026-10-23, retreat.py). Sits
+        # after the pose checks (a retreat measures its own displacement)
+        # and before the goal block (it is not the policy; the network does
+        # not run and previous_action is untouched while it reverses). The
+        # safety status feeds this and nothing else in the node.
+        # ------------------------------------------------------------------
+        step = self._retreat.step(
+            now, self._safety_view(now), (self._robot_x, self._robot_y),
+            self._roam.on, self._cmd_vel_topic, self._prev_action_v,
+            stalled_s=self._roam.no_progress_s(now),
+        )
+        if step is not None:
+            if not step.done:
+                if step.reason == STARTED:
+                    self._turn.cancel("retreat")
+                    self._turn_target_yaw = None
+                    lim = self._retreat.limits
+                    self.get_logger().warn(
+                        f"policy_node: retreat START ({self._retreat.start_cause}: "
+                        f"{'stop-zone latched' if self._retreat.start_cause == 'latched' else 'pinned in the slow band with no progress'}"
+                        f" while roaming); reversing straight at {lim.retreat_vx} m/s, "
+                        f"up to {lim.retreat_m} m or {lim.retreat_timeout_s} s, until "
+                        f"rm_safety reports clear."
+                    )
+                self._publish_reverse(step.vx)
+                return
+            if step.reason in (RELEASED, DISTANCE):
+                # RECOVERY TURN: away from what stopped the robot, between
+                # recovery_turn_min_deg and max, toward the deepest free
+                # strip; the goal is drawn once the robot faces that way.
+                bearing = recovery_bearing(scan, self._roam.limits)
+                self._turn_target_yaw = self._robot_yaw + bearing
+                self._turn.start(now)
+                self.get_logger().warn(
+                    f"policy_node: retreat ended ({step.reason}); turn START "
+                    f"(recovery): {math.degrees(bearing):+.0f} deg toward the "
+                    f"deepest free strip, then a new goal ahead."
+                )
+                self._publish_zero(reason="turning")
+                return
+            elif step.reason == RETREAT_TIMEOUT:
+                self.get_logger().warn(
+                    "policy_node: retreat TIMEOUT with the latch still held: "
+                    "the wheels did not move, dry_run, or an obstacle beside the "
+                    "robot. Holding the current goal; jog it out."
+                )
+                self._publish_zero(reason="retreat_timeout")
+                return
+            else:
+                self.get_logger().warn(
+                    f"policy_node: retreat {step.reason}; zero published, current "
+                    f"goal kept."
+                )
+                self._publish_zero(reason=(step.reason or ABORTED).replace(":", "_"))
+                return
+        elif self._retreat.hold_reason:
+            self.get_logger().warn(
+                f"policy_node: stop-zone latched while roaming but not retreating: "
+                f"{self._retreat.hold_reason}. KILL, reset and jog it out.",
+                throttle_duration_sec=_WARN_THROTTLE_SEC,
             )
-            self._goal_world_x = pose.x + dx
-            self._goal_world_y = pose.y + dy
-            self.get_logger().info(
-                f"policy_node: goal fixed in the {_MAP_FRAME} frame at "
-                f"({self._goal_world_x:.3f}, {self._goal_world_y:.3f}) from "
-                f"pose ({pose.x:.3f}, {pose.y:.3f}, {pose.yaw:.3f})."
-            )
+
+        # ------------------------------------------------------------------
+        # TURN in place toward a roam goal off the nose (retreat.py). After
+        # the retreat (which cancels it) and before the goal block: the
+        # network does not run and previous_action is untouched while the
+        # robot turns. Only with nothing within turn_clear_m of the body.
+        # ------------------------------------------------------------------
+        if self._turn.active and self._goal_world_x is not None:
+            clear = nearest_return(scan, self._roam.limits.self_radius_m) >= \
+                self._turn.limits.turn_clear_m
+            recovering = self._turn_target_yaw is not None
+            error = (math.atan2(math.sin(self._turn_target_yaw - self._robot_yaw),
+                                math.cos(self._turn_target_yaw - self._robot_yaw))
+                     if recovering else self._goal_bearing())
+            turn = self._turn.step(now, error, clear)
+            if not turn.done:
+                self._publish_turn(turn.wz)
+                return
+            self._turn_target_yaw = None
+            if recovering:
+                # Facing away now: draw the next goal from here. A hold
+                # (nothing free even here) keeps the old goal and warns.
+                self.get_logger().info(
+                    f"policy_node: recovery turn ended ({turn.reason}); drawing a goal ahead."
+                )
+                handoff = self._roam.retreated(now, scan)
+                if handoff is not None:
+                    self._fix_goal(
+                        handoff.offset_x, handoff.offset_y,
+                        why=f"roam #{handoff.n} {handoff.reason} after "
+                            f"{handoff.elapsed_s:.0f} s, free on draw {handoff.attempts}; "
+                            f"totals {self._roam.n} hand-offs",
+                    )
+                    self._after_roam_handoff(now)
+                    if self._turn.active:
+                        self._publish_zero(reason="turning")
+                        return
+                else:
+                    self.get_logger().warn(
+                        "policy_node: recovery turn done but no candidate goal is in "
+                        "free space; holding the current goal."
+                    )
+            elif turn.reason == TURNED:
+                self.get_logger().info(
+                    f"policy_node: turn DONE: goal {math.degrees(self._goal_bearing()):+.0f} "
+                    f"deg off the nose; the policy takes over, roam clocks restarted."
+                )
+                self._roam.goal_fixed(now)
+            else:
+                self.get_logger().warn(
+                    f"policy_node: turn ended ({turn.reason}); the policy gets the goal "
+                    f"as drawn, {math.degrees(self._goal_bearing()):+.0f} deg off the nose."
+                )
 
         # ------------------------------------------------------------------
         # Goal must be defined. No default is ever substituted (interface.yaml
@@ -908,6 +1260,35 @@ class PolicyNode(rclpy.node.Node):
                 f"episode ending, as it would in training. Re-target to start "
                 f"another."
             )
+        # ROAM. Sits here and nowhere earlier: every return above this line
+        # is a tick without a trusted pose, and a goal can only be fixed from
+        # one. One decision per tick. A hand-off is a re-target, so it clears
+        # the latch and this same tick drives toward the new goal. With roam
+        # off the sequencer only records the arrival edge and returns None.
+        # The raw scan (the scan watchdog above guarantees it is fresh) is
+        # what keeps the next goal out of walls; the goal distance feeds the
+        # progress watchdog.
+        handoff = self._roam.step(now, self._goal_reached, goal_dist, scan)
+        if handoff is not None:
+            self._fix_goal(
+                handoff.offset_x, handoff.offset_y,
+                why=f"roam #{handoff.n} {handoff.reason} after "
+                    f"{handoff.elapsed_s:.0f} s, free on draw {handoff.attempts}; "
+                    f"totals {self._roam.n} hand-offs, {self._roam.timeouts} "
+                    f"timeouts, {self._roam.stalls} stalls, {self._roam.held} held",
+            )
+            self._after_roam_handoff(now)
+            if self._turn.active:
+                # Face it first; the turn block above runs from the next tick.
+                self._publish_zero(reason="turning")
+                return
+        elif self._roam.holding:
+            self.get_logger().warn(
+                "policy_node: roam: a hand-off is due but no candidate goal is "
+                "in free space the lidar can see — holding the current goal "
+                "and retrying once a second. Jog the robot into open floor.",
+                throttle_duration_sec=_WARN_THROTTLE_SEC,
+            )
         if self._goal_reached:
             self._publish_zero(reason="goal_reached")
             return
@@ -924,6 +1305,12 @@ class PolicyNode(rclpy.node.Node):
             yaw=self._robot_yaw,
             goal_xy=(self._goal_world_x, self._goal_world_y),
             previous_action=(self._prev_action_v, self._prev_action_w),
+            n_beams=self._lidar.n_beams,
+            arc_deg=self._lidar.arc_deg,
+            range_min=self._lidar.range_min_m,
+            range_max=self._lidar.range_max_m,
+            search_window_bins=self._lidar.search_window_bins,
+            mask_zones_deg=self._lidar.mask_zones_deg,
         )
 
         if obs_result.fault is not None or obs_result.obs is None:
@@ -993,8 +1380,8 @@ class PolicyNode(rclpy.node.Node):
             action=(v, w),
             obs=obs_result.obs,
             goal_local=(
-                (float(obs_result.obs[_GOAL_SLICE_START]) + 1.0) * _GOAL_NORM_SCALE_M,
-                (float(obs_result.obs[_GOAL_SLICE_START + 1]) + 1.0) * _GOAL_NORM_SCALE_M,
+                (float(obs_result.obs[self._lidar.n_beams]) + 1.0) * _GOAL_NORM_SCALE_M,
+                (float(obs_result.obs[self._lidar.n_beams + 1]) + 1.0) * _GOAL_NORM_SCALE_M,
             ),
         )
 
