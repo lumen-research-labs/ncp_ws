@@ -16,13 +16,14 @@ observation, runs the network, and publishes a *candidate* command.
 |---|---|---|
 | `vendor/ncp_policy.py` | **vendored, byte-exact** | The CfC/AutoNCP network, copied unmodified from the checkpoint's source repo. Never edited. See `vendor/VENDOR.md`. |
 | `scan_resampler.py` | pure module | Reduces a ~2000-point 360° TG30 scan to a fixed-length forward-arc vector, in metres. |
-| `observation_builder.py` | pure module | Assembles the 724-element observation. Thin — all normalization is done by the vendored module. |
-| `policy_runner.py` | pure module | Loads the checkpoint, owns the recurrent state, runs one inference tick. No ROS. |
+| `observation_builder.py` | pure module | Assembles the 724-element observation. Thin: the vendored module does the normalization, and the previous-action block is re-normalized by the profile's action bounds. |
+| `policy_runner.py` | pure module | Loads the checkpoint, owns the recurrent state, runs one inference tick, clips to the contract's action bounds. No ROS. |
 | `pose_source.py` | pure module | Validates a pose sample and detects discontinuities (SLAM loop closures). |
 | `roam.py` | pure module | ROAM mode: the limits in `config/roam.yaml` and the hand-off clock that draws the next random goal on arrival or timeout. See [`docs/roam.md`](../../docs/roam.md). |
 | `retreat.py` | pure module | ROAM's manoeuvres: the straight reverse out of a stop-zone e-stop (the one command rm_safety passes under its latch) and the turn in place toward a goal off the nose. |
 | `policy_node.py` | ROS2 node | The control loop. The production path. |
 | `lidar_contract.py` | pure module | Reads the lidar block of `config/interface.yaml` (bins, arc, range bounds, search window, self-occlusion zones) for both nodes. |
+| `action_contract.py` | pure module | Reads the action block (the trained bounds) of a profile's interface file; 5.0.0 (M9) differs from the vendored constants. See [`docs/interface_versions.md`](../../docs/interface_versions.md). |
 | `scan_bridge_node.py` | ROS2 node | `/scan` → `/ncp/scan`, 720 beams. Exists only so the *upstream* node can run unmodified. |
 | `scan_sanitizer_node.py` | ROS2 node | `/scan` → `/scan_sanitized`, full resolution, `0.0` → `+inf`. For third-party consumers (slam_toolbox). |
 

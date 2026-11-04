@@ -161,9 +161,9 @@ bash scripts/run_stack.sh command_source:=teleop with_slam:=true
 not get from `~/.bashrc`, sets `ROS_DOMAIN_ID=28`, and passes every argument
 straight through to `ncp.launch.py`.
 
-This starts about 13 nodes: lidar → `rm_base` → odom chain → `rm_safety` →
-scan bridge → `policy_node_m8v2` and `policy_node_m4` → dashboard, plus SLAM.
-Both trained policies run; `rm_safety` forwards only the one named by
+This starts about 14 nodes: lidar → `rm_base` → odom chain → `rm_safety` →
+scan bridge → `policy_node_m8v2`, `policy_node_m4` and `policy_node_m9` →
+dashboard, plus SLAM. All three trained policies run; `rm_safety` forwards only the one named by
 `command_source` (§6).
 
 **Nothing can move yet.** `rm_safety` comes up **KILLED**, and
@@ -222,7 +222,7 @@ Two things worth knowing how to read:
 ### What the controls can do
 
 The page can **kill**, **reset (arm)**, **switch `command_source`** (one
-button per source: `teleop`, `policy`, `m8v2`, `m4`; a policy button is
+button per source: `teleop`, `policy`, `m8v2`, `m4`, `m9`; a policy button is
 greyed until its node is publishing), **re-target the goal** on every running
 policy, **switch ROAM** on every running policy (random goals; see
 [`roam.md`](roam.md)), **send a waypoint**, **jog** with WASD, and **reset the SLAM map**
@@ -298,6 +298,7 @@ others entirely. The sources are the rows of `config/topics.yaml`
                                                 command_source
 /policy/m8v2/cmd_vel ── policy_node_m8v2 ──────────┐   selects ONE
 /policy/m4/cmd_vel   ── policy_node_m4   ──────────┤
+/policy/m9/cmd_vel   ── policy_node_m9   ──────────┤
 /policy/cmd_vel      ── upstream consumer / bench ─┼──► rm_safety ──► /cmd_vel ──► rm_base
 /teleop/cmd_vel  ──┬── gamepad ────────────────────┘         ▲
                    └── rm_waypoint (goto + jog)              │
@@ -310,6 +311,7 @@ others entirely. The sources are the rows of `config/topics.yaml`
 | `teleop` **(default)** | `/teleop/cmd_vel` | the gamepad (`teleop_joy.launch.py`) and `rm_waypoint` |
 | `m8v2` | `/policy/m8v2/cmd_vel` | `policy_node_m8v2` (M8-v2, 720 beams, interface 4.0.0) |
 | `m4` | `/policy/m4/cmd_vel` | `policy_node_m4` (M4, 32 beams, interface 3.0.0) |
+| `m9` | `/policy/m9/cmd_vel` | `policy_node_m9` (M9, 720 beams, interface 5.0.0, trained at the robot's clamps) |
 | `policy` | `/policy/cmd_vel` | the upstream node (`consumer:=upstream`) or a bench tool |
 
 ### Why `teleop` is the default
@@ -445,8 +447,9 @@ and `command_source` picks which one `rm_safety` forwards.
 |---|---|---|---|---|
 | `m8v2` | 720 over 270° | `config/interface.yaml` (4.0.0) | `actor.pt`, sha `71cc50ae…` | 63% / 0.219 |
 | `m4` | 32 over 180° | `config/interface_m4.yaml` (3.0.0) | `actor_m4.pt`, sha `3c9bf0ee…` | 30% / 0.113 |
+| `m9` | 720 over 270° | `config/interface_m9.yaml` (5.0.0) | `actor_m9.pt`, sha `bf4e1ba2…` | 52% (Gazebo rooms) / not run; follows the goal |
 
-Switch from the dashboard (press `m4` or `m8v2`, confirm, then ARM) or from a
+Switch from the dashboard (press `m4`, `m8v2` or `m9`, confirm, then ARM) or from a
 terminal:
 
 ```bash

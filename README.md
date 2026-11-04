@@ -195,7 +195,8 @@ config/         interface.yaml (THE contract), safety_limits.yaml,
                 base_calibration.yaml, waypoint.yaml, roam.yaml,
                 slam_toolbox.yaml, topics.yaml, fastdds_unicast_peers.xml
 docs/           architecture, operating_guide, roam, interface_contract,
-                safety_validation, deployment, workstation_setup
+                interface_versions, add_a_policy_profile, safety_validation,
+                deployment, workstation_setup
 src/            the seven rm_* packages (see the table above)
 scripts/        setup_workstation.sh (a fresh PC), deploy_to_robot.sh,
                 deploy_upstream.sh, prep_robot.sh,
@@ -211,8 +212,8 @@ archive/        retired code and docs, indexed in archive/README.md; never built
 python3 -m pytest tests/          # unit + replay; no ROS runtime needed
 ```
 
-Robot tier: **408 tests.** Workstation tier is smaller — no torch, numpy or
-ncps here, so checkpoint tests skip.
+Workstation tier: **742 pass, 8 skip** (torch and ncps are absent here, so the
+checkpoint and observation tests skip). The robot tier runs them all.
 
 **Hardware tests require a human operator with the kill command in hand and are
 never run by an agent.**

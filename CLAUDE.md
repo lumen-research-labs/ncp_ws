@@ -1914,6 +1914,38 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     circle, so the long way is rare; the honest outcome of a close object
     is no turn. Returns under 0.25 m count as the body only beyond +-95 deg
     (the rear sectors); a short return ahead is an obstacle.
+  * **2026-11-04, later: M9 on the robot as the `m9` profile (Daniel: "make
+    it so that I can have a m9 button on the dashboard").** Exported
+    `runs/m9_gz/archive/s152000` on the box (`obs_dim=724 units=256
+    motor=128`, max action diff vs SB3 0.0, sha `bf4e1ba21b73...`),
+    committed upstream as `weights/actor_m9.pt` (0e1bbe1). M9's SB3 action
+    space is [-0.25, 0.25] x [-0.8, 0.8], the robot's clamps, where the
+    vendored `ncp_policy` hardcodes M8-v2's [-1, 2] x [-3.14, 3.14] in
+    `build_obs` and `NcpActor.act`; the training env clips the action to
+    the space in `step()` and feeds the CLIPPED action back. So the bounds
+    now come from each profile's contract (`rm_policy/action_contract.py`,
+    `action.layout` ranges): `observation_builder` re-normalizes the
+    previous-action block by them, `policy_runner` clips to them after the
+    actor's own clip (and refuses bounds wider than the vendored clip),
+    `policy_node` logs and publishes them (`action_bounds`). 3.0.0 and
+    4.0.0 declare the vendored numbers exactly (pinned: the automated
+    pi-is-not-pi check), so m8v2 and m4 are bit-for-bit unchanged; the
+    vendored file is untouched. `config/interface_m9.yaml` is 5.0.0 (a copy
+    of 4.0.0 with the checkpoint block, the previous-action text, the
+    ranges and the authority note changed); `ncp.launch.py` `_PROFILES` and
+    `_DEFAULT_PROFILES` ("m8v2,m4,m9"), the `m9` row in `topics.yaml` (the
+    dashboard button comes from the row, no HTML change), `deploy_upstream`
+    `CRITICAL`, `record_run.sh`. Snapshot choice: phase B (Gazebo with the
+    X3, the rendered lidar at the real mount), as M8-v2 was; the 2D best
+    `s1627328` stays on the box. Docs: `docs/add_a_policy_profile.md`
+    (how-to), `docs/interface_versions.md` (the contract doc split at the
+    600-word cap), `tests/unit/test_docs.py` (index, cap, em-dash, the
+    how-to's registration points). 29c3cc5, a6350d5 + docs. The robot
+    dropped off the network during the deploy (no route to .100); the
+    deploy, the rebuild and the restart are owed, then the floor test
+    (select m9, ARM, a goal ahead, then one beside: M8-v2 ignores it, M9
+    should turn). The roam cone is still the shared +-45 deg; M9 trained on
+    random bearings, so a wider per-profile cone is the follow-up.
   * **Second live run (zones on): the robot reached its first goal and HELD
     there** ("no candidate goal in free space"). The captured scan
     (`tests/fixtures/tg30_roam_hold_scan.yaml`, 2020 rays, 29 % no-returns)
@@ -1931,8 +1963,8 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     physical obstacles along the glass wall (the lidar does not see glass),
     so no map-frame fence was built. **The live run continues.**
   * Also this day: the M9 Gazebo fine-tune finished on the box 2026-10-17
-    (best 0.52 in Gazebo vs 0.46 zero-shot; M9 still not exported to the
-    robot), the three repos were pushed to GitHub (`lumen-research-labs/
+    (best 0.52 in Gazebo vs 0.46 zero-shot; exported and deployed as the
+    `m9` profile on 2026-11-04, below), the three repos were pushed to GitHub (`lumen-research-labs/
     ncp_ws` five branches, `NCP-on-Rosmaster` `feat/720-beam-270fov`, new
     private `optomotive`), and bernard-1 came back after a week off the
     network (clock pushed, stack up with the default profiles).
@@ -2137,8 +2169,9 @@ strip the scan shows, draws a new goal ahead in free space, drives. Owed:
 the live run of that whole sequence (the retreat and the recovery turn have
 run their unit, replay and dry-run tests, not the floor), `retreat_m`,
 `timeout_s`, `progress_window_s` set from a real run, the yaw-at-0.15 m open
-item, M9's export (not deployed), and the Phase 2 sign-off rows for the
-retreat (safety_validation.md 3e). A fresh workstation: `docs/workstation_setup.md`
+item, M9's floor test (exported and deployed 2026-11-04 as the `m9` profile,
+interface 5.0.0), and the Phase 2 sign-off rows for the retreat
+(safety_validation.md 3e). A fresh workstation: `docs/workstation_setup.md`
 and `scripts/setup_workstation.sh`.
 
 ### Robot state at end of 2026-08-29 session 8

@@ -757,15 +757,6 @@ def _doc_files():
             yield readme
 
 
-def test_roam_doc_exists_is_indexed_and_under_the_cap():
-    doc = os.path.join(_DOCS, "roam.md")
-    assert os.path.isfile(doc)
-    assert "](roam.md)" in _read(os.path.join(_DOCS, "README.md"))
-    text = _read(doc)
-    assert len(text.split()) <= 600
-    assert "—" not in text
-
-
 def test_every_relative_doc_link_resolves():
     broken = []
     for doc in _doc_files():
