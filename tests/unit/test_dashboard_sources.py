@@ -30,7 +30,7 @@ _INDEX = os.path.join(_REPO_ROOT, "src", "rm_dashboard", "rm_dashboard", "static
 _PACKAGE = os.path.join(_REPO_ROOT, "src", "rm_dashboard", "package.xml")
 _TOPICS = os.path.join(_REPO_ROOT, "config", "topics.yaml")
 
-POLICIES = ["policy", "m8v2", "m4"]   # table order
+POLICIES = ["policy", "m8v2", "m4", "m9"]   # table order
 
 
 def _read(path: str) -> str:

@@ -97,6 +97,7 @@ CRITICAL=(
   "rosmaster/node.py"
   "weights/actor.pt"       # m8v2 profile (default)
   "weights/actor_m4.pt"    # m4 profile (profile:=m4)
+  "weights/actor_m9.pt"    # m9 profile (profile:=m9)
 )
 
 echo "==> Source: ${SRC}"

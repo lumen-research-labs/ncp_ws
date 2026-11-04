@@ -69,7 +69,7 @@ Launch arguments:
                   ever cruising.
 
     profiles      Comma-separated list of trained policies to run, default
-                  "m8v2,m4" (both). Each name is a row of the _PROFILES
+                  "m8v2,m4,m9" (all). Each name is a row of the _PROFILES
                   table below (contract file + checkpoint) AND a row of
                   config/topics.yaml command_sources (node name, command
                   topic, debug stream):
@@ -79,6 +79,10 @@ Launch arguments:
                       "m4"    config/interface_m4.yaml (3.0.0), 32 beams
                               over 180 deg, <upstream>/weights/actor_m4.pt;
                               policy_node_m4 -> /policy/m4/cmd_vel
+                      "m9"    config/interface_m9.yaml (5.0.0), 720 beams
+                              over 270 deg, trained at the robot's clamps
+                              (+-0.25 m/s, +-0.8 rad/s), <upstream>/weights/
+                              actor_m9.pt; policy_node_m9 -> /policy/m9/cmd_vel
                   Every listed policy runs at once. rm_safety forwards only
                   the row named by command_source, so the live policy is
                   chosen with `ros2 param set /safety_node command_source
@@ -283,11 +287,12 @@ _UPSTREAM_SOURCE = "policy"
 _PROFILES = {
     "m8v2": ("interface.yaml", "actor.pt"),
     "m4": ("interface_m4.yaml", "actor_m4.pt"),
+    "m9": ("interface_m9.yaml", "actor_m9.pt"),
 }
 # The profile the upstream consumer needs first in the list (the vendored
 # module is fixed at its beam count), and the first of the default list.
 _DEFAULT_PROFILE = "m8v2"
-_DEFAULT_PROFILES = "m8v2,m4"
+_DEFAULT_PROFILES = "m8v2,m4,m9"
 # Sentinel default for `weights` / `interface_config_path`: resolve from the
 # profile. Needed because '' already means "random weights".
 _FROM_PROFILE = "profile"

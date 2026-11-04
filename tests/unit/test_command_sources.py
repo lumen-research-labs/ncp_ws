@@ -48,9 +48,9 @@ def test_default_path_is_the_repo_table() -> None:
 
 
 def test_real_table_rows() -> None:
-    """The four rows the stack is built around, pinned field by field."""
+    """The five rows the stack is built around, pinned field by field."""
     t = load_command_sources(_TOPICS)
-    assert list(t) == ["teleop", "policy", "m8v2", "m4"]
+    assert list(t) == ["teleop", "policy", "m8v2", "m4", "m9"]
     assert t["teleop"] == CommandSource(
         "teleop", "/teleop/cmd_vel", KIND_TELEOP, None, None, t["teleop"].description)
     assert t["policy"].topic == "/policy/cmd_vel"
@@ -62,9 +62,12 @@ def test_real_table_rows() -> None:
     assert t["m4"] == CommandSource(
         "m4", "/policy/m4/cmd_vel", KIND_POLICY, "policy_node_m4",
         "/ncp_debug/m4", t["m4"].description)
+    assert t["m9"] == CommandSource(
+        "m9", "/policy/m9/cmd_vel", KIND_POLICY, "policy_node_m9",
+        "/ncp_debug/m9", t["m9"].description)
     for row in t.values():
         assert row.description, f"{row.name} needs a description (the button tooltip)"
-    assert [r.is_policy for r in t.values()] == [False, True, True, True]
+    assert [r.is_policy for r in t.values()] == [False, True, True, True, True]
 
 
 def test_no_row_names_the_output_topic_and_topics_are_unique() -> None:
@@ -182,9 +185,9 @@ def test_switching_to_a_table_row_is_accepted_and_force_kills(target) -> None:
 
 def test_switching_to_an_unknown_name_is_rejected_and_names_the_rows() -> None:
     n = _node("teleop")
-    result = n._on_set_parameters([_P("command_source", "m9")])
+    result = n._on_set_parameters([_P("command_source", "m99")])
     assert result.successful is False
-    for name in ("teleop", "policy", "m8v2", "m4"):
+    for name in ("teleop", "policy", "m8v2", "m4", "m9"):
         assert f"'{name}'" in result.reason
     assert "topics.yaml" in result.reason
     assert n._command_source == "teleop"

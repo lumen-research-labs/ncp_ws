@@ -43,8 +43,8 @@ OUT="${HOME}/ncp_ws/bags/${NAME}_${STAMP}"
 #   /tf /tf_static   frames, needed for any map-frame work later
 TOPICS=(
   /scan /ncp/scan
-  /ncp_debug /ncp_debug/m8v2 /ncp_debug/m4
-  /policy/cmd_vel /policy/m8v2/cmd_vel /policy/m4/cmd_vel
+  /ncp_debug /ncp_debug/m8v2 /ncp_debug/m4 /ncp_debug/m9
+  /policy/cmd_vel /policy/m8v2/cmd_vel /policy/m4/cmd_vel /policy/m9/cmd_vel
   /teleop/cmd_vel /cmd_vel
   /safety/status /base/debug
   /odom /vel_raw /imu/data_raw /voltage
