@@ -94,9 +94,10 @@ ABORTED = "aborted"
 @dataclass(frozen=True)
 class RetreatLimits:
     retreat_vx: float             # m/s, the reverse speed requested
-    retreat_m: float              # metres back from the start pose that count as done
+    retreat_m: float              # metres back that count as done once the latch is off
+    retreat_max_m: float          # metres back after which a still-held latch gives up
     retreat_timeout_s: float      # seconds still stopped before giving up
-    retreat_cooldown_s: float     # seconds between retreats
+    retreat_cooldown_s: float     # seconds between PINNED retreats (a latch always retreats)
     retreat_pinned_range_m: float  # SLOW with the wide-arc min_range under this = pinned
     retreat_pinned_after_s: float  # ... and no goal progress for this long starts a retreat
 
@@ -214,7 +215,13 @@ class RetreatController:
                 return self._end(now, f"{ABORTED}:source_changed")
             if not latched and not pinned:
                 return self._end(now, RELEASED)
-            if math.dist(pose_xy, self._start_xy) >= self._limits.retreat_m:
+            back = math.dist(pose_xy, self._start_xy)
+            # Under a held LATCH the reverse must go on: rm_safety releases
+            # only during a passed reverse, and a latched robot can do
+            # nothing else. Distance ends a retreat only once the latch is
+            # off (the pinned case), or at retreat_max_m as the bound.
+            if back >= self._limits.retreat_max_m or (
+                    back >= self._limits.retreat_m and not latched):
                 return self._end(now, DISTANCE)
             if now - self._start_at >= self._limits.retreat_timeout_s:
                 return self._end(now, TIMEOUT)
@@ -230,7 +237,10 @@ class RetreatController:
         if last_cmd_vx < 0.0:
             self._hold_reason = "last request was already a reverse"
             return None
-        if (self._last_end is not None
+        # The cooldown bounds the PINNED loop only. A fresh latch needs a
+        # drive to happen again, and a latched robot can do nothing but
+        # reverse, so waiting would only freeze it.
+        if (not fresh_latch and self._last_end is not None
                 and now - self._last_end < self._limits.retreat_cooldown_s):
             self._hold_reason = (
                 f"cooldown: {self._limits.retreat_cooldown_s - (now - self._last_end):.0f} s left"
@@ -269,6 +279,7 @@ class TurnController:
         self._limits = limits
         self._active = False
         self._start_at = 0.0
+        self._direction = 0.0
         self._turns = 0
         self._timeouts = 0
         self._refused = 0
@@ -285,9 +296,12 @@ class TurnController:
     def needed(self, bearing_rad: float) -> bool:
         return abs(math.degrees(bearing_rad)) > self._limits.turn_tolerance_deg
 
-    def start(self, now: float) -> None:
+    def start(self, now: float, direction: float = 0.0) -> None:
+        """`direction` +1 turns left, -1 right, the whole way round if that is
+        the clear way; 0 steers by the sign of the error each tick."""
         self._active = True
         self._start_at = now
+        self._direction = direction
         self._turns += 1
         self._last_reason = STARTED
 
@@ -314,7 +328,13 @@ class TurnController:
             self._timeouts += 1
             self._last_reason = TIMEOUT
             return Step(0.0, 0.0, True, TIMEOUT)
-        wz = math.copysign(lim.turn_wz, bearing_rad)
+        if self._direction:
+            # A fixed sense: keep turning that way until the remaining angle
+            # in that sense is within tolerance (the long way round passes
+            # through the far side of the error's sign).
+            wz = math.copysign(lim.turn_wz, self._direction)
+        else:
+            wz = math.copysign(lim.turn_wz, bearing_rad)
         return Step(0.0, wz, False, None)
 
     def status(self) -> dict:

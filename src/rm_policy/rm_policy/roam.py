@@ -77,7 +77,7 @@ KEYS = (
     "range_min_m", "range_max_m", "bearing_cap_deg", "dwell_s", "timeout_s", "seed",
     "corridor_half_width_m", "clearance_m", "min_valid_fraction", "draw_attempts",
     "progress_window_s", "progress_min_m", "self_radius_m",
-    "retreat_vx", "retreat_m", "retreat_timeout_s", "retreat_cooldown_s",
+    "retreat_vx", "retreat_m", "retreat_max_m", "retreat_timeout_s", "retreat_cooldown_s",
     "retreat_pinned_range_m",
     "turn_wz", "turn_tolerance_deg", "turn_timeout_s", "turn_clear_m",
     "recovery_turn_min_deg", "recovery_turn_max_deg",
@@ -105,6 +105,7 @@ class RoamLimits:
     # before giving up, and the gap between retreats.
     retreat_vx: float
     retreat_m: float
+    retreat_max_m: float
     retreat_timeout_s: float
     retreat_cooldown_s: float
     retreat_pinned_range_m: float
@@ -172,6 +173,9 @@ def check_limits(limits: RoamLimits) -> Optional[str]:
         return f"roam.retreat_vx must be > 0, got {limits.retreat_vx}"
     if limits.retreat_m <= 0.0:
         return f"roam.retreat_m must be > 0, got {limits.retreat_m}"
+    if limits.retreat_max_m < limits.retreat_m:
+        return (f"roam.retreat_max_m ({limits.retreat_max_m}) must be at least "
+                f"roam.retreat_m ({limits.retreat_m})")
     if limits.retreat_timeout_s <= 0.0:
         return f"roam.retreat_timeout_s must be > 0, got {limits.retreat_timeout_s}"
     if limits.retreat_cooldown_s < 0.0:
@@ -235,15 +239,33 @@ def _wrap(angle: float) -> float:
     return math.atan2(math.sin(angle), math.cos(angle))
 
 
+# The chassis shows in the scan only behind this bearing (the standoffs at
+# +-105 deg, the rear corners at +-135 to 150 deg; tests/fixtures/
+# tg30_roam_hold_scan.yaml). Ahead of it a return under self_radius_m is a
+# real object, not the robot: the one at 0.17 m that a turn would sweep.
+BODY_SECTOR_FROM_DEG = 95.0
+
+
+def is_return(r: float, phi: float, scan: Scan, self_radius_m: float) -> bool:
+    """A valid return from the world: finite, above the sensor floor, and
+    not the robot's own body (a short return in the rear body sectors)."""
+    if not (math.isfinite(r) and r > 0.0 and r >= scan.range_min):
+        return False
+    if r < self_radius_m and abs(math.degrees(phi)) >= BODY_SECTOR_FROM_DEG:
+        return False
+    return True
+
+
 def nearest_return(scan: Scan, self_radius_m: float) -> float:
-    """The closest valid return outside the robot's own body, any bearing;
-    inf when there is none (or the scan cannot be read)."""
-    if not scan.ranges:
+    """The closest return from the world, any bearing; inf when there is
+    none (or the scan cannot be read)."""
+    if (not scan.ranges or not math.isfinite(scan.angle_increment)
+            or scan.angle_increment <= 0.0):
         return math.inf
-    floor = max(scan.range_min, self_radius_m)
     nearest = math.inf
-    for r in scan.ranges:
-        if math.isfinite(r) and r >= floor and r > 0.0 and r < nearest:
+    for i, r in enumerate(scan.ranges):
+        phi = _wrap(scan.angle_min + i * scan.angle_increment)
+        if is_return(r, phi, scan, self_radius_m) and r < nearest:
             nearest = r
     return nearest
 
@@ -264,15 +286,15 @@ def free_depth(scan: Scan, bearing: float, limits: RoamLimits,
         return None
     half_width = limits.corridor_half_width_m
     half_sector = math.radians(sector_half_deg)
-    floor = max(scan.range_min, limits.self_radius_m)
     in_sector = valid_in_sector = 0
     depth = DEPTH_REACH_M
     for i, r in enumerate(scan.ranges):
-        delta = _wrap(scan.angle_min + i * scan.angle_increment - bearing)
+        phi = _wrap(scan.angle_min + i * scan.angle_increment)
+        delta = _wrap(phi - bearing)
         sectored = abs(delta) <= half_sector
         if sectored:
             in_sector += 1
-        if not (math.isfinite(r) and r >= floor and r > 0.0):
+        if not is_return(r, phi, scan, limits.self_radius_m):
             continue
         if sectored:
             valid_in_sector += 1
@@ -282,6 +304,53 @@ def free_depth(scan: Scan, bearing: float, limits: RoamLimits,
     if in_sector == 0 or valid_in_sector < limits.min_valid_fraction * in_sector:
         return None
     return depth
+
+
+# The X3's chassis corners relative to the lidar (metres, +x forward, +y
+# left): the 0.30 x 0.20 m box sits ~4.3 cm behind the lidar, so the front
+# corners are 0.146 m out at +-43 deg and the rear ones 0.217 m at +-153 deg
+# (the rear pair is what the scan shows at 0.19-0.23 m, 135-150 deg). A turn
+# in place sweeps them through a 0.22 m circle the 0.15 m stop zone never
+# sees; on 2026-11-04 a turn hit something that way.
+BODY_CORNERS = ((0.107, 0.10), (0.107, -0.10), (-0.193, 0.10), (-0.193, -0.10))
+SWEEP_MARGIN_M = 0.05
+
+
+def sweep_clear(scan: Scan, direction: float, angle_rad: float, limits: RoamLimits) -> bool:
+    """Would a turn in place of `angle_rad` in `direction` (+1 left, -1
+    right) sweep a chassis corner into a lidar return? True when no valid
+    return lies within a corner's radius plus margin on the arc that corner
+    crosses. The blind rear cone has no returns and cannot be checked."""
+    if (not scan.ranges or not math.isfinite(scan.angle_increment)
+            or scan.angle_increment <= 0.0 or angle_rad <= 0.0):
+        return True
+    corners = [(math.hypot(x, y), math.atan2(y, x)) for x, y in BODY_CORNERS]
+    reach = max(r for r, _ in corners) + SWEEP_MARGIN_M
+    for i, r in enumerate(scan.ranges):
+        phi = _wrap(scan.angle_min + i * scan.angle_increment)
+        if not is_return(r, phi, scan, limits.self_radius_m) or r > reach:
+            continue
+        for radius, start in corners:
+            if r > radius + SWEEP_MARGIN_M:
+                continue
+            # The arc this corner crosses, measured from its start in the
+            # turn direction.
+            offset = (direction * (phi - start)) % (2.0 * math.pi)
+            if offset <= angle_rad:
+                return False
+    return True
+
+
+def turn_direction(scan: Scan, bearing_rad: float, limits: RoamLimits) -> Optional[float]:
+    """Which way to turn to face `bearing_rad`: the short way when its sweep
+    is clear, else the long way when that one is, else None (do not turn)."""
+    short = 1.0 if bearing_rad >= 0.0 else -1.0
+    short_angle = abs(bearing_rad)
+    if sweep_clear(scan, short, short_angle, limits):
+        return short
+    if sweep_clear(scan, -short, 2.0 * math.pi - short_angle, limits):
+        return -short
+    return None
 
 
 def recovery_bearing(scan: Scan, limits: RoamLimits, step_deg: float = 15.0) -> float:
@@ -319,11 +388,13 @@ def strip_is_free(scan: Scan, bearing: float, distance: float, limits: RoamLimit
     None: unknown, too few valid rays over the strip (no-returns), or the
     scan cannot be read.
 
-    Returns closer than `self_radius_m` are the robot's own body (the
-    lidar's standoffs at 0.07 m, the chassis corners at 0.19-0.23 m on the
-    TG30) and are unknown, never obstacles: a 0.07 m return lies inside the
-    strip of every bearing within 90 degrees of it, so counting it blocked
-    the whole circle on 2026-10-23 and held the robot at its first goal.
+    Returns closer than `self_radius_m` in the rear body sectors (beyond
+    +-BODY_SECTOR_FROM_DEG) are the robot's own body (the lidar's standoffs
+    at 0.07 m, the chassis corners at 0.19-0.23 m on the TG30) and are
+    unknown, never obstacles: a 0.07 m return lies inside the strip of every
+    bearing within 90 degrees of it, so counting it blocked the whole circle
+    on 2026-10-23 and held the robot at its first goal. Ahead, a short
+    return is a real object.
     """
     if (not scan.ranges or not math.isfinite(scan.angle_increment)
             or scan.angle_increment <= 0.0 or not math.isfinite(scan.angle_min)):
@@ -331,15 +402,15 @@ def strip_is_free(scan: Scan, bearing: float, distance: float, limits: RoamLimit
     reach = distance + limits.clearance_m
     half_width = limits.corridor_half_width_m
     half_angle = math.atan2(half_width, reach)
-    floor = max(scan.range_min, limits.self_radius_m)
     in_window = 0
     valid_in_window = 0
     for i, r in enumerate(scan.ranges):
-        delta = _wrap(scan.angle_min + i * scan.angle_increment - bearing)
+        phi = _wrap(scan.angle_min + i * scan.angle_increment)
+        delta = _wrap(phi - bearing)
         windowed = abs(delta) <= half_angle
         if windowed:
             in_window += 1
-        if not (math.isfinite(r) and r >= floor and r > 0.0):
+        if not is_return(r, phi, scan, limits.self_radius_m):
             continue
         if windowed:
             valid_in_window += 1

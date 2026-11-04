@@ -173,6 +173,7 @@ from rm_policy.retreat import (
 )
 from rm_policy.roam import (
     RoamSequencer, Scan, load_roam_limits, nearest_return, recovery_bearing,
+    turn_direction,
 )
 from rm_policy.vendor import ncp_policy
 
@@ -430,6 +431,7 @@ class PolicyNode(rclpy.node.Node):
         self._retreat = RetreatController(
             RetreatLimits(
                 retreat_vx=roam_limits.retreat_vx, retreat_m=roam_limits.retreat_m,
+                retreat_max_m=roam_limits.retreat_max_m,
                 retreat_timeout_s=roam_limits.retreat_timeout_s,
                 retreat_cooldown_s=roam_limits.retreat_cooldown_s,
                 retreat_pinned_range_m=roam_limits.retreat_pinned_range_m,
@@ -827,20 +829,36 @@ class PolicyNode(rclpy.node.Node):
         lx, ly = _rotate_2d(dx, dy, -self._robot_yaw)
         return math.atan2(ly, lx)
 
-    def _after_roam_handoff(self, now: float) -> None:
+    def _start_turn(self, now: float, bearing: float, scan: Scan, what: str) -> bool:
+        """Begin a turn in place by `bearing`, in the sense whose swept
+        corner arcs the scan shows clear (the short way, else the long way
+        round). False, with a warning, when neither is clear."""
+        direction = turn_direction(scan, bearing, self._roam.limits)
+        if direction is None:
+            self.get_logger().warn(
+                f"policy_node: turn REFUSED ({what}): a return sits inside the "
+                f"corner sweep either way round; not turning in place here."
+            )
+            return False
+        long_way = (direction > 0) != (bearing >= 0)
+        self._turn.start(now, direction)
+        self.get_logger().info(
+            f"policy_node: turn START ({what}): {math.degrees(bearing):+.0f} deg, "
+            f"{'the long way round' if long_way else 'the short way'} "
+            f"({'left' if direction > 0 else 'right'}) at "
+            f"{self._turn.limits.turn_wz} rad/s to within "
+            f"{self._turn.limits.turn_tolerance_deg} deg."
+        )
+        return True
+
+    def _after_roam_handoff(self, now: float, scan: Scan) -> None:
         """A roam hand-off just fixed a goal: if it lies off the nose, turn
         toward it first. The policy cannot steer to a goal beside or behind
         it (M4 pushes forward instead), and the draw's fallback puts goals
         there whenever nothing ahead is free."""
         bearing = self._goal_bearing()
         if self._turn.needed(bearing):
-            self._turn.start(now)
-            self.get_logger().info(
-                f"policy_node: turn START: the new goal is "
-                f"{math.degrees(bearing):+.0f} deg off the nose; turning in place at "
-                f"{self._turn.limits.turn_wz} rad/s to within "
-                f"{self._turn.limits.turn_tolerance_deg} deg."
-            )
+            self._start_turn(now, bearing, scan, "to face the new goal")
 
     def _publish_turn(self, wz: float) -> None:
         """The turn's command: yaw only, through the one publisher;
@@ -1117,15 +1135,23 @@ class PolicyNode(rclpy.node.Node):
                 # recovery_turn_min_deg and max, toward the deepest free
                 # strip; the goal is drawn once the robot faces that way.
                 bearing = recovery_bearing(scan, self._roam.limits)
-                self._turn_target_yaw = self._robot_yaw + bearing
-                self._turn.start(now)
                 self.get_logger().warn(
-                    f"policy_node: retreat ended ({step.reason}); turn START "
-                    f"(recovery): {math.degrees(bearing):+.0f} deg toward the "
-                    f"deepest free strip, then a new goal ahead."
+                    f"policy_node: retreat ended ({step.reason}); recovery: "
+                    f"{math.degrees(bearing):+.0f} deg is the deepest free strip."
                 )
-                self._publish_zero(reason="turning")
-                return
+                if self._start_turn(now, bearing, scan, "recovery"):
+                    self._turn_target_yaw = self._robot_yaw + bearing
+                    self._publish_zero(reason="turning")
+                    return
+                # Cannot turn here: draw from this heading and let the
+                # policy try; a stall or a pin brings the retreat back.
+                handoff = self._roam.retreated(now, scan)
+                if handoff is not None:
+                    self._fix_goal(
+                        handoff.offset_x, handoff.offset_y,
+                        why=f"roam #{handoff.n} {handoff.reason} (no turn possible) "
+                            f"after {handoff.elapsed_s:.0f} s, free on draw {handoff.attempts}",
+                    )
             elif step.reason == RETREAT_TIMEOUT:
                 self.get_logger().warn(
                     "policy_node: retreat TIMEOUT with the latch still held: "
@@ -1180,7 +1206,7 @@ class PolicyNode(rclpy.node.Node):
                             f"{handoff.elapsed_s:.0f} s, free on draw {handoff.attempts}; "
                             f"totals {self._roam.n} hand-offs",
                     )
-                    self._after_roam_handoff(now)
+                    self._after_roam_handoff(now, scan)
                     if self._turn.active:
                         self._publish_zero(reason="turning")
                         return
@@ -1277,7 +1303,7 @@ class PolicyNode(rclpy.node.Node):
                     f"totals {self._roam.n} hand-offs, {self._roam.timeouts} "
                     f"timeouts, {self._roam.stalls} stalls, {self._roam.held} held",
             )
-            self._after_roam_handoff(now)
+            self._after_roam_handoff(now, scan)
             if self._turn.active:
                 # Face it first; the turn block above runs from the next tick.
                 self._publish_zero(reason="turning")

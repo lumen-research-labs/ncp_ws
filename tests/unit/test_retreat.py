@@ -56,8 +56,8 @@ def _read(path):
 
 
 def _limits(**overrides) -> RetreatLimits:
-    base = dict(retreat_vx=0.12, retreat_m=0.3, retreat_timeout_s=8.0, retreat_cooldown_s=20.0,
-                retreat_pinned_range_m=0.30, retreat_pinned_after_s=10.0)
+    base = dict(retreat_vx=0.12, retreat_m=0.3, retreat_max_m=0.8, retreat_timeout_s=8.0,
+                retreat_cooldown_s=20.0, retreat_pinned_range_m=0.30, retreat_pinned_after_s=10.0)
     base.update(overrides)
     return RetreatLimits(**base)
 
@@ -130,17 +130,19 @@ def test_a_latch_after_the_nodes_own_reverse_is_refused_with_a_reason():
     assert ctl.step(0.0, _LATCHED, (0, 0), True, _MY, 0.0) is not None   # zero counts as forward
 
 
-def test_a_cooldown_bounds_repeated_retreats():
+def test_a_cooldown_bounds_pinned_retreats_but_a_fresh_latch_always_retreats():
     ctl = _ctl()
     _start(ctl, 0.0)
     assert ctl.step(1.0, _DRIVING, (0.0, 0.0), True, _MY, -0.12).reason == RELEASED
-    # Latched again inside the cooldown: refused with the seconds left.
-    assert ctl.step(5.0, _LATCHED, (0, 0), True, _MY, 0.1) is None
+    # Pinned again inside the cooldown: refused with the seconds left.
+    assert ctl.step(5.0, _PINNED, (0, 0), True, _MY, 0.1, stalled_s=30.0) is None
     assert "cooldown" in ctl.hold_reason
-    ctl.goal_fixed()                                   # a new goal changes nothing here
-    assert ctl.step(6.0, _LATCHED, (0, 0), True, _MY, 0.1) is None
-    assert ctl.step(21.5, _LATCHED, (0, 0), True, _MY, 0.1).reason == STARTED
+    # A fresh latch inside the cooldown: a latched robot can do nothing else.
+    assert ctl.step(6.0, _LATCHED, (0, 0), True, _MY, 0.1).reason == STARTED
     assert ctl.status()["retreats"] == 2
+    assert ctl.step(7.0, _DRIVING, (0.0, 0.0), True, _MY, -0.12).reason == RELEASED
+    # Pinned after the cooldown: allowed.
+    assert ctl.step(28.0, _PINNED, (0, 0), True, _MY, 0.1, stalled_s=30.0).reason == STARTED
 
 
 # ---------------------------------------------------------------------------
@@ -165,11 +167,22 @@ def test_a_slow_zone_reason_after_the_latch_counts_as_released():
     assert done.done and done.reason == RELEASED
 
 
-def test_distance_ends_the_retreat_even_with_the_latch_held():
+def test_under_a_held_latch_the_reverse_goes_on_to_the_bound():
     ctl = _ctl()
     _start(ctl, 0.0)
     assert ctl.step(1.0, _RETREATING, (-0.29, 0.0), True, _MY, -0.12).done is False
-    done = ctl.step(1.2, _RETREATING, (-0.30, 0.0), True, _MY, -0.12)
+    assert ctl.step(1.2, _RETREATING, (-0.30, 0.0), True, _MY, -0.12).done is False   # latched: keep going
+    assert ctl.step(2.0, _RETREATING, (-0.60, 0.0), True, _MY, -0.12).done is False
+    done = ctl.step(3.0, _RETREATING, (-0.80, 0.0), True, _MY, -0.12)
+    assert done.done and done.reason == DISTANCE
+
+
+def test_distance_ends_a_pinned_retreat_at_retreat_m():
+    ctl = _ctl()
+    ctl.step(0.0, _PINNED, (0, 0), True, _MY, 0.1, stalled_s=12.0)
+    still = _view(STATE_SLOW, "slow_zone", min_range=0.26)
+    assert ctl.step(1.0, still, (-0.29, 0.0), True, _MY, -0.12).done is False
+    done = ctl.step(1.2, still, (-0.30, 0.0), True, _MY, -0.12)
     assert done.done and done.reason == DISTANCE
 
 
@@ -253,6 +266,7 @@ def test_the_requested_reverse_is_within_both_safety_bounds():
     assert roam.retreat_vx <= safety.velocity.max_vx
     # Far enough back to clear the release range from the stop boundary.
     assert roam.retreat_m >= safety.estop.retreat_release_range_m - safety.estop.stop_zone_m
+    assert roam.retreat_max_m >= roam.retreat_m
 
 
 def test_state_constants_mirror_the_message_definition():
@@ -333,6 +347,19 @@ def test_turn_refuses_when_anything_is_close_and_gives_up_on_timeout():
     assert timed.done and timed.reason == "timeout" and t.status()["turn_timeouts"] == 1
 
 
+def test_a_fixed_sense_turns_the_long_way_round_and_still_ends_on_tolerance():
+    t = _turn()
+    t.start(0.0, direction=-1.0)                     # right, although the goal is left
+    step = t.step(0.2, math.radians(90.0), clear=True)
+    assert (step.wz, step.done) == (-0.5, False)
+    step = t.step(1.0, math.radians(170.0), clear=True)   # passing behind
+    assert (step.wz, step.done) == (-0.5, False)
+    step = t.step(2.0, math.radians(-120.0), clear=True)  # error flips sign on the far side
+    assert (step.wz, step.done) == (-0.5, False)
+    done = t.step(3.0, math.radians(-10.0), clear=True)
+    assert done.done and done.reason == TURNED
+
+
 def test_a_retreat_cancels_a_turn():
     t = _turn()
     t.start(0.0)
@@ -342,7 +369,8 @@ def test_a_retreat_cancels_a_turn():
 
 def test_the_node_turns_after_roam_hand_offs_only_with_clear_floor():
     src = _read(_POLICY_NODE)
-    assert src.count("self._after_roam_handoff(now)") == 2     # the stall/arrival hand-off and the post-recovery one
+    assert src.count("self._after_roam_handoff(now, scan)") == 2  # the stall/arrival hand-off and the post-recovery one
+    assert "turn_direction(scan, bearing, self._roam.limits)" in src
     assert "recovery_bearing(scan, self._roam.limits)" in src
     assert src.index("self._turn_target_yaw = self._robot_yaw + bearing") < src.index("self._roam.retreated(now, scan)")
     block = src[src.index("if self._turn.active and self._goal_world_x is not None:"):]

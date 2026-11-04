@@ -1894,6 +1894,26 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     goal is drawn after it, the per-goal rule is gone (the 20 s cooldown
     bounds retreats), and turn_clear_m is 0.0 by his decision (the corners
     sweep 0.23 m; a touch while rotating in place is accepted).
+  * **2026-11-04 (a new day; the robot took ~7 min to join RobotLab after
+    power-on): frozen under a held latch.** The log: arrived at a goal
+    within 0.36 m, the stop zone latched there (0.3 m clearance is less
+    than the 0.4 m arrival radius plus the nose), the retreat backed 0.3 m
+    and ended by DISTANCE 0.1 s before rm_safety had its 10 clear ticks,
+    the latch stayed, everything zeroed, and the next retreat was refused
+    by the 20 s cooldown. Fixed: under a held latch the reverse goes on to
+    `retreat_max_m` (0.8), distance ends a retreat only once the latch is
+    off; the cooldown applies to PINNED starts only (a fresh latch always
+    retreats); `clearance_m` 0.3 -> 0.4. Later the same day a turn in place
+    HIT something with `turn_clear_m` at 0.0: the chassis corners sweep
+    0.22 m from the lidar, outside the 0.15 m stop zone, so nothing in
+    rm_safety can see them coming. Fixed: `turn_clear_m` back to 0.30, and
+    the node now picks the SENSE of every turn from the swept corner arcs
+    (`sweep_clear`/`turn_direction` in roam.py: the short way when its arc
+    is clear of returns, else the long way round, else no turn and roam
+    draws from where it stands). A 270 deg turn sweeps nearly the whole
+    circle, so the long way is rare; the honest outcome of a close object
+    is no turn. Returns under 0.25 m count as the body only beyond +-95 deg
+    (the rear sectors); a short return ahead is an obstacle.
   * **Second live run (zones on): the robot reached its first goal and HELD
     there** ("no candidate goal in free space"). The captured scan
     (`tests/fixtures/tg30_roam_hold_scan.yaml`, 2020 rays, 29 % no-returns)

@@ -29,6 +29,8 @@ from rm_policy.roam import (  # noqa: E402
     free_depth,
     nearest_return,
     recovery_bearing,
+    sweep_clear,
+    turn_direction,
     ARRIVED,
     HOLD_RETRY_S,
     KEYS,
@@ -64,12 +66,12 @@ def _read(path: str) -> str:
 def _limits(**overrides) -> RoamLimits:
     base = dict(range_min_m=0.6, range_max_m=2.5, bearing_cap_deg=45.0,
                 dwell_s=1.0, timeout_s=30.0, seed=0,
-                corridor_half_width_m=0.20, clearance_m=0.3, min_valid_fraction=0.5,
+                corridor_half_width_m=0.20, clearance_m=0.4, min_valid_fraction=0.5,
                 draw_attempts=32, progress_window_s=10.0, progress_min_m=0.05,
-                self_radius_m=0.25, retreat_vx=0.12, retreat_m=0.3,
+                self_radius_m=0.25, retreat_vx=0.12, retreat_m=0.3, retreat_max_m=0.8,
                 retreat_timeout_s=8.0, retreat_cooldown_s=20.0,
                 retreat_pinned_range_m=0.30, turn_wz=0.5, turn_tolerance_deg=15.0,
-                turn_timeout_s=12.0, turn_clear_m=0.0,
+                turn_timeout_s=12.0, turn_clear_m=0.30,
                 recovery_turn_min_deg=0.0, recovery_turn_max_deg=180.0)
     base.update(overrides)
     return RoamLimits(**base)
@@ -226,6 +228,43 @@ def test_free_depth_is_the_nearest_return_in_the_strip_or_unknown():
     assert free_depth(_WALL_AHEAD, math.radians(90.0), lim) == pytest.approx(10.0, abs=0.01)
     assert free_depth(_UNKNOWN, 0.0, lim) is None
     assert free_depth(_BOXED, 0.0, lim) == pytest.approx(0.8, abs=0.05)
+
+
+def test_sweep_clear_sees_a_return_on_the_arc_a_corner_crosses():
+    lim = _limits()
+    assert sweep_clear(_OPEN, 1.0, math.pi, lim) and sweep_clear(_OPEN, -1.0, math.pi, lim)
+    # A post 0.17 m out at +60 deg (inside the front corners' 0.146 m plus
+    # the 0.05 m margin): a left (CCW) turn of 90 deg carries the front-left
+    # corner (at +43 deg) through it; a right turn of 90 deg does not reach
+    # it from any corner.
+    post = _scan(lambda a: 0.17 if abs(a - 60.0) < 1.0 else 10.0)
+    assert not sweep_clear(post, 1.0, math.radians(90.0), lim)
+    assert sweep_clear(post, -1.0, math.radians(90.0), lim)
+    # Far enough out (0.5 m) the corners never reach it.
+    far = _scan(lambda a: 0.5 if abs(a - 60.0) < 1.0 else 10.0)
+    assert sweep_clear(far, 1.0, math.pi, lim)
+    # Returns inside the body radius are the robot itself.
+    assert sweep_clear(_scan(lambda a: 0.07 if abs(abs(a) - 105) < 1 else 10.0), 1.0, math.pi, lim)
+
+
+def test_turn_direction_takes_the_short_way_else_the_long_way_else_none():
+    lim = _limits()
+    assert turn_direction(_OPEN, math.radians(60.0), lim) == 1.0
+    assert turn_direction(_OPEN, math.radians(-60.0), lim) == -1.0
+    # A post 0.17 m out at +60 deg blocks the short way (left 90 deg), and
+    # the long way round (right 270 deg) carries the rear corners (reach
+    # 0.27 m) through it too: no turn.
+    post = _scan(lambda a: 0.17 if abs(a - 60.0) < 1.0 else 10.0)
+    assert turn_direction(post, math.radians(90.0), lim) is None
+    # An object 0.26 m out behind the right rear corner (-135 deg, outside
+    # the 0.25 m body radius): a left turn swings that corner into it, and
+    # a right turn of 270 deg ends with the rear-left corner 18 deg short
+    # of it, so the long way round is the one that is clear.
+    behind = _scan(lambda a: 0.26 if abs(a + 135.0) < 1.0 else 10.0)
+    assert turn_direction(behind, math.radians(90.0), lim) == -1.0
+    assert turn_direction(behind, math.radians(-90.0), lim) == -1.0
+    boxed = _scan(lambda a: 0.2)
+    assert turn_direction(boxed, math.radians(90.0), lim) is None
 
 
 def test_recovery_bearing_turns_toward_the_most_open_floor():
@@ -519,6 +558,7 @@ def test_non_numeric_and_non_integer_seed_are_refused(key, value, fragment):
     (dict(self_radius_m=1.0), "self_radius_m"),
     (dict(retreat_vx=0.0), "retreat_vx"),
     (dict(retreat_m=0.0), "retreat_m"),
+    (dict(retreat_max_m=0.1), "retreat_max_m"),
     (dict(retreat_timeout_s=0.0), "retreat_timeout_s"),
     (dict(retreat_cooldown_s=-1.0), "retreat_cooldown_s"),
     (dict(retreat_pinned_range_m=0.0), "retreat_pinned_range_m"),

@@ -53,10 +53,12 @@ roam:
   # corridor_half_width_m wide, must hold no lidar return.
   # 0.20: the X3's half-width (~0.13 m) plus margin for the policy's wander.
   corridor_half_width_m: 0.20
-  # 0.3: enough for the 0.4 m latch to close before a wall does, with the
-  #      stop zone (0.15 m, ON for roam) behind it. 0.5 left the robot above
-  #      with no free leg at all.
-  clearance_m: 0.3
+  # 0.4: the arrival latch fires within 0.4 m of the goal, and the robot's
+  #      nose is ~0.15 m ahead of the lidar, so a goal 0.3 m short of a wall
+  #      let the robot arrive INSIDE the stop zone and latch at every goal
+  #      (2026-11-04). 0.5 left the robot in clutter with no free leg at
+  #      all; 0.4 is the compromise, with the retreat behind it.
+  clearance_m: 0.4
   # No-return rays (the TG30's 0.0 sentinel, ~30% of rays) are UNKNOWN, not
   # free: a candidate needs at least this fraction of the rays over its strip
   # to be valid, or it is refused.
@@ -113,17 +115,25 @@ roam:
   #       retreat_max_vx (0.12, the only tape-measured reverse speed) and a
   #       test pins this at or under both that and max_vx.
   retreat_vx: 0.12
-  # 0.3: how far back counts as done even if the latch has not released
-  #      (a lateral obstacle keeps the wide arc busy). Twice the stop
-  #      radius, inside the corridor the forward leg was drawn through.
+  # 0.3: how far back counts as done once the latch is off (the pinned
+  #      case, or released on the way). Twice the stop radius, inside the
+  #      corridor the forward leg was drawn through.
   retreat_m: 0.3
+  # 0.8: under a HELD latch the reverse goes on past retreat_m, because
+  #      rm_safety releases only during a passed reverse and a latched
+  #      robot can do nothing else; on 2026-11-04 a retreat that ended by
+  #      distance 0.1 s before the release left the robot latched and
+  #      frozen. This is the bound (a lateral obstacle, a wheel that does
+  #      not turn): then the node holds and warns.
+  retreat_max_m: 0.8
   # 8 s: 0.3 m takes 2.5 s at 0.12 m/s; a retreat still latched after 8 s
   #      is wheels that did not move, dry_run, or an obstacle along the
   #      side. Then the node holds the goal and warns.
   retreat_timeout_s: 8.0
-  # 20 s between retreats: the bound on the retreat loop. A retreat always
-  # ends in a recovery turn away from what stopped the robot, so driving
-  # straight back into the same wall is not the expected next move.
+  # 20 s between PINNED retreats: the bound on the slow-band loop. A fresh
+  # stop-zone latch always retreats at once: it needs a drive to happen
+  # again, and a latched robot can do nothing but reverse, so a cooldown
+  # there only froze the robot (2026-11-04).
   retreat_cooldown_s: 20.0
   # PINNED: the slow zone brakes a forward push to zero exactly at the stop
   # boundary, so under a forward push the latch never trips: on 2026-10-23
@@ -149,13 +159,14 @@ roam:
   #         goal nearly ahead.
   turn_tolerance_deg: 15.0
   turn_timeout_s: 12.0
-  # Turn only with nothing closer than this (outside the body radius).
-  # 0.0: Daniel, 2026-10-23: "if things are close it doesn't matter much
-  # since this can purely rotate". The chassis corners sweep 0.23 m from
-  # the lidar, so a turn beside something under that can touch it; the
-  # operator accepts that for a turn in place. Raise it to refuse turns
-  # near things (the policy then gets the goal as drawn).
-  turn_clear_m: 0.0
+  # Turn only with nothing closer than this (outside the body radius),
+  # checked every tick of the turn. 0.30: the chassis corners sweep 0.22 m
+  # from the lidar (BODY_CORNERS in roam.py), outside the 0.15 m stop zone,
+  # and on 2026-11-04 a turn with this at 0.0 ("a pure rotation is fine")
+  # hit something. The node also picks the SENSE of every turn from the
+  # swept corner arcs (the short way, else the long way round, else no
+  # turn), so this is the second line, not the first.
+  turn_clear_m: 0.30
   # After a retreat the robot turns toward the MOST OPEN floor before it
   # draws: the bearing, any angle between these two either side, whose
   # robot-width strip is deepest in the scan (the smaller turn on a tie;
