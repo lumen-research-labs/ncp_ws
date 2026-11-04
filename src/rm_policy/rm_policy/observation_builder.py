@@ -19,15 +19,25 @@ What it does:
     search window and self-occlusion zones from interface.yaml), and
     fail-closed validation.
 
-    NO FORMULA IS REIMPLEMENTED HERE. An earlier revision reimplemented the
-    normalization in pure Python so the tests could run without numpy on the
-    dev workstation. That duplicated every constant and formula, which is a
-    silent-drift risk against the checkpoint and was removed on operator
-    instruction (2026-08-27: keep the policy code an exact copy of upstream).
-    The cost is that this module now requires numpy, so its tests run on the
-    robot tier rather than the workstation tier. That is the correct trade:
-    the robot runs the full suite, and fidelity to the checkpoint outranks
-    test-runner convenience.
+    NO FORMULA IS REIMPLEMENTED HERE, with one exception. An earlier revision
+    reimplemented the normalization in pure Python so the tests could run
+    without numpy on the dev workstation. That duplicated every constant and
+    formula, which is a silent-drift risk against the checkpoint and was
+    removed on operator instruction (2026-08-27: keep the policy code an
+    exact copy of upstream). The cost is that this module now requires
+    numpy, so its tests run on the robot tier rather than the workstation
+    tier. That is the correct trade: the robot runs the full suite, and
+    fidelity to the checkpoint outranks test-runner convenience.
+
+    The exception (2026-11-04): the previous-action block is normalized by
+    the ACTION BOUNDS THE CHECKPOINT WAS TRAINED WITH, and the vendored
+    `build_obs` hardcodes the M8-v2/M4 bounds. A profile whose contract
+    declares other bounds (5.0.0, M9: the robot's clamps) passes an
+    `ActionBounds` (`rm_policy.action_contract`, read from its interface
+    file), and the last two entries are recomputed with the same formula
+    `build_obs` uses, in float32. With no bounds passed the vendored output
+    is returned untouched; with bounds equal to the vendored constants the
+    result is bit-identical (tested).
 
 Subscribes to:  (nothing — pure module; the node passes values in)
 Publishes:      (nothing — pure module; the node acts on the return)
@@ -55,6 +65,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 
 from rm_policy import scan_resampler
+from rm_policy.action_contract import ActionBounds
 from rm_policy.vendor import ncp_policy
 
 # Lidar reduction parameters. Defaults mirror config/interface.yaml's
@@ -90,6 +101,7 @@ def build_observation(
     range_max: float = DEFAULT_RANGE_MAX_M,
     search_window_bins: int = 0,
     mask_zones_deg: Sequence[Sequence[float]] = (),
+    action_bounds: Optional[ActionBounds] = None,
 ) -> ObservationResult:
     """Build the observation vector, or return a fault.
 
@@ -101,7 +113,8 @@ def build_observation(
     `pose_xy`/`yaw` are the robot's current pose in the odom frame; `goal_xy`
     is the static goal in that same frame. `previous_action` is the (v, w)
     the policy REQUESTED last tick (not what the robot achieved) — see
-    interface.yaml `clamped_action_note` for why.
+    interface.yaml `clamped_action_note` for why. `action_bounds` are the
+    contract's trained action bounds; `None` keeps the vendored constants.
     """
     try:
         return _build_observation_inner(
@@ -109,6 +122,7 @@ def build_observation(
             previous_action, n_beams=n_beams, arc_deg=arc_deg,
             range_min=range_min, range_max=range_max,
             search_window_bins=search_window_bins, mask_zones_deg=mask_zones_deg,
+            action_bounds=action_bounds,
         )
     except Exception:
         return ObservationResult(obs=None, fault="internal_error")
@@ -117,6 +131,7 @@ def build_observation(
 def _build_observation_inner(
     ranges, angle_min, angle_increment, pose_xy, yaw, goal_xy, previous_action,
     *, n_beams, arc_deg, range_min, range_max, search_window_bins, mask_zones_deg,
+    action_bounds,
 ) -> ObservationResult:
     # --- 1. Reduce the raw scan to the trained beam layout. OUR code, and the
     # only place the TG30's 0.0-no-return sentinel is handled: the resampler
@@ -155,6 +170,10 @@ def _build_observation_inner(
     scan_m = ncp_policy.prepare_scan(scan_result.bins)
     local_goal_xy = ncp_policy.local_goal(pose_xy, yaw, goal_xy)
     obs = ncp_policy.build_obs(scan_m, local_goal_xy, previous_action)
+    if action_bounds is not None:
+        # The one formula applied outside the vendored module: the previous
+        # action normalized by the CONTRACT's bounds (module docstring).
+        obs[-2:] = action_bounds.normalize(previous_action)
 
     # --- 4. Fail-closed validation of the assembled vector. ---
     if len(obs) != n_beams + 4:  # lidar + goal (2) + previous action (2)

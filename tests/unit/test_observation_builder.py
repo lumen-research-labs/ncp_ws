@@ -220,3 +220,33 @@ def test_m4_profile_layout_via_explicit_contract_values() -> None:
     assert float(r.obs[34]) == pytest.approx(-1.0 / 3.0, abs=1e-6)
     assert float(r.obs[35]) == pytest.approx(0.0, abs=1e-6)
 
+
+
+def test_contract_bounds_renormalize_the_previous_action_block() -> None:
+    """5.0.0 (M9): the last two entries come from the contract's bounds; the
+    vendored numbers give a vector bit-identical to build_obs; the rest of
+    the vector is untouched."""
+    from rm_policy.action_contract import ActionBounds
+    m9 = ActionBounds(low=(-0.25, -0.8), high=(0.25, 0.8))
+    vendored = ActionBounds(
+        low=tuple(float(v) for v in ncp_policy.ACTION_LOW),
+        high=tuple(float(v) for v in ncp_policy.ACTION_HIGH),
+    )
+    scan = _flat_scan()
+
+    def obs(prev, bounds):
+        r = build_observation(
+            scan["ranges"], scan["angle_min"], scan["angle_increment"],
+            POSE, YAW, GOAL, prev, action_bounds=bounds,
+        )
+        assert r.fault is None
+        return np.asarray(r.obs)
+
+    assert obs((0.0, 0.0), m9)[-2:] == pytest.approx((0.0, 0.0))
+    assert obs((0.25, -0.8), m9)[-2:] == pytest.approx((1.0, -1.0))
+    assert obs((0.1, 0.4), m9)[-2:] == pytest.approx((0.4, 0.5), abs=1e-6)
+    plain, same = obs((0.37, -1.2), None), obs((0.37, -1.2), vendored)
+    assert np.array_equal(plain, same)
+    assert np.array_equal(obs((0.37, -1.2), m9)[:-2], plain[:-2])
+    # The builder normalizes what it is given; clipping is the runner's job.
+    assert obs((0.37, -1.2), m9)[-2:] == pytest.approx((1.48, -1.5), abs=1e-5)

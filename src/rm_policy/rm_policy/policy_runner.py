@@ -8,6 +8,12 @@ What it does:
     normalized by `observation_builder`) and returns a plain `(v, w)` action
     tuple in physical units (m/s, rad/s) — the actor's own linear head + clip
     already produces pre-scaled units, so nothing here re-scales the output.
+    The output IS clipped to the contract's trained action bounds
+    (`rm_policy.action_contract`, optional): the vendored actor clips to the
+    M8-v2/M4 bounds, and a checkpoint trained at narrower bounds (5.0.0, M9:
+    the robot's clamps) must emit, publish and feed back a value inside its
+    own, as its training env did. Bounds wider than the vendored clip are
+    refused at construction: the actor would clip first, silently.
     Owns the actor's recurrent state across ticks (a CfC is stateful; state
     must be threaded call-to-call or the network sees a discontinuous
     history) and validates every input and output for shape/NaN/inf before
@@ -61,6 +67,7 @@ from typing import Any, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
+from rm_policy.action_contract import ActionBounds
 from rm_policy.vendor import ncp_policy
 
 # Bytes per read when hashing the checkpoint. The file is ~2 MB, so this is
@@ -93,8 +100,8 @@ class InferenceResult:
     """Output of `PolicyRunner.act`.
 
     action:
-        `(v, w)` in physical units (m/s, rad/s), already clipped to the
-        trained action bounds by `NcpActor.act`. `None` whenever `fault` is
+        `(v, w)` in physical units (m/s, rad/s), clipped to the contract's
+        trained action bounds (the vendored ones by default). `None` whenever `fault` is
         set — the caller must check `fault` first and must never substitute
         a default action.
     fault:
@@ -112,11 +119,18 @@ class PolicyRunner:
     def __init__(
         self, weights_path: str = "", seed: int = 0,
         obs_dim: int = ncp_policy.OBS_DIM,
+        action_bounds: Optional[ActionBounds] = None,
     ) -> None:
         """Construct the actor and optionally load a trained state_dict.
 
         Parameters
         ----------
+        action_bounds:
+            The contract's trained action bounds (`action_bounds_from`).
+            Every action is clipped to them after the actor's own clip.
+            `None` means the vendored constants (`ncp_policy.ACTION_LOW/HIGH`),
+            which 3.0.0 and 4.0.0 declare. Bounds outside the vendored clip
+            raise `RuntimeError` here.
         obs_dim:
             Width of the observation the network is built for, from the
             contract (`LidarContract.obs_dim`): 36 for the m4 profile, 724
@@ -143,6 +157,21 @@ class PolicyRunner:
             from starting at all rather than degrading at runtime.
         """
         self._obs_dim = int(obs_dim)
+        if action_bounds is None:
+            action_bounds = ActionBounds(
+                low=(float(ncp_policy.ACTION_LOW[0]), float(ncp_policy.ACTION_LOW[1])),
+                high=(float(ncp_policy.ACTION_HIGH[0]), float(ncp_policy.ACTION_HIGH[1])),
+            )
+        if not action_bounds.within(ncp_policy.ACTION_LOW, ncp_policy.ACTION_HIGH):
+            raise RuntimeError(
+                f"policy_runner: action bounds low {action_bounds.low} high "
+                f"{action_bounds.high} exceed the vendored actor's clip low "
+                f"{tuple(float(v) for v in ncp_policy.ACTION_LOW)} high "
+                f"{tuple(float(v) for v in ncp_policy.ACTION_HIGH)} "
+                f"(ncp_policy.ACTION_LOW/HIGH): NcpActor.act would clip first and "
+                f"the action fed back would differ from training."
+            )
+        self._action_bounds = action_bounds
         self._actor = ncp_policy.NcpActor(obs_dim=self._obs_dim, seed=seed)
         self._weights_path = weights_path
         self._weights_sha256: str = ""
@@ -177,6 +206,10 @@ class PolicyRunner:
     @property
     def obs_dim(self) -> int:
         return self._obs_dim
+
+    @property
+    def action_bounds(self) -> ActionBounds:
+        return self._action_bounds
 
     @property
     def weights_sha256(self) -> str:
@@ -230,6 +263,7 @@ class PolicyRunner:
             return InferenceResult(action=None, fault="action_invalid")
 
         self._state = new_state
+        action = self._action_bounds.clip(raw_action)
         return InferenceResult(
-            action=(float(raw_action[0]), float(raw_action[1])), fault=None
+            action=(float(action[0]), float(action[1])), fault=None
         )

@@ -27,7 +27,7 @@ _CONFIG = os.path.join(_REPO_ROOT, "config")
 _POLICY_NODE = os.path.join(_REPO_ROOT, "src", "rm_policy", "rm_policy", "policy_node.py")
 _LAUNCH = os.path.join(_REPO_ROOT, "src", "rm_bringup", "launch", "ncp.launch.py")
 
-# The two policy profiles (ncp.launch.py _PROFILES): contract file -> what it
+# The policy profiles (ncp.launch.py _PROFILES): contract file -> what it
 # must say. Width is lidar + goal (2) + previous action (2).
 PROFILES = {
     "m8v2": ("interface.yaml", LidarContract(
@@ -37,6 +37,12 @@ PROFILES = {
     "m4": ("interface_m4.yaml", LidarContract(
         interface_version="3.0.0", n_beams=32, arc_deg=180.0, range_min_m=0.01,
         range_max_m=30.0, search_window_bins=0, mask_zones_deg=())),
+    # M9: the 4.0.0 sensor with the action bounds at the robot's clamps
+    # (tests/unit/test_action_contract.py pins the action block).
+    "m9": ("interface_m9.yaml", LidarContract(
+        interface_version="5.0.0", n_beams=720, arc_deg=270.0, range_min_m=0.01,
+        range_max_m=30.0, search_window_bins=2,
+        mask_zones_deg=((92.0, 123.0), (-135.0, -97.0)))),
 }
 
 

@@ -43,7 +43,11 @@ What it does:
          linear head + clip already produced final units — this node must
          NOT multiply by any additional scaling (`config/interface.yaml`
          `action.scaling.applies: false`; double-scaling here is a silent,
-         no-runtime-error numerical bug).
+         no-runtime-error numerical bug). The runner clips to the
+         contract's `action.layout` ranges (`rm_policy/action_contract.py`),
+         the bounds the checkpoint was trained with; the same bounds
+         normalize the previous-action block of the observation. 3.0.0 and
+         4.0.0 declare the vendored constants; 5.0.0 (M9) the robot's clamps.
       5. Publishes a `Twist` to `/policy/cmd_vel` — an INPUT to `rm_safety`,
          never `/cmd_vel` directly. `linear.y` is set to `0.0` EXPLICITLY on
          every message (never left at its zero default) because the action
@@ -116,6 +120,9 @@ Failure mode:
         * `config/safety_limits.yaml` cannot be read.
         * `cmd_vel_topic` resolves to `/cmd_vel`.
         * `weights` is non-empty and fails to load (see policy_runner.py).
+        * the contract's `action` block is missing or malformed, or its
+          ranges exceed the vendored actor's clip (action_contract.py,
+          policy_runner.py).
         * `config/roam.yaml` is missing, lacks a key, is incoherent, or its
           `range_min_m` does not exceed `goal_reached_dist` (see roam.py).
     - Before the first `/odom` message: goal undefined -> publish zero every
@@ -162,6 +169,7 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
 import tf2_ros
+from rm_policy.action_contract import action_bounds_from
 from rm_policy.lidar_contract import lidar_contract_from
 from rm_policy.observation_builder import build_observation
 from rm_policy.policy_runner import PolicyRunner
@@ -179,14 +187,15 @@ from rm_policy.vendor import ncp_policy
 
 # ---------------------------------------------------------------------------
 # Interface-contract versions this node can run: one per policy profile
-# (3.0.0 = m4, 32 beams over 180 deg; 4.0.0 = m8v2, 720 over 270). The
+# (3.0.0 = m4, 32 beams over 180 deg; 4.0.0 = m8v2, 720 over 270; 5.0.0 =
+# m9, 720 over 270 with the action bounds at the robot's clamps). The
 # contract file's `interface_version` must be one of these, and the network
 # is then built to that contract's width, so a checkpoint for the other
 # profile fails its strict load at startup. A layout this code has never seen
 # is refused outright: a mismatch produces no runtime error, only wrong
 # numbers.
 # ---------------------------------------------------------------------------
-_SUPPORTED_INTERFACE_VERSIONS = ("3.0.0", "4.0.0")
+_SUPPORTED_INTERFACE_VERSIONS = ("3.0.0", "4.0.0", "5.0.0")
 
 # ---------------------------------------------------------------------------
 # Default config paths — only valid in a standard colcon workspace layout
@@ -363,6 +372,13 @@ class PolicyNode(rclpy.node.Node):
                 f"{total_dim!r} but its lidar block implies "
                 f"{self._lidar.obs_dim} ({self._lidar.n_beams} + 4). Refusing to start."
             )
+        # The action block: the bounds the checkpoint was trained with. They
+        # clip every emitted action (policy_runner) and normalize the
+        # previous-action block (observation_builder).
+        try:
+            self._action_bounds = action_bounds_from(interface_cfg, interface_config_path)
+        except ValueError as exc:
+            raise RuntimeError(f"policy_node: {exc}") from exc
 
         # ------------------------------------------------------------------
         # Load config/safety_limits.yaml — ONLY for the scan/odom staleness
@@ -417,9 +433,13 @@ class PolicyNode(rclpy.node.Node):
         # any subscription/timer exists, so a bad weights file prevents the
         # node from starting at all.
         # ------------------------------------------------------------------
-        self._runner = PolicyRunner(
-            weights_path=weights_path, obs_dim=self._lidar.obs_dim,
-        )
+        try:
+            self._runner = PolicyRunner(
+                weights_path=weights_path, obs_dim=self._lidar.obs_dim,
+                action_bounds=self._action_bounds,
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(f"policy_node: {interface_config_path!r}: {exc}") from exc
 
         # The roam sequencer owns the hand-off clocks and the next-goal draw.
         # Built before any subscription: the first /odom callback can fix a
@@ -555,6 +575,14 @@ class PolicyNode(rclpy.node.Node):
             f"rate={self._control_rate_hz} Hz, weights={weights_path or '<random>'!r}, "
             f"goal_offset=({self._goal_offset_x}, {self._goal_offset_y}) m — "
             f"NOT YET APPLIED (undefined until the first /odom message)."
+        )
+        self.get_logger().info(
+            f"policy_node: interface {self._interface_version} from "
+            f"{interface_config_path!r}: {self._lidar.n_beams} beams over "
+            f"{self._lidar.arc_deg:g} deg, action bounds v "
+            f"[{self._action_bounds.low[0]:g}, {self._action_bounds.high[0]:g}] m/s, "
+            f"w [{self._action_bounds.low[1]:g}, {self._action_bounds.high[1]:g}] rad/s "
+            f"(the trained range; rm_safety's clamps bind on top)."
         )
         self.get_logger().info(
             f"policy_node: roam {'ON' if roam_on else 'off'}; limits from "
@@ -960,6 +988,9 @@ class PolicyNode(rclpy.node.Node):
             # frame" look identical on a plot until you know which mode ran.
             "pose_source": self._pose_source,
             "interface_version": self._interface_version,
+            # [[low_v, low_w], [high_v, high_w]]: what the action is clipped
+            # to and the previous-action block is normalized by.
+            "action_bounds": [list(self._action_bounds.low), list(self._action_bounds.high)],
             "n_beams": self._lidar.n_beams,
             "goal_reached": self._goal_reached,
             # What roam is doing: on/off, hand-offs, timeouts, the last
@@ -1337,6 +1368,7 @@ class PolicyNode(rclpy.node.Node):
             range_max=self._lidar.range_max_m,
             search_window_bins=self._lidar.search_window_bins,
             mask_zones_deg=self._lidar.mask_zones_deg,
+            action_bounds=self._action_bounds,
         )
 
         if obs_result.fault is not None or obs_result.obs is None:
