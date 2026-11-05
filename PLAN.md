@@ -1,6 +1,6 @@
 # Plan: the robot's own body never reaches a scan consumer
 
-> Status: APPROVED 2026-11-04 (Daniel: "Go"); BUILDING on `feat/roam-mode`. The M9 profile plan this file held before is built and deployed (29c3cc5, a6350d5, 5df544b, e705f2f); git history keeps it. Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22).
+> Status: APPROVED 2026-11-04 (Daniel: "Go"); BUILT and DEPLOYED the same day (3f8448c on `feat/roam-mode`; 783 workstation tests; bernard-1 rebuilt and restarted with the zones on: no observation bin under 0.3 m on m9 or m8v2 with the nearest real return at 0.57 m, the sanitizer logging its 0.25 m radius). OPEN: the floor test of m9 (a goal ahead, then beside) and whether the SLAM map now holds its orientation. The M9 profile plan this file held before is built and deployed; git history keeps it. Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22).
 
 ## Context
 
