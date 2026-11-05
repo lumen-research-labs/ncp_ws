@@ -37,6 +37,12 @@ Publishes:   <output_topic>  [sensor_msgs/LaserScan]  sanitized, default
                              /scan_sanitized
 Parameters:  scan_topic    (str, "/scan")
 Parameters:  output_topic  (str, "/scan_sanitized")
+Parameters:  body_radius_m (double, 0.0 = off) — returns nearer than this are
+                           the robot's own chassis (the corners return
+                           0.17-0.23 m, 2026-11-04) and become +inf too, so a
+                           scan matcher never sees points fixed in the robot
+                           frame. slam.launch.py passes safety_limits.yaml
+                           estop.body_radius_m (0.25).
 
 Failure mode:
     Fail-quiet and additive. It publishes nothing when it has received
@@ -62,12 +68,13 @@ _DEFAULT_OUTPUT_TOPIC = "/scan_sanitized"
 _WARN_THROTTLE_SEC = 5.0
 
 
-def sanitize_ranges(ranges, range_min: float):
+def sanitize_ranges(ranges, range_min: float, body_radius_m: float = 0.0):
     """Rewrite every invalid range to +inf. Pure, and the whole of the logic.
 
     "Invalid" is: NaN, non-positive (the TG30's 0.0 sentinel and any negative),
-    or below the sensor's own advertised range_min. Values at or above
-    range_min pass through untouched, including existing infs.
+    below the sensor's own advertised range_min, or below `body_radius_m`
+    (the robot's own chassis; 0.0 disables). Values at or above both floors
+    pass through untouched, including existing infs.
 
     range_max is deliberately NOT applied. A reading beyond range_max is a
     long reading, not an invalid one, and clamping it here would invent an
@@ -79,7 +86,7 @@ def sanitize_ranges(ranges, range_min: float):
             out.append(math.inf)
             continue
         v = float(r)
-        if math.isnan(v) or v <= 0.0 or v < range_min:
+        if math.isnan(v) or v <= 0.0 or v < range_min or v < body_radius_m:
             out.append(math.inf)
         else:
             out.append(v)
@@ -92,10 +99,20 @@ class ScanSanitizerNode(rclpy.node.Node):
 
         self.declare_parameter("scan_topic", _DEFAULT_SCAN_TOPIC)
         self.declare_parameter("output_topic", _DEFAULT_OUTPUT_TOPIC)
+        self.declare_parameter("body_radius_m", 0.0)
         scan_topic = self.get_parameter("scan_topic").get_parameter_value().string_value
         output_topic = (
             self.get_parameter("output_topic").get_parameter_value().string_value
         )
+        self._body_radius_m = float(
+            self.get_parameter("body_radius_m").get_parameter_value().double_value
+        )
+        if not (math.isfinite(self._body_radius_m) and self._body_radius_m >= 0.0):
+            raise ValueError(
+                f"scan_sanitizer: body_radius_m must be finite and >= 0 (metres "
+                f"from the lidar; the chassis corners return 0.17-0.23 m), got "
+                f"{self._body_radius_m!r}"
+            )
 
         # Same asymmetry as scan_bridge_node, and for the same reason:
         # subscribe BEST_EFFORT to match the sensor driver, publish RELIABLE so
@@ -119,7 +136,9 @@ class ScanSanitizerNode(rclpy.node.Node):
 
         self.get_logger().info(
             f"scan_sanitizer: {scan_topic} -> {output_topic}; "
-            f"invalid ranges (0.0 / negative / NaN / < range_min) -> +inf"
+            f"invalid ranges (0.0 / negative / NaN / < range_min) -> +inf; "
+            f"body radius {self._body_radius_m} m (returns under it are the "
+            f"chassis and become +inf too)"
         )
 
     def _on_scan(self, msg: LaserScan) -> None:
@@ -136,7 +155,7 @@ class ScanSanitizerNode(rclpy.node.Node):
             out.range_min = msg.range_min
             out.range_max = msg.range_max
             out.intensities = msg.intensities
-            out.ranges = sanitize_ranges(msg.ranges, msg.range_min)
+            out.ranges = sanitize_ranges(msg.ranges, msg.range_min, self._body_radius_m)
             self._pub.publish(out)
         except Exception as exc:
             self.get_logger().warn(

@@ -125,6 +125,8 @@ the forwarded row and the readable one cannot disagree.
 
 ### Two zones, two arcs
 
+Before either arc is read, returns under `estop.body_floor_m` (0.12 m) are dropped: nearer than that is the chassis itself (the standoffs read 0.06 to 0.11 m, measured 2026-11-04), and the self-occlusion zones alone let a band of them through. See [`docs/lidar_sampling.md`](../../docs/lidar_sampling.md).
+
 The slow zone and the stop zone have **separate arcs**, and this is not an
 oversight:
 

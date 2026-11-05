@@ -22,10 +22,10 @@ observation, runs the network, and publishes a *candidate* command.
 | `roam.py` | pure module | ROAM mode: the limits in `config/roam.yaml` and the hand-off clock that draws the next random goal on arrival or timeout. See [`docs/roam.md`](../../docs/roam.md). |
 | `retreat.py` | pure module | ROAM's manoeuvres: the straight reverse out of a stop-zone e-stop (the one command rm_safety passes under its latch) and the turn in place toward a goal off the nose. |
 | `policy_node.py` | ROS2 node | The control loop. The production path. |
-| `lidar_contract.py` | pure module | Reads the lidar block of `config/interface.yaml` (bins, arc, range bounds, search window, self-occlusion zones) for both nodes. |
+| `lidar_contract.py` | pure module | Reads the lidar block of `config/interface.yaml` (bins, arc, range bounds, search window, self-occlusion zones, body floor) for both nodes. |
 | `action_contract.py` | pure module | Reads the action block (the trained bounds) of a profile's interface file; 5.0.0 (M9) differs from the vendored constants. See [`docs/interface_versions.md`](../../docs/interface_versions.md). |
 | `scan_bridge_node.py` | ROS2 node | `/scan` → `/ncp/scan`, 720 beams. Exists only so the *upstream* node can run unmodified. |
-| `scan_sanitizer_node.py` | ROS2 node | `/scan` → `/scan_sanitized`, full resolution, `0.0` → `+inf`. For third-party consumers (slam_toolbox). |
+| `scan_sanitizer_node.py` | ROS2 node | `/scan` → `/scan_sanitized`, full resolution, `0.0` → `+inf`, and returns under the body radius (the chassis corners) → `+inf`. For third-party consumers (slam_toolbox). |
 
 ---
 

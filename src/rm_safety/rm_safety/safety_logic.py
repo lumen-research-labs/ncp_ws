@@ -159,6 +159,10 @@ class EstopLimits:
     # ------------------------------------------------------------------
     retreat_max_vx: float = 0.0
     retreat_release_range_m: float = 0.30
+    # BODY FLOOR: a return under this (metres from the lidar) is the chassis,
+    # not the world, and is skipped by min_range_in_arcs before the arcs and
+    # zones. 0.0 = off. See safety_limits.yaml estop.body_floor_m.
+    body_floor_m: float = 0.0
     retreat_release_ticks: int = 10
 
     @property
@@ -319,6 +323,7 @@ class Limits:
                 # .get with 0.0: the opposite default from the zone switches,
                 # because this key ADDS motion. Absence is "off".
                 retreat_max_vx=float(e.get("retreat_max_vx", 0.0)),
+                body_floor_m=float(e.get("body_floor_m", 0.0)),
                 retreat_release_range_m=float(e.get("retreat_release_range_m", 0.30)),
                 retreat_release_ticks=int(e.get("retreat_release_ticks", 10)),
                 self_occlusion_zones_deg=tuple(
@@ -356,6 +361,12 @@ class Limits:
                 f"slow_lateral_arc_deg ({es.effective_slow_lateral_arc_deg}) "
                 f"must not exceed lateral_arc_deg ({es.lateral_arc_deg}): the "
                 f"slow zone must sit inside the stop zone's coverage."
+            )
+        if not (math.isfinite(es.body_floor_m) and 0.0 <= es.body_floor_m < es.stop_zone_m):
+            raise ValueError(
+                f"estop.body_floor_m ({es.body_floor_m}) must be finite, >= 0 and "
+                f"below stop_zone_m ({es.stop_zone_m}): it drops the chassis's own "
+                f"returns (0.06-0.11 m), never a real obstacle inside the stop zone."
             )
         if not (math.isfinite(es.retreat_max_vx) and 0.0 <= es.retreat_max_vx
                 <= limits.velocity.max_vx):
@@ -717,7 +728,9 @@ def min_range_in_arcs(
     correctly falls back to no-signal-in-zone, not a phantom all-clear.
 
     Invalid returns (NaN, inf, <= 0, outside ``[range_min, range_max]``) are
-    skipped.  If NO valid returns exist in the monitored arcs, ``+inf`` is
+    skipped, and so are returns under ``limits.estop.body_floor_m``: the
+    chassis (standoffs at 0.06-0.11 m, 2026-11-04) is nearer than anything in
+    the world can be, so a return under the floor is the robot.  If NO valid returns exist in the monitored arcs, ``+inf`` is
     returned.  The caller (``evaluate``) MUST treat a no-valid-returns result
     as an e-stop condition (fail-closed — zero valid returns means no
     perception, not "obstacle-free").
@@ -766,6 +779,7 @@ def min_range_in_arcs(
     lat_centre_right = -math.pi / 2.0
 
     range_min = 0.0   # anything <= 0 is invalid regardless of sensor spec
+    body_floor = limits.estop.body_floor_m  # under this: the chassis, not the world
     # range_max taken from LaserScan; passed in via scan_range_max in EvalInputs
     # but this function does not have access to it — it trusts the caller to
     # pass only physically meaningful ranges.  See NOTE below.
@@ -777,7 +791,7 @@ def min_range_in_arcs(
     min_r = math.inf
 
     for i, r in enumerate(ranges):
-        if not math.isfinite(r) or r <= range_min:
+        if not math.isfinite(r) or r <= range_min or r < body_floor:
             continue
 
         angle_raw = angle_min + i * angle_increment

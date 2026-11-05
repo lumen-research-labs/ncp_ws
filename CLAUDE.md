@@ -1951,6 +1951,35 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     m9 action sits at its bounds [0.25, 0.8]; watch whether it unsticks
     once armed. The roam cone is still the shared +-45 deg; M9 trained on
     random bearings, so a wider per-profile cone is the follow-up.
+  * **2026-11-04, the first m9 drive: tight left circles into things, every
+    roam goal "stalled after 10 s", Daniel: "much worse than m4".** The live
+    observation had ten bins around -95 deg reading 0.10 m with nothing
+    real nearer than 0.59 m. A full-resolution scan (now
+    `tests/fixtures/tg30_scan_2026-11-04_standoffs.yaml`) shows the RIGHT
+    chassis standoffs returning 0.06-0.11 m continuously from -138 to -94
+    deg: closer and wider than the 2026-08-14 measurement the
+    self-occlusion zones were cut from (the mount has moved), and the
+    -97..-94 deg band leaks past the zone edge at -97. On that scan the
+    4.0.0 lidar block yields nine bins at 0.085-0.114 m; rm_safety's
+    `min_range_in_arcs` reads 0.085 m (so the retreat's "clear to 0.30 m"
+    release could never fire either). To a policy trained with collision
+    ending the episode a 0.10 m return on the right is "turn left now",
+    hence full left yaw forever; m4's +-90 deg arc never sees -95 (why it
+    "works better"); M8-v2 saw it and "circled left" on 2026-10-09. The
+    SLAM map's slow rotation is most likely the rear corners (0.17-0.23 m,
+    above slam_toolbox's 0.15 m min_laser_range) reaching the scan matcher
+    as points fixed in the robot frame; not proven. Fix (one rule, three
+    consumers): a return nearer than the chassis is the robot. Contracts
+    gain `body_floor_m: 0.12` (lidar_contract `resample_floor_m`, passed as
+    the resampler's range_min by policy_node and scan_bridge_node, so body
+    returns take the no-return path: range_max, clear); safety gains
+    `estop.body_floor_m: 0.12` skipped in `min_range_in_arcs`; the
+    sanitizer gains `body_radius_m` (0.25, `estop.body_radius_m`, passed by
+    slam.launch.py) and rewrites returns under it to +inf. Zones unchanged,
+    their comments re-measured. `tests/unit/test_body_floor.py` pins the
+    fixture, the leak, the fix, the refusals and the cross-file equalities.
+    LESSON: a mask measured once is a number that rots when hardware moves;
+    a floor derived from the chassis geometry does not.
   * **Second live run (zones on): the robot reached its first goal and HELD
     there** ("no candidate goal in free space"). The captured scan
     (`tests/fixtures/tg30_roam_hold_scan.yaml`, 2020 rays, 29 % no-returns)

@@ -108,7 +108,7 @@ class ScanBridgeNode(rclpy.node.Node):
                 f"ncp_scan_bridge: cannot read the lidar contract from "
                 f"{interface_config_path!r}: {exc}"
             ) from exc
-        self._range_min = self._lidar.range_min_m
+        self._range_min = self._lidar.resample_floor_m  # sensor floor or body floor
         self._range_max = self._lidar.range_max_m
 
         # Geometry follows the CONTRACT (the active profile). The vendored

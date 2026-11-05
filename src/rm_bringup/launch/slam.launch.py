@@ -53,6 +53,8 @@ Usage:
 
 import pathlib
 
+import yaml
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -61,6 +63,23 @@ from launch_ros.actions import Node
 _LAUNCH_DIR = pathlib.Path(__file__).resolve().parent
 _REPO_ROOT = _LAUNCH_DIR.parents[2]
 _DEFAULT_PARAMS = str(_REPO_ROOT / "config" / "slam_toolbox.yaml")
+_DEFAULT_LIMITS_PATH = _REPO_ROOT / "config" / "safety_limits.yaml"
+
+
+def _body_radius_m(limits_path: pathlib.Path = _DEFAULT_LIMITS_PATH) -> float:
+    """estop.body_radius_m from config/safety_limits.yaml: returns nearer than
+    this are the robot's own chassis (the corners, 0.17-0.23 m) and the
+    sanitizer turns them into +inf so slam_toolbox never matches on them.
+    A missing key is a startup error, never a silent 0.0."""
+    with open(limits_path, "r", encoding="utf-8") as fh:
+        limits = yaml.safe_load(fh)
+    try:
+        return float(limits["estop"]["body_radius_m"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"slam.launch.py: {limits_path}: estop.body_radius_m missing or not a "
+            f"number ({exc!r}); the scan sanitizer needs it."
+        ) from exc
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -92,6 +111,10 @@ def generate_launch_description() -> LaunchDescription:
             parameters=[{
                 "scan_topic": "/scan",
                 "output_topic": "/scan_sanitized",
+                # The chassis corners (0.17-0.23 m) are above slam_toolbox's
+                # 0.15 m min_laser_range and would reach its scan matcher as
+                # points fixed in the robot frame. Measured 2026-11-04.
+                "body_radius_m": _body_radius_m(),
             }],
         ),
         # respawn=True is what makes the dashboard's RESET MAP control work:

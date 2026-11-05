@@ -33,16 +33,16 @@ PROFILES = {
     "m8v2": ("interface.yaml", LidarContract(
         interface_version="4.0.0", n_beams=720, arc_deg=270.0, range_min_m=0.01,
         range_max_m=30.0, search_window_bins=2,
-        mask_zones_deg=((92.0, 123.0), (-135.0, -97.0)))),
+        mask_zones_deg=((92.0, 123.0), (-135.0, -97.0)), body_floor_m=0.12)),
     "m4": ("interface_m4.yaml", LidarContract(
         interface_version="3.0.0", n_beams=32, arc_deg=180.0, range_min_m=0.01,
-        range_max_m=30.0, search_window_bins=0, mask_zones_deg=())),
+        range_max_m=30.0, search_window_bins=0, mask_zones_deg=(), body_floor_m=0.12)),
     # M9: the 4.0.0 sensor with the action bounds at the robot's clamps
     # (tests/unit/test_action_contract.py pins the action block).
     "m9": ("interface_m9.yaml", LidarContract(
         interface_version="5.0.0", n_beams=720, arc_deg=270.0, range_min_m=0.01,
         range_max_m=30.0, search_window_bins=2,
-        mask_zones_deg=((92.0, 123.0), (-135.0, -97.0)))),
+        mask_zones_deg=((92.0, 123.0), (-135.0, -97.0)), body_floor_m=0.12)),
 }
 
 

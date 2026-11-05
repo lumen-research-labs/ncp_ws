@@ -21,3 +21,7 @@ The TG30 encodes a missing return as `0.0`, and the driver's `invalid_range_is_i
 ## Why not min-pooling
 
 Min-pooling reports obstacles closer and wider than a one-ray-per-bin sensor would. Measured at 32 bins against real scans, it shifts the normalized observation by 0.03 to 0.19 on average and by up to 1.05 in single bins. That is a distribution shift away from training. `min_pool` stays available in `scan_resampler` for a consumer that wants conservatism, and `rm_safety` computes its e-stop from the full-resolution scan regardless.
+
+## The body floor
+
+Nothing in the world is nearer the lidar than the chassis, so a return under a measured floor is the robot. Measured 2026-11-04 (`tests/fixtures/tg30_scan_2026-11-04_standoffs.yaml`): the standoffs return 0.06 to 0.11 m from −138° to −94°, closer and wider than on 2026-08-14 when the zones were cut. The −97° to −94° band leaked past the mask and reached the policy as a 0.10 m obstacle; M9 answered with full left yaw. `body_floor_m: 0.12` in each contract's lidar block makes the resampler treat such a return as a no-return (`range_max`, clear); `rm_safety` skips the same returns before its arcs (`estop.body_floor_m`); `scan_sanitizer_node` rewrites returns under `estop.body_radius_m` (0.25 m, the corners) to `+inf` for slam_toolbox. The zones stay for anything above it. Live check: `/ncp_debug/<profile>` `obs` has no lidar entry below −0.9 with nothing near the robot. `tests/unit/test_body_floor.py` holds the measurement.

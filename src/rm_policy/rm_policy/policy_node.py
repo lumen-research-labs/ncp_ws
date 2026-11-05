@@ -1364,7 +1364,7 @@ class PolicyNode(rclpy.node.Node):
             previous_action=(self._prev_action_v, self._prev_action_w),
             n_beams=self._lidar.n_beams,
             arc_deg=self._lidar.arc_deg,
-            range_min=self._lidar.range_min_m,
+            range_min=self._lidar.resample_floor_m,  # sensor floor or body floor
             range_max=self._lidar.range_max_m,
             search_window_bins=self._lidar.search_window_bins,
             mask_zones_deg=self._lidar.mask_zones_deg,
