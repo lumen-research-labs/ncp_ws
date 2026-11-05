@@ -36,7 +36,7 @@ Roam only moves the goal; the policy drives behind rm_safety's clamps, watchdogs
 | `pinned_after_s`, `stopped_move_m`, `stopped_yaw_deg` | 5, 0.05, 6 | Stopped this long, by any cause: pinned. Killed time never counts. |
 | `turn_wz`, `turn_tolerance_deg`, `turn_timeout_s`, `turn_clear_m` | 0.5, 15, 12, 0.30 | Turning in place. |
 
-Read at startup.
+Read at startup. A profile's block under `profiles:` in `config/roam.yaml` overrides these for that profile's node only: `dynabarn` draws over the full 180 degrees and never turns to face the goal first (`bearing_cap_deg` 180, `turn_tolerance_deg` 179), since it trained with goals in every direction. The unseen sector behind the robot still holds no goal.
 
 ## What will look like a bug
 

@@ -305,6 +305,8 @@ class PolicyNode(rclpy.node.Node):
         self.declare_parameter("goal_reached_dist", ncp_policy.SUCCESS_DIST)
         self.declare_parameter("roam", False)
         self.declare_parameter("roam_config_path", _DEFAULT_ROAM_CONFIG_PATH)
+        # the policy profile (topics.yaml row) this node runs; picks its roam.yaml profiles: block
+        self.declare_parameter("profile", "")
 
         scan_topic = self._get_str_param("scan_topic")
         odom_topic = self._get_str_param("odom_topic")
@@ -317,6 +319,7 @@ class PolicyNode(rclpy.node.Node):
         safety_limits_path = self._get_str_param("safety_limits_path")
         self._goal_reached_dist = self._get_double_param("goal_reached_dist")
         roam_config_path = self._get_str_param("roam_config_path")
+        self._profile = self._get_str_param("profile")
         roam_on = bool(self.get_parameter("roam").get_parameter_value().bool_value)
         self._pose_source = self._get_str_param("pose_source")
         if self._pose_source not in (_POSE_SOURCE_ODOM, _POSE_SOURCE_MAP):
@@ -421,7 +424,7 @@ class PolicyNode(rclpy.node.Node):
         # driving, so the shortest leg must clear goal_reached_dist.
         # ------------------------------------------------------------------
         try:
-            roam_limits = load_roam_limits(roam_config_path)
+            roam_limits = load_roam_limits(roam_config_path, self._profile)
         except (OSError, ValueError) as exc:
             raise RuntimeError(f"policy_node: {exc}") from exc
         if roam_limits.range_min_m <= self._goal_reached_dist:

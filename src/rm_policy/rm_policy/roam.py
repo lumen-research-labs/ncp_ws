@@ -234,8 +234,12 @@ def limits_from_dict(block: Mapping, source: str) -> RoamLimits:
     return limits
 
 
-def load_roam_limits(path: str) -> RoamLimits:
-    """Read `config/roam.yaml`. Missing file, block or key is an error."""
+def load_roam_limits(path: str, profile: str = "") -> RoamLimits:
+    """Read `config/roam.yaml`. Missing file, block or key is an error.
+
+    `profile` (a policy profile name) applies that profile's block under
+    `profiles:` on top of `roam:`, if it has one. An override key that is not
+    a roam key is an error, so a typo cannot pass silently."""
     if not os.path.isfile(path):
         raise FileNotFoundError(f"roam config {path!r} does not exist; pass config/roam.yaml")
     with open(path, encoding="utf-8") as handle:
@@ -243,7 +247,15 @@ def load_roam_limits(path: str) -> RoamLimits:
     block = data.get("roam") if isinstance(data, Mapping) else None
     if block is None:
         raise ValueError(f"{path}: has no 'roam:' block")
-    return limits_from_dict(block, source=path)
+    overrides = (data.get("profiles") or {}).get(profile) if profile else None
+    if overrides is None:
+        return limits_from_dict(block, source=path)
+    if not isinstance(overrides, Mapping):
+        raise ValueError(f"{path}: profiles.{profile} is not a mapping: {overrides!r}")
+    unknown = sorted(set(overrides) - set(KEYS))
+    if unknown:
+        raise ValueError(f"{path}: profiles.{profile} sets unknown roam keys: {', '.join(unknown)}")
+    return limits_from_dict({**block, **overrides}, source=f"{path} (profile {profile})")
 
 
 def _wrap(angle: float) -> float:

@@ -594,6 +594,8 @@ def _policy_consumer(context):
             # the launch. `roam` itself is a runtime parameter, not a launch
             # argument (see the docstring).
             "roam_config_path": _DEFAULT_ROAM_PATH,
+            # picks this profile's block under roam.yaml `profiles:`, if any
+            "profile": _name,
         }
         # An empty `weights` must be OMITTED, not passed: rclpy aborts on
         # `-p weights:=` (see _upstream_process). Empty is the default

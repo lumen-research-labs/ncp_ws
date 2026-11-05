@@ -199,3 +199,17 @@ roam:
   # (their goals still differ: each hands off at its own moments and sees its
   # own scan) and a run is reproducible. Change it for a different course.
   seed: 0
+
+# Per-profile overrides, applied on top of `roam:` by the node of that profile
+# (policy_node's `profile` parameter, set by ncp.launch.py). Only roam keys.
+profiles:
+  # dynabarn trained with goals anywhere in the room, so it gets the full
+  # bearing range and no face-the-goal turn (the 45 deg cap and the turn exist
+  # because M4 cannot steer to a goal beside it). Goals still need a corridor
+  # the lidar sees, so the unseen 90 deg behind the robot stays excluded.
+  # turn_tolerance_deg must be below 180; 179 turns only for a goal more than
+  # 179 deg off the nose, which the unseen sector already excludes, so never.
+  # Daniel, 2026-11-05.
+  dynabarn:
+    bearing_cap_deg: 180.0
+    turn_tolerance_deg: 179.0

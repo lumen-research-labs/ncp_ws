@@ -665,6 +665,7 @@ def test_the_launch_passes_the_config_path_to_every_policy_node_and_has_no_roam_
     loop = src[src.index("for _name, source, interface, weights in profiles:"):
                src.index("nodes.append(Node(")]
     assert '"roam_config_path": _DEFAULT_ROAM_PATH' in loop
+    assert '"profile": _name' in loop  # each node applies its own roam.yaml profiles: block
     declared = re.findall(r'DeclareLaunchArgument\(\s*"(\w+)"', src)
     assert "roam" not in declared
     assert os.path.isfile(os.path.join(_REPO_ROOT, "config", "roam.yaml"))
@@ -781,3 +782,26 @@ def test_roam_is_reachable_from_the_operator_docs():
             for t in _relative_links(doc)
         ]
         assert os.path.join(_DOCS, "roam.md") in targets, doc
+
+
+def test_a_profile_block_overrides_roam_for_that_profile_only(tmp_path) -> None:
+    import yaml as _yaml
+
+    real = os.path.join(os.path.dirname(__file__), "..", "..", "config", "roam.yaml")
+    base = load_roam_limits(real)
+    dyn = load_roam_limits(real, "dynabarn")
+    assert (base.bearing_cap_deg, base.turn_tolerance_deg) == (45.0, 15.0)
+    assert (dyn.bearing_cap_deg, dyn.turn_tolerance_deg) == (180.0, 179.0)
+    assert dyn.range_max_m == base.range_max_m and dyn.seed == base.seed
+    assert load_roam_limits(real, "m4") == base  # no block: the shared limits
+
+    data = _yaml.safe_load(open(real))
+    data["profiles"] = {"x": {"bearing_cap_degs": 90.0}}
+    bad = tmp_path / "roam.yaml"
+    bad.write_text(_yaml.safe_dump(data))
+    with pytest.raises(ValueError, match="profiles.x sets unknown roam keys: bearing_cap_degs"):
+        load_roam_limits(str(bad), "x")
+    data["profiles"] = {"x": {"bearing_cap_deg": 270.0}}
+    bad.write_text(_yaml.safe_dump(data))
+    with pytest.raises(ValueError, match=r"\(profile x\): roam.bearing_cap_deg must be within \[0, 180\]"):
+        load_roam_limits(str(bad), "x")
