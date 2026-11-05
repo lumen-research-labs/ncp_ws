@@ -77,6 +77,12 @@ command_sources:
     node: policy_node_m9
     debug: /ncp_debug/m9
     description: M9, 720 beams over 270 deg, interface 5.0.0 (steers to the goal; trained at the robot's clamps)
+  dynabarn:
+    topic: /policy/dynabarn/cmd_vel
+    kind: policy
+    node: policy_node_dynabarn
+    debug: /ncp_debug/dynabarn
+    description: DynaBARN-X3 (lumen gauntlet), 720 beams over 270 deg, interface 5.1.0 (moving obstacles; trained with the occlusion mask)
 
 sensors:
   # Names below are the previous team's OBSERVED topics on this exact

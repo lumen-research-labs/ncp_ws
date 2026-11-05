@@ -40,7 +40,7 @@ def _profiles(src: str) -> dict:
 
 def test_default_runs_both_policies() -> None:
     src = _read(_LAUNCH)
-    assert '_DEFAULT_PROFILES = "m8v2,m4,m9"' in src
+    assert '_DEFAULT_PROFILES = "m8v2,m4,m9,dynabarn"' in src
     assert '"profiles", default_value=_DEFAULT_PROFILES' in src
     assert 'LaunchConfiguration("profile")' not in src, "profile:= was replaced by profiles:="
 
@@ -50,7 +50,7 @@ def test_profiles_and_table_rows_with_nodes_are_the_same_set() -> None:
     command topic and debug stream. Neither may exist without the other."""
     profiles = set(_profiles(_read(_LAUNCH)))
     with_node = {n for n, s in load_command_sources(_TOPICS).items() if s.node}
-    assert profiles == with_node == {"m8v2", "m4", "m9"}
+    assert profiles == with_node == {"m8v2", "m4", "m9", "dynabarn"}
 
 
 def test_policy_nodes_are_named_and_topiced_from_the_table() -> None:

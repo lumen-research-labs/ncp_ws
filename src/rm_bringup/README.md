@@ -30,7 +30,8 @@
       │
       ├─ policy_node_m8v2 ──► /policy/m8v2/cmd_vel ──┐
       ├─ policy_node_m4   ──► /policy/m4/cmd_vel   ──┼──► rm_safety ──► /cmd_vel ──► rm_base ──► wheels
-      └─ policy_node_m9   ──► /policy/m9/cmd_vel   ──┘    (command_source picks ONE row)
+      ├─ policy_node_m9   ──► /policy/m9/cmd_vel   ──┤    (command_source picks ONE row)
+      └─ policy_node_dynabarn ► /policy/dynabarn/cmd_vel ┘
 ```
 
 Node names, command topics and debug streams come from `config/topics.yaml`
@@ -41,10 +42,10 @@ the live one is a parameter set, never a restart.
 
 | argument | default | what it does |
 |---|---|---|
-| `command_source` | **`teleop`** | A `config/topics.yaml` row: `teleop`, `policy`, `m8v2`, `m4` or `m9`. Defaults to `teleop` so bringing the stack up to watch it **cannot** reach the base driver. Any other name is refused. |
+| `command_source` | **`teleop`** | A `config/topics.yaml` row: `teleop`, `policy`, `m8v2`, `m4`, `m9` or `dynabarn`. Defaults to `teleop` so bringing the stack up to watch it **cannot** reach the base driver. Any other name is refused. |
 | `consumer` | `policy_node` | Or `upstream` — runs `NCP-on-Rosmaster/rosmaster/node.py` unmodified, the only way to get its `mode:=debug` reactive rule. |
 | `mode` | `debug` | Only meaningful for `consumer:=upstream`. `debug` = reactive rule drives, NCP runs in shadow. `ncp` = the network drives. |
-| `profiles` | **`m8v2,m4,m9`** | Which trained policies to run, each as its own node on its own row: `m8v2` (720 beams over 270°, interface 4.0.0, `actor.pt`), `m4` (32 over 180°, 3.0.0, `actor_m4.pt`) and `m9` (720 over 270°, 5.0.0, `actor_m9.pt`, trained at the robot's clamps; see [`docs/add_a_policy_profile.md`](../../docs/add_a_policy_profile.md) for adding one). The scan bridge serves the first listed. `consumer:=upstream` needs `m8v2` first. The dashboard header shows which policy is live. |
+| `profiles` | **`m8v2,m4,m9,dynabarn`** | Which trained policies to run, each as its own node on its own row: `m8v2` (720 beams over 270°, interface 4.0.0, `actor.pt`), `m4` (32 over 180°, 3.0.0, `actor_m4.pt`) `m9` (720 over 270°, 5.0.0, `actor_m9.pt`, trained at the robot's clamps) and `dynabarn` (720 over 270°, 5.1.0, `actor_dynabarn.pt`, the lumen gauntlet's DynaBARN-X3 policy; see [`docs/add_a_policy_profile.md`](../../docs/add_a_policy_profile.md) for adding one). The scan bridge serves the first listed. `consumer:=upstream` needs `m8v2` first. The dashboard header shows which policy is live. |
 | `interface_config_path` | from the table | Contract file override for one profile; pass `profiles:=<one>` with it. |
 | `weights` | the profile's checkpoint | For one profile (`profiles:=<one>`). `weights:=''` is the explicit opt-in to **random weights**. A checkpoint of the other profile's width refuses to load. |
 | `dry_run` | **`false`** | Note this differs from `base.launch.py`'s own default of `true`: bringing up the full stack implies intent to drive. |
