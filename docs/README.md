@@ -6,7 +6,8 @@
 | [`operating_guide.md`](operating_guide.md) | **The runbook.** Connect, deploy, start the stack, arm the safety layer, run the policy, use the dashboard, shut down. | current |
 | [`roam.md`](roam.md) | **How to run roam mode.** The robot draws its own next goal at random on arrival or timeout and keeps driving; the keys of `config/roam.yaml`, how to switch it on and off, and how to read the counters. | current |
 | [`interface_contract.md`](interface_contract.md) | The observation/action layout the profiles share, in prose. The profile's file under `config/` is the machine-readable authority. | current |
-| [`interface_versions.md`](interface_versions.md) | Every contract version with its checkpoint (M4, M8-v2, M9): files, hashes, bounds, held-out figures, and what 5.0.0 changed. | current |
+| [`interface_versions.md`](interface_versions.md) | Every contract version (3.0.0 to 5.1.0), its layout and bounds, and what 5.0.0 changed. | current |
+| [`checkpoints.md`](checkpoints.md) | The network behind each profile (M4, M8-v2, M9, DynaBARN-X3): files, hashes, runs, held-out figures, exports. | current |
 | [`add_a_policy_profile.md`](add_a_policy_profile.md) | **How to add a trained checkpoint as a profile** with its own dashboard button: export, contract file, table row, pins, deploy. | current (4.0.0) |
 | [`lidar_sampling.md`](lidar_sampling.md) | Why the 720-beam lidar block is reduced the way it is: the search window, the self-occlusion zones and the `0.0` no-return mapping, with the measurements behind each. | current |
 | [`calibration.md`](calibration.md) | **How to bring `rm_base` up on a NEW robot.** The per-robot measurement procedure, in order, wheels-up before wheels-down. The numbers in `config/base_calibration.yaml` are bernard-1's and do not transfer. | current |

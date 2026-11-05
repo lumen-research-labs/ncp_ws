@@ -191,14 +191,15 @@ from rm_policy.vendor import ncp_policy
 # ---------------------------------------------------------------------------
 # Interface-contract versions this node can run: one per policy profile
 # (3.0.0 = m4, 32 beams over 180 deg; 4.0.0 = m8v2, 720 over 270; 5.0.0 =
-# m9, 720 over 270 with the action bounds at the robot's clamps). The
+# m9, 720 over 270 with the action bounds at the robot's clamps; 5.1.0 =
+# dynabarn, 5.0.0's layout with the lumen gauntlet's DynaBARN-X3 checkpoint). The
 # contract file's `interface_version` must be one of these, and the network
 # is then built to that contract's width, so a checkpoint for the other
 # profile fails its strict load at startup. A layout this code has never seen
 # is refused outright: a mismatch produces no runtime error, only wrong
 # numbers.
 # ---------------------------------------------------------------------------
-_SUPPORTED_INTERFACE_VERSIONS = ("3.0.0", "4.0.0", "5.0.0")
+_SUPPORTED_INTERFACE_VERSIONS = ("3.0.0", "4.0.0", "5.0.0", "5.1.0")
 
 # ---------------------------------------------------------------------------
 # Default config paths — only valid in a standard colcon workspace layout

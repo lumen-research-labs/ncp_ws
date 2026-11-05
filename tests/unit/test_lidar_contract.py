@@ -43,6 +43,11 @@ PROFILES = {
         interface_version="5.0.0", n_beams=720, arc_deg=270.0, range_min_m=0.01,
         range_max_m=30.0, search_window_bins=2,
         mask_zones_deg=((92.0, 123.0), (-135.0, -97.0)), body_floor_m=0.12)),
+    # DynaBARN-X3 (lumen gauntlet): the 5.0.0 contract with a new checkpoint
+    "dynabarn": ("interface_dynabarn.yaml", LidarContract(
+        interface_version="5.1.0", n_beams=720, arc_deg=270.0, range_min_m=0.01,
+        range_max_m=30.0, search_window_bins=2,
+        mask_zones_deg=((92.0, 123.0), (-135.0, -97.0)), body_floor_m=0.12)),
 }
 
 

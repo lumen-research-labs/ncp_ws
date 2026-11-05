@@ -193,9 +193,10 @@ BUILD-PLAN.md   the authority on scope and phase gates
 CLAUDE.md       the working-state project brain and session log
 config/         interface.yaml (THE contract), safety_limits.yaml,
                 base_calibration.yaml, waypoint.yaml, roam.yaml,
-                slam_toolbox.yaml, topics.yaml, fastdds_unicast_peers.xml
+                slam_toolbox.yaml, topics.yaml, fastdds_unicast_peers.xml,
+                interface_m4.yaml, interface_m9.yaml, interface_dynabarn.yaml
 docs/           architecture, operating_guide, roam, interface_contract,
-                interface_versions, add_a_policy_profile, safety_validation,
+                interface_versions, checkpoints, add_a_policy_profile, safety_validation,
                 deployment, workstation_setup
 src/            the seven rm_* packages (see the table above)
 scripts/        setup_workstation.sh (a fresh PC), deploy_to_robot.sh,

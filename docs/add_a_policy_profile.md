@@ -5,7 +5,7 @@ How to put a newly trained checkpoint on the robot as its own dashboard button. 
 ## Before you start
 
 - The snapshot directory on the training box holds `cfc_final.zip` and `vecnormalize.pkl` (a barn-gym RecurrentPPO checkpoint, for example `runs/m9_gz/archive/s152000`).
-- Read the run's observation width and SB3 action space from the checkpoint, never from memory: `RecurrentPPO.load(...).policy.action_space` and the shape of `vecnormalize.pkl`'s `obs_rms.mean`.
+- Read the run's observation width and SB3 action space from the checkpoint, never from memory: `RecurrentPPO.load(...).policy.action_space` and the shape of `vecnormalize.pkl`'s `obs_rms.mean`. A lumen gauntlet `barn_lab` checkpoint (2026-11-05 on) acts in [-1, 1]: the contract's bounds are then the task's physical bounds, and the export takes them with `--bounds vlo,vhi,wlo,whi` (the `dynabarn` profile is the worked case).
 - The workstation has the two clones side by side ([`workstation_setup.md`](workstation_setup.md)).
 
 ## 1. Export the weights

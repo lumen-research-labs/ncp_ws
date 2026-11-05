@@ -1,0 +1,531 @@
+# THE FROZEN CONTRACT — obs/action interface for the ROSMASTER X3 policy pipeline.
+#
+# STATUS: DRAFT — NOT YET FROZEN.
+# This file is filled in during Phase 3, which blocks on Phase 1 measured
+# sensor rates. Fields marked TODO(phase1) cannot be chosen until Phase 1
+# task 4 (`ros2 topic hz` / `ros2 topic delay`) has been run against the real
+# robot. Do not guess them.
+#
+# Bump `interface_version` on ANY change to observation or action layout.
+# The policy node asserts the version embedded in the exported model metadata
+# against this value and refuses to start on a mismatch.
+
+# THIS FILE IS THE 5.1.0 PROFILE (dynabarn). It is a copy of interface_m9.yaml
+# (5.0.0) with the version and the checkpoint block changed, nothing else: the
+# observation, the action bounds and the previous_action normalization are
+# 5.0.0's. 5.0.0 itself is a copy of interface.yaml (4.0.0, m8v2) with the
+# checkpoint block, the previous_action normalization and the action bounds
+# changed, nothing else. policy_node reads the action bounds
+# from here (rm_policy/action_contract.py); the vendored ncp_policy keeps the
+# 4.0.0 constants.
+#
+# CHANGE LOG
+# 5.1.0 (2026-11-05, operator decision) — the DynaBARN-X3 checkpoint from the
+#   lumen gauntlet (tasks/dynabarn_x3, experiments/barn_lab): the X3 among
+#   moving cylinders at X3 scale, start and goal anywhere in a 12.6 m room,
+#   trained WITH this contract's self-occlusion mask.
+#     * Observation, lidar block, goal block, action bounds, previous_action
+#       normalization and control rate: unchanged from 5.0.0.
+#     * The checkpoint was trained in [-1, 1] actions; export_from_sb3.py
+#       --bounds folded the rescale into its last layer, so the actor emits
+#       m/s and rad/s inside 5.0.0's bounds like M9.
+# 5.0.0 (2026-11-04, operator decision) — the M9 checkpoint, trained at the
+#   robot's clamps on procedural rooms with goals at random bearings.
+#     * Action bounds [-1, 2] x [-3.14, 3.14] -> [-0.25, 0.25] m/s x
+#       [-0.8, 0.8] rad/s. The training env clips the action to these and
+#       feeds the CLIPPED action back as the observation, so policy_node
+#       clips to them too (policy_runner) and normalizes previous_action by
+#       them (observation_builder). The vendored constants are NOT edited.
+#     * Observation layout, lidar block, goal block, control rate: unchanged
+#       from 4.0.0 (720 + 2 + 2 = 724 dims).
+#     * The trained range equals rm_safety's clamps, so this policy runs
+#       unsaturated: its behaviour on the floor IS evidence about the policy.
+# 4.0.0 (2026-10-08, operator decision) — the full-sensor policy family.
+#   The M7/M8 runs trained on BARN's native sensor layout and M8-v2 is the
+#   project's best checkpoint, so the contract follows it.
+#     * Lidar block 32 -> 720 beams over 270 deg (0.375 deg per bin). The
+#       observation is 724 dims: 720 lidar + 2 goal + 2 previous action.
+#     * Sampling stays nearest_valid_ray, with a +/-2-bin search window
+#       (nearest_ray_search_window_bins) because a 0.375 deg bin holds only
+#       ~2 TG30 rays and the sensor drops ~30% of them.
+#     * self_occlusion_zones_deg is populated: the 270 deg arc now includes
+#       the chassis standoffs the 180 deg arc excluded.
+#     * Goal, previous_action, action bounds, control rate: unchanged.
+#     * Checkpoint provenance recorded in the `checkpoint` block below.
+# 3.0.0 (2026-08-27, operator decision) — adopt the TRAINED policy's contract.
+#   A trained checkpoint now exists (LumenLabs/NCP-on-Rosmaster, a CfC/AutoNCP
+#   Neural Circuit Policy). Its input layer is physically wired to a specific
+#   vector, so the checkpoint dictates this contract and not the reverse. The
+#   2.0.0 layout was never implemented, so nothing is being thrown away.
+#     * Observation 41 -> 36 dims: 32 lidar + 2 goal + 2 previous action.
+#     * Lidar block 36 bins -> 32 beams (180 deg / 32 = 5.625 deg per bin).
+#       NOTE the collision of numbers: "36" was the 2.0.0 LIDAR BIN COUNT and
+#       is now the TOTAL observation width. They are unrelated. 32 is the
+#       lidar block in 3.0.0.
+#     * base_velocity block (3 dims) REMOVED — the trained network has no
+#       velocity input. This reverses the 2.0.0 decision to retain vy as a
+#       disturbance signal; see removed_base_velocity_note below. Reversing it
+#       is not a judgement that the reasoning was wrong, it is that the
+#       checkpoint has no such input and cannot grow one without retraining.
+#     * goal_local block (2 dims) ADDED — the policy is a point-to-point
+#       navigator; this is its objective, not an optional extra.
+#     * Action is now PRE-SCALED PHYSICAL UNITS, not tanh [-1,1]. See the
+#       action block: double-scaling is the obvious way to get this wrong.
+# 2.0.0 (2026-08-12, operator decision) — two breaking layout changes:
+#   * Action reduced 3 -> 2 dims: [vx, wz]. Lateral strafe (vy) removed from
+#     the policy's action space to shrink the exploration problem. The BASE is
+#     still mecanum and still physically capable of strafing; we are choosing
+#     not to command it. The policy node emits linear.y = 0.0 structurally.
+#   * IMU block removed from the observation, 48 -> 41 dims. Rationale in the
+#     observation section; this also retires the imu_link frame blocker.
+# 1.0.0 — initial draft.
+interface_version: "5.1.0"
+
+checkpoint:
+  # The trained network this contract describes. policy_node logs the sha256
+  # of the weights it loaded at startup and publishes the first 12 characters
+  # on /ncp_debug; scripts/deploy_upstream.sh verifies the same hash on both
+  # ends. All three must agree.
+  file: NCP-on-Rosmaster/weights/actor_dynabarn.pt
+  sha256: defd46dbdc04b384abd2abafb353c92f6d80a042d78a5882d21202c6a34223f8
+  run: dynabarn_x3_v3                # lumen gauntlet feat/dynabarn, barn_lab thermostat recipe
+  snapshot: s1248000                 # provisional: a reward ablation is training; its winner replaces this
+  trained_on: "DynaBARN at X3 scale (12.6 m room, movers 0.06-0.24 m/s, random start and goal) with X3 dynamics, 720 beams over 270 deg with this contract's occlusion mask, lidar dropout, v in [-0.25, 0.25] m/s, w in [-0.8, 0.8] rad/s, 5 Hz"
+  heldout_success: 0.354             # 85/240 held-out DynaBARN-X3 episodes, no veto; the exported actor scores the same 85/240
+  zero_shot_comparison: "m9 0.233, m4 0.108, m8v2 0.054 on the same 240 episodes as this robot runs them"
+  official_barn_metric: null         # not run; a DynaBARN policy
+  exported: 2026-11-05 by weights/export_from_sb3.py --bounds -0.25,0.25,-0.8,0.8 (obs_dim=724 units=256 motor=128, max action diff vs SB3 1.4e-7)
+  previous: m9 bf4e1ba21b73 (720 beams / 270 deg, 724-dim, interface 5.0.0)
+
+network:
+  # CONFIRMED 2026-08-08 from the Jetson host's own login banner:
+  #   ROS_DOMAIN_ID: 28 | my_robot_type: x3 | my_lidar: a1 | my_camera: astraplus
+  #
+  # Not a free choice — the Yahboom drivers run natively on the host and are
+  # the source of /scan, /imu/*, /vel_raw and the sink for /cmd_vel, so we
+  # join their domain. Matches what the previous team set their container to.
+  # Set identically on the workstation and in our container.
+  ros_domain_id: 28
+
+  # The previous team needed this on BOTH host and container. Their stated
+  # rationale ("bypasses multicast discovery") is not what it does — a custom
+  # UDPv4 transport still does multicast. What `useBuiltinTransports: false`
+  # actually removes is the SHARED-MEMORY transport, which cannot work across
+  # the container boundary. That matches their reported symptom exactly:
+  # `ros2 topic list` works (discovery is fine) but `ros2 topic echo` hangs
+  # (data transport is not). Same fix, correct reason.
+  #
+  # Consequence for us: multicast discovery is intact, so plain DDS from the
+  # workstation should work without a discovery server.
+  fastdds_profile: /root/fastdds_unicast.xml
+  fastdds_disables: shared_memory_transport
+  fastdds_profile_note: >-
+    MEASURED 2026-08-08: that path is owned by root and is NOT readable by
+    user `jetson`, who runs the host-side nodes. The previous team's host-side
+    fix has therefore never actually been in effect for host nodes — FastDDS
+    silently falls back to defaults when the profile file cannot be read.
+    Only the in-container copy (also /root, but the container runs as root)
+    was ever live.
+
+  # Multicast discovery does NOT work on the lab WiFi. See
+  # config/fastdds_unicast_peers.xml for the measurement and the fix.
+  discovery: unicast_initial_peers
+  discovery_profile: config/fastdds_unicast_peers.xml
+  multicast_status: >-
+    225.0.0.1 (the group `ros2 multicast send/receive` uses) crosses fine;
+    239.255.0.1 (the group FastDDS uses for SPDP discovery) is dropped by the
+    access point. Verified with raw sockets in both directions. A passing
+    `ros2 multicast receive` is therefore NOT evidence that DDS will work.
+
+control:
+  # TODO(phase1): must be at or below the slowest sensor feeding the
+  # observation, with headroom. Justify the final choice in
+  # docs/interface_contract.md against the Phase 1 numbers.
+  #
+  # Strong prior from the previous team's stack on this exact hardware:
+  # cpt_b2_engine ran its decision cycle at PIPELINE_HZ = 5, with a 200 ms
+  # latency target and 400 ms flagged as "very slow". The lidar is an RPLidar
+  # A1, which spins at 5.5-10 Hz. So the answer is very likely 5-10 Hz, and
+  # anything above 10 Hz would be feeding the policy repeated scans.
+  # MEASURED 2026-08-08 from the workstation (see docs/deployment.md §6).
+  # The whole Yahboom stack runs at ~10 Hz: /odom 10.74, /imu/data_raw 10.74,
+  # /vel_raw 9.22, /voltage 9.05. Nothing sensor-side is faster than ~10 Hz.
+  #
+  # DECIDED 2026-08-12 (session 3): 5 Hz. /scan measured at 10.17 Hz (YDLIDAR
+  # TG30, see docs/deployment.md §6 / CLAUDE.md §3). Every sensor feeding the
+  # observation is ~10 Hz, so 10 Hz control leaves NO headroom — the situation
+  # BUILD-PLAN §Phase 3 task 1 warns against — and would risk feeding the policy
+  # repeated scans. 5 Hz matches the previous team's cpt_b2_engine rate on this
+  # exact hardware and gives a clean 2:1 margin over the sensor cadence.
+  rate_hz: 5
+  prior_hz: 5   # not a decision — the previous stack's rate, for reference
+  measured_source_rates_hz:
+    odom: 10.74
+    odom_raw: 10.74
+    vel_raw: 9.22
+    imu_data: 9.41
+    imu_data_raw: 10.74
+    imu_mag: 10.01
+    joint_states: 20.01
+    tf: 29.99
+    voltage: 9.05
+    scan: 10.17  # YDLIDAR TG30, measured 2026-08-12 s3 (std dev ~1.5 ms)
+  frame_id: base_link
+
+observation:
+  # Order is load-bearing. The vector is built in exactly this order by the
+  # shared schema loader; nothing hand-writes this ordering a second time.
+  #
+  # 4.0.0: this layout is DICTATED BY THE TRAINED CHECKPOINT. The CfC input
+  # layer has exactly 724 inputs in exactly this order. Changing any of it
+  # without retraining produces a policy that is silently reading the wrong
+  # numbers — it will still run, and the output will still look like a
+  # plausible (v, w). There is no runtime error for getting this wrong.
+  # Source of truth for the formulas: src/rm_policy/rm_policy/vendor/ncp_policy.py
+  # (build_obs), vendored from NCP-on-Rosmaster @ bc1099d.
+  layout:
+    - name: lidar_ranges
+      source_topic: /scan
+      source_topic_type: sensor_msgs/LaserScan
+      measured_rate_hz: 10.07        # bernard-1, 2026-08-27, std dev 1.1 ms
+      shape: [720]                   # 4.0.0: was 32 in 3.0.0, 36 in 2.0.0
+      units: dimensionless           # normalized; raw source is meters
+      arc_deg: 270                   # 4.0.0: BARN's native 270 deg; was 180
+      bin_deg: 0.375                 # 270 / 720
+      sampling: nearest_valid_ray    # see sampling_rationale below
+      nearest_ray_search_window_bins: 2   # 4.0.0 — see window_rationale
+      sampling_rationale: >-
+        TRAINING FIDELITY (governing principle, operator 2026-08-27). The
+        policy trained on `--beams 720 --fov 270`: exactly ONE ray per beam
+        direction, no dropout. The TG30 delivers ~1514 rays across the same
+        arc, about 2.1 per output bin. We take the single REAL RETURN nearest
+        the bin's centre angle, reconstructing what a clean 720-beam lidar
+        would have reported — NOT a min-pool over the bin. Min-pooling
+        reports obstacles closer and wider than the training sensor did
+        (measured at 32 bins: a mean shift of 0.03-0.19 on a [-1, 1] range,
+        individual bins differing by up to 1.05), a systematic distribution
+        shift away from training. Implemented by rm_policy.scan_resampler.
+      window_rationale: >-
+        With ~2 rays per bin and the TG30's 28-39% dropout, strict per-bin
+        sampling leaves bins with NO real return at all: measured on the
+        recorded fixtures, 5.4-8.3% of the 720 bins would read range_max
+        ("clear") while a real return sits a fraction of a degree away.
+        Simulation never produced that. A bin with no real return may
+        therefore borrow the real return nearest its centre within
+        +/-2 bins (+/-0.75 deg, reach 0.9375 deg), which leaves 1.2-1.4% of
+        bins empty on the same fixtures. Rays inside the bin always win; the
+        window is a fallback, never a smoothing.
+      dropout_handling_note: >-
+        "REAL RETURN" is load-bearing. Accepting whatever ray sits nearest the
+        centre would inherit the TG30's dropout rate: a dropout centre ray
+        would be reported as range_max ("clear") while a neighbouring ray sees
+        a real obstacle. Simulation had NO dropout, so that failure mode did
+        not exist in training. Skipping dropouts in favour of the nearest
+        real return is therefore the MORE faithful choice, not a safety
+        compromise. A bin with no real return anywhere within reach falls
+        back to range_max — genuinely nothing detected.
+      safety_separation_note: >-
+        This fidelity is only affordable because this block feeds the POLICY
+        ONLY. rm_safety computes its e-stop independently from the
+        FULL-RESOLUTION scan (safety_logic.min_range_in_arcs), so a thin
+        obstacle falling between sampled rays is invisible to the policy — as
+        it was in simulation — but still stops the robot. NEVER wire this
+        block's output into a safety path. min_pool remains available in
+        rm_policy.scan_resampler for any consumer that wants conservatism
+        instead of fidelity.
+      ordering: right_to_left        # ascending angle; bin 0 = starboard
+      preprocessing: >-
+        Forward 270 deg arc only, reduced to 720 equal bins of 0.375 deg by
+        nearest_valid_ray with a +/-2-bin search window, after the
+        self-occlusion zones below are blanked. Ordered right -> left, i.e.
+        ascending angle, bin 0 covering the most negative angles. Implemented
+        by rm_policy.scan_resampler, which returns METERS; normalization
+        happens downstream in ncp_policy.build_obs.
+      normalization: >-
+        clip to [0, laser_clip_m] then (x - laser_clip_m/2) / laser_clip_m * 2,
+        giving [-1, 1]. -1 means "touching", +1 means "clear to the clip
+        distance". This is BarnEnv's formula and must not be altered.
+      laser_clip_m: 5.0
+      laser_clip_note: >-
+        5.0 m is the TRAINING clip, and it is what defines the normalization.
+        It is deliberately NOT the sensor's honest ceiling (range_max_m below,
+        30 m): anything beyond 5 m was indistinguishable to the policy during
+        training and must stay indistinguishable now. The resampler may be
+        given a larger range_max (30 m) so that a no-return maps to something
+        unambiguously far; build_obs then clips it to 5.0 and it normalizes to
+        +1.0 ("clear"). Both numbers are correct and they are not the same
+        number — do not reconcile them.
+      # CRITICAL (measured 2026-08-12 s3, re-measured on bernard-1 2026-08-27):
+      # the YDLIDAR TG30 encodes a no-return as 0.0, NOT inf/NaN. A 0.0 left
+      # untreated reads as an obstacle at zero distance, min-pools to 0, and
+      # would LATCH the e-stop in every bin containing a no-return (28-39% of
+      # rays in static tests). It ALSO normalizes to -1.0 here, i.e. "the robot
+      # is touching a wall", across a third of the policy's field of view.
+      # OWNERSHIP (changed 2026-08-27): this masking is done ONLY by
+      # rm_policy.scan_resampler, which maps 0.0 / sub-range_min / negative /
+      # inf / NaN to range_max BEFORE the 720-vector is built. It is deliberately
+      # NOT done in vendor/ncp_policy.py: that file is a BYTE-EXACT copy of
+      # upstream (operator requirement — see vendor/VENDOR.md) and carries zero
+      # local edits, so the protection has to live in code we own. Consequence:
+      # the vendored module is only safe when fed by scan_resampler. Calling
+      # ncp_policy.prepare_scan() directly on a raw TG30 scan reproduces the
+      # original bug — that is upstream's behaviour, faithfully preserved.
+      #
+      # RETRACTED 2026-08-27: an earlier revision recommended ALSO launching
+      # the driver with invalid_range_is_inf:=true as "belt-and-braces". THAT
+      # PARAMETER DOES NOTHING on this driver. Measured on bernard-1 with the
+      # flag explicitly true: 1982 points, 781 zeros (39.4%), 0 inf, 0 nan.
+      # There is NO second line of defence in the driver.
+      no_return_encoding: zero       # TG30 always emits 0.0; driver flag inert
+      range_min_m: 0.01
+      # BODY FLOOR (2026-11-04). Nothing in the world can be nearer the lidar
+      # than the chassis is, so a return under this is the robot and takes
+      # the no-return path (range_max, "clear"). Measured that day on
+      # bernard-1 (tests/fixtures/tg30_scan_2026-11-04_standoffs.yaml): the
+      # right standoffs return 0.06-0.11 m continuously from -138 to -94 deg,
+      # closer and wider than the 2026-08-14 measurement the zones below were
+      # cut from (the mount has moved), and the -97..-94 deg band leaked past
+      # the mask into the observation as a 0.10 m obstacle. M9 then held full
+      # left yaw; M8-v2 had "circled left" on 2026-10-09 for the same reason.
+      # The floor is the first line; the zones stay for anything above it.
+      # Same number as safety_limits.yaml estop.body_floor_m, pinned equal.
+      body_floor_m: 0.12
+      range_max_m: 30.0              # sensor ceiling for resampling, see note
+      # 4.0.0: the 270 deg arc reaches the chassis standoffs the 180 deg arc
+      # excluded. These are the sectors config/safety_limits.yaml masks for
+      # the e-stop (measured ~97-118 deg and ~-99 to -130 deg, standoffs
+      # reading 0.106-0.125 m). The training sensor had a 0.1 m min_range
+      # that put the Jackal chassis in a dead zone, so those directions read
+      # "clear" in simulation; blanking them here (rays become no-returns,
+      # never fed to the window fallback) reproduces that. Same numbers as
+      # the safety file on purpose; the two paths stay independent.
+      self_occlusion_zones_deg:
+        - [92.0, 123.0]
+        - [-135.0, -97.0]
+      empty_bin_policy: fault        # never range_max — that would be fail-open
+
+    - name: goal_local
+      # NEW in 3.0.0. The policy is a point-to-point navigator trained in BARN;
+      # this block IS its objective. Point it somewhere and the robot drives
+      # there. It is not an optional extra and it must never be left at a
+      # stale or default value.
+      source_topic: /odom            # pose, NOT twist — see repurposing note
+      source_topic_type: nav_msgs/Odometry
+      subfield: pose.pose
+      measured_rate_hz: 10.74
+      shape: [2]                     # (x, y) of the goal, in the ROBOT frame
+      units: dimensionless           # normalized; raw source is meters
+      goal_source: launch_parameter  # operator decision 2026-08-27
+      goal_default_m: [2.5, 0.0]     # 2.5 m ahead, no lateral offset
+      goal_frame: odom_at_start
+      preprocessing: >-
+        The goal is a STATIC point in the odom frame, fixed once from the first
+        /odom message as (start_pose + goal offset rotated by start yaw). The
+        OBSERVATION is dynamic: every tick, local_goal() re-expresses that
+        fixed point in the robot's CURRENT frame (subtract current position,
+        rotate by -current yaw). So the policy never sees an absolute location,
+        only "where the goal is relative to me, right now". Equivalent to
+        (distance, bearing): dist = hypot(x, y), bearing = atan2(y, x).
+      normalization: "xy / 5.0 - 1.0"
+      normalization_warning: >-
+        This maps cleanly to [-1, 1] ONLY for coordinates in [0, 10] m. A goal
+        45 deg off the bow gives -1.71; a goal directly behind gives -2.00.
+        BARN spawned goals ahead and within ~10 m, so the policy never saw
+        those values in training. Turning away from the goal therefore pushes
+        this block OUT OF DISTRIBUTION. This is a property of the trained
+        checkpoint, not a bug to fix here — fixing it means retraining.
+        Keep goals modest and ahead.
+      drift_warning: >-
+        /odom is dead reckoning: robot_localization EKF over wheel encoders and
+        the IMU, with NO map, NO global localization, and NO loop closure. It
+        drifts, and mecanum rollers slip constantly (the very reason vy was
+        valued as a disturbance signal in 2.0.0). Since the goal is defined in
+        that same drifting frame, "distance to goal" degrades over a run and is
+        fiction at long range. The odom origin also resets when the EKF
+        restarts, so a goal is only meaningful WITHIN one run. 2.5 m is chosen
+        to sit inside the drift budget. This is not a navigation system.
+      failure_mode: >-
+        Fail-closed. If /odom has not arrived, the goal is not yet defined and
+        the policy MUST NOT drive. Do not substitute a default vector — a
+        plausible-looking goal is worse than no goal, because it silently
+        commands motion in an arbitrary direction.
+
+    - name: previous_action
+      source_topic: null             # internal node state, not a subscription
+      shape: [2]                     # the previous (v, w) actually commanded
+      units: dimensionless
+      preprocessing: >-
+        The action emitted on the previous tick, normalized to [-1, 1] by
+        (a - action_bias) / action_scale, where bias = (high + low) / 2 and
+        scale = (high - low) / 2 over the action bounds below. Concretely for
+        5.0.0: v_norm = v / 0.25 and w_norm = w / 0.8 (bias is zero because
+        the bounds are symmetric). observation_builder applies this with the
+        bounds read from this file; the vendored build_obs's own constants
+        are the 4.0.0 ones and are overridden for the last two entries.
+      init_note: >-
+        Zeros on the first tick. Under 5.0.0's symmetric bounds a zero
+        ACTION normalizes to a zero vector (v=0 -> 0.0, w=0 -> 0.0), unlike
+        4.0.0 where v=0 -> -0.333. Both follow from the formula; neither is
+        a special case.
+      clamped_action_note: >-
+        OPEN QUESTION, decide before the first driven run: rm_safety may clamp
+        or zero the commanded velocity, so what the robot DID is not what the
+        policy asked for. Feeding back the requested action makes the policy's
+        world-model wrong; feeding back the achieved action is off-distribution
+        (it never saw a safety layer in training). Upstream feeds back the
+        REQUESTED action. Keeping that is the lower-risk default, but it means
+        during any clamped period the policy believes it is moving faster than
+        it is. Revisit once /safety/status is logged alongside actions.
+
+    # ------------------------------------------------------------------
+    # REMOVED in 3.0.0: base_velocity (3 dims, vx/vy/wz from /odom twist).
+    #
+    # 2.0.0 deliberately KEPT all three components, reasoning that with the IMU
+    # block gone, observed lateral velocity was the ONLY channel by which a
+    # disturbance — mecanum roller drift, a push, a caught wheel, a slope —
+    # could reach the policy. That reasoning was sound and is not repudiated.
+    #
+    # It is removed because the trained CfC has no velocity input. There is no
+    # way to supply it without retraining, so this is a consequence of adopting
+    # a checkpoint, not a design decision. What is genuinely given up: the
+    # policy is now blind to disturbance. It cannot tell "commanded 0.15 m/s
+    # and moving" from "commanded 0.15 m/s and wheels spinning against a wall".
+    # The only proprioceptive signal left is previous_action, which is what the
+    # policy ASKED for, not what happened.
+    #
+    # Mitigation lives outside the observation: rm_safety still subscribes to
+    # /odom and still enforces staleness and acceleration limits. The policy
+    # being blind to a stall does not make the ROBOT blind to it.
+    #
+    # Re-adding this is an interface_version bump AND requires retraining.
+    # ------------------------------------------------------------------
+
+  total_dim: 724             # 720 lidar + 2 goal_local + 2 previous_action
+  dtype: float32
+  layout_note: >-
+    4.0.0: 724 = 720 + 2 + 2. Any code or document saying "36 dims" or "32
+    beams" is 3.0.0 (the M4 checkpoint) and any saying "36 bins" is 2.0.0.
+
+  normalization:
+    note: >-
+      Unlike 2.0.0, EVERY block here is normalized — there is no raw-units
+      block left, because the base_velocity block that carried raw units was
+      removed. All three blocks are normalized by formulas frozen by the
+      trained checkpoint (see each block above). No normalizer statistics are
+      fabricated: every formula is a fixed affine map with constants that came
+      from the training environment, not from measured data.
+
+action:
+  # 3.0.0: PRE-SCALED PHYSICAL UNITS. This is the single most dangerous change
+  # from 2.0.0 and the easiest to get wrong.
+  #
+  # 2.0.0 specified a tanh [-1, 1] network output which the node then
+  # multiplied by vx_max / wz_max. The trained NcpActor does NOT do that: its
+  # linear head emits (v, w) directly in m/s and rad/s and clips to the bounds
+  # below. If anyone routes this through the old scaling block, the command is
+  # DOUBLE-SCALED and the robot moves at a fraction of the intended speed —
+  # or, if the scaling is ever raised above 1.0, faster than intended.
+  # There is no runtime error for this. It is a silent numerical bug.
+  pre_scaled: true
+  bounds_note: >-
+    These are the SB3 action_space bounds of the M9 run (barn_gym/env.py,
+    optomotive feat/m9-gazebo), read from the checkpoint on the training box
+    on 2026-11-04: low [-0.25, -0.8], high [0.25, 0.8]. They are the robot's
+    clamps (config/safety_limits.yaml max_vx 0.25, max_wz 0.8), chosen so the
+    policy trains inside the authority it will have. The numbers below must
+    match the checkpoint, not the clamps: if the clamps ever move, this file
+    does not. The 4.0.0 pi_is_not_pi_note applies in spirit — the exact
+    numbers the network trained against are the contract, however round they
+    look.
+  activation: none           # linear head + clip, NOT tanh
+  layout:
+    - name: cmd_vx
+      range: [-0.25, 0.25]   # m/s, the M9 action_space; rm_policy clips to it
+      units: m/s
+    - name: cmd_wz
+      range: [-0.8, 0.8]     # rad/s, the M9 action_space
+      units: rad/s
+  total_dim: 2
+  dtype: float32
+
+  vy_removed_note: >-
+    The policy node must set linear.y = 0.0 EXPLICITLY on every published
+    Twist, rather than leaving the field at its default. A structurally-zero
+    field is a claim the node makes, and it should be visible in the code and
+    in the bag. rm_safety keeps its own max_vy clamp regardless — see
+    safety_limits.yaml. Do not delete lateral handling from the safety layer:
+    /teleop/cmd_vel is also an input to it and an operator may legitimately
+    strafe while repositioning, so the safety layer still has to clamp an axis
+    the policy never uses. A non-zero linear.y on /policy/cmd_vel is a BUG,
+    not a command — zero it and warn, never clamp it silently.
+
+  scaling:
+    # DELIBERATELY EMPTY in 3.0.0. See pre_scaled above. The 2.0.0 values
+    # (vx_max 0.3, wz_max 0.5) are gone, not merely unused — leaving them here
+    # invites someone to apply them.
+    applies: false
+
+  authority_note: >-
+    5.0.0 closes the authority gap the 4.0.0 contract warns about: the
+    trained range equals rm_safety's clamps (max_vx 0.25, max_wz 0.8), so
+    the policy runs unsaturated and its behaviour on the floor IS evidence
+    about the policy. The safety layer is still the binding constraint
+    (acceleration limiter, lidar zones, kill) and the clamps are not to be
+    raised for this profile either; a clamp LOWERED below the trained range
+    (the signed-off 0.15 / 0.4 for anything unattended) puts M9 back into
+    the saturated regime the 4.0.0 note describes.
+
+coordinate_frames:
+  # MEASURED 2026-08-08 from the live TF tree.
+  # Tree: odom -> base_footprint -> base_link -> {imu_link, camera_link, laser_link}
+  tree: odom -> base_footprint -> base_link -> {imu_link, camera_link, laser_link}
+
+  base_link:
+    definition: Robot body origin. Child of base_footprint.
+    axes: REP-103 — x forward, y left, z up.
+  odom:
+    definition: EKF odometry frame (robot_localization). Continuous, drifts.
+    note: /odom child_frame_id is base_footprint, NOT base_link.
+  laser_link:
+    definition: Lidar optical center.
+    # NOTE the frame is `laser_link`. The ydlidar_ros2_driver defaults frame_id
+    # to `laser`, which is NOT in the TF tree — launch it with
+    # frame_id:=laser_link or every scan is untransformable and RVIZ shows
+    # nothing. (Confirmed present in our captured scan: frame_id == laser_link.)
+    transform_from_base_link:
+      translation_m: [0.043, 0.000, 0.110]
+      rotation_rpy_deg: [0.0, 0.0, 0.0]
+    note: >-
+      No rotation, so lidar 0 deg == robot forward and our forward-270 arc maps
+      directly onto scan angles with no offset. 4.3 cm forward, 11 cm up.
+  imu_link:
+    definition: IMU sensing origin.
+    transform_from_base_link:
+      translation_m: [-0.060, 0.010, 0.010]
+      rotation_rpy_deg: [-180.0, 0.0, -90.0]
+    # ============================================================
+    # THE IMU IS ROTATED RELATIVE TO base_link. Roll 180 deg, yaw -90 deg.
+    # /imu/data_raw angular_velocity and linear_acceleration are expressed in
+    # imu_link, so their axes do NOT correspond to base_link's x-forward,
+    # y-left, z-up. Unrotated, base_link x-forward acceleration appears on a
+    # different IMU component and the sign of at least one axis flips —
+    # silently.
+    #
+    # STATUS 2.0.0: no longer blocking. The raw IMU block was removed from the
+    # observation, so nothing we build reads /imu/data_raw directly any more
+    # and no part of the observation is in imu_link.
+    #
+    # This is SIDESTEPPED, NOT SOLVED. Keep this entry. It is still live for:
+    #   * robot_localization's EKF, which consumes the IMU to produce /odom.
+    #     That code does its own TF lookup and handles the rotation correctly,
+    #     which is precisely why /odom is safe to use and raw /imu/data_raw
+    #     was not.
+    #   * anyone re-adding a raw IMU channel later. Re-adding the IMU is an
+    #     interface_version bump AND requires resolving this first: rotate
+    #     into base_link in observation_builder (preferred — a mixed-frame
+    #     observation vector is a trap for whoever trains next), or declare
+    #     the block to be in imu_link and keep training and deployment
+    #     consistent about it.
+    # ============================================================
+    observation_frame_unresolved: false   # moot: no raw IMU in the observation
+    rotation_still_live_for: [robot_localization_ekf, any_future_imu_channel]
