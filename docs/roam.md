@@ -26,7 +26,7 @@ Roam only moves the goal; the policy drives behind rm_safety's clamps, watchdogs
 | key | value | what it does |
 |---|---|---|
 | `range_min_m`, `range_max_m` | 0.6, 2.5 | Leg length. |
-| `bearing_cap_deg` | 45 | Draw within this of ahead. |
+| `bearing_cap_deg` | 45 (`dynabarn`:180) | Draw within this of ahead. |
 | `corridor_half_width_m`, `clearance_m` | 0.20, 0.4 | The strip to the goal plus clearance holds no return. |
 | `min_valid_fraction`, `self_radius_m`, `body_floor_m` | 0.5, 0.25, 0.12 | No-returns are unknown; the body is never an obstacle. |
 | `draw_attempts` | 32 | Random candidates, then the shortest leg all round. |
@@ -36,7 +36,7 @@ Roam only moves the goal; the policy drives behind rm_safety's clamps, watchdogs
 | `pinned_after_s`, `stopped_move_m`, `stopped_yaw_deg` | 5, 0.05, 6 | Stopped this long, by any cause: pinned. Killed time never counts. |
 | `turn_wz`, `turn_tolerance_deg`, `turn_timeout_s`, `turn_clear_m` | 0.5, 15, 12, 0.30 | Turning in place. |
 
-Read at startup. A profile's block under `profiles:` in `config/roam.yaml` overrides these for that profile's node only: `dynabarn` draws over the full 180 degrees and never turns to face the goal first (`bearing_cap_deg` 180, `turn_tolerance_deg` 179), since it trained with goals in every direction. The unseen sector behind the robot still holds no goal.
+Read at startup.
 
 ## What will look like a bug
 
