@@ -1980,6 +1980,30 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     fixture, the leak, the fix, the refusals and the cross-file equalities.
     LESSON: a mask measured once is a number that rots when hardware moves;
     a floor derived from the chassis geometry does not.
+  * **2026-11-04, later: "the robot is stopped why" (m4, roam on).** It had
+    reached a goal boxed in (returns 0.25-0.32 m on the right and ahead,
+    nothing free for a 1.0 m strip) and HELD for seven minutes: the draw
+    retried every second, and the pinned retreat could not fire because
+    `no_progress_s` reads 0 at a reached goal, while the latched retreat
+    needs a latch the stationary robot never produced. Every turn in that
+    run had also ended "not_clear" or been refused: roam's own body rule
+    (`is_return`, rear sectors only) still saw the standoffs at 0.09 m
+    (nearest_return 0.091 on the fixture), the fourth consumer the body
+    floor had missed. Daniel: "make it so pinned is any situation where it
+    is stopped for a bit." Now `pinned` = the status drivable (OK or SLOW,
+    fresh, not killed) and the robot STOPPED for `pinned_after_s` (5 s) by
+    `StoppedClock` (retreat.py): the pose has stayed inside
+    `stopped_move_m` (0.05) and `stopped_yaw_deg` (6) since it re-anchored,
+    and it re-anchors on every move, turn or non-drivable tick (killed time
+    never counts; the clock starts at ARM). The cause no longer matters;
+    the old SLOW + min_range < 0.30 rule and `retreat_pinned_range_m` are
+    gone; a pinned retreat ends by distance alone (a latched one still by
+    release). `roam.yaml` gained `body_floor_m: 0.12` for `is_return`, so
+    turns are no longer refused by the chassis. The loader refuses
+    pinned_after_s <= dwell_s (the dwell is a stop that is not pinned).
+    Hazard accepted: a walled-in robot now backs 0.3 m blind, turns and
+    redraws every 20 s (the cooldown) instead of standing still; KILL in
+    hand, as before.
   * **Second live run (zones on): the robot reached its first goal and HELD
     there** ("no candidate goal in free space"). The captured scan
     (`tests/fixtures/tg30_roam_hold_scan.yaml`, 2020 rays, 29 % no-returns)

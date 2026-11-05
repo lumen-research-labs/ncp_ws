@@ -37,8 +37,7 @@ from rm_policy.retreat import (  # noqa: E402
     RetreatController,
     RetreatLimits,
     SafetyView,
-    is_latched,
-)
+    is_latched, StoppedClock)
 from rm_policy.roam import RoamSequencer, load_roam_limits  # noqa: E402
 
 _MY = "/policy/m4/cmd_vel"
@@ -57,7 +56,7 @@ def _read(path):
 
 def _limits(**overrides) -> RetreatLimits:
     base = dict(retreat_vx=0.12, retreat_m=0.3, retreat_max_m=0.8, retreat_timeout_s=8.0,
-                retreat_cooldown_s=20.0, retreat_pinned_range_m=0.30, retreat_pinned_after_s=10.0)
+                retreat_cooldown_s=20.0, pinned_after_s=5.0, stopped_move_m=0.05, stopped_yaw_rad=0.1)
     base.update(overrides)
     return RetreatLimits(**base)
 
@@ -101,26 +100,64 @@ def test_starts_only_on_a_fresh_latch_while_roaming_and_selected():
     assert _ctl().step(0.0, _RETREATING, (0, 0), True, _MY, 0.1) is None        # not a fresh latch
 
 
-def test_pinned_in_the_slow_band_starts_only_after_the_stall_window():
-    ctl = _ctl()
-    assert ctl.step(0.0, _PINNED, (0, 0), True, _MY, 0.1, stalled_s=9.9) is None
-    step = ctl.step(0.0, _PINNED, (0, 0), True, _MY, 0.1, stalled_s=10.0)
-    assert step is not None and step.reason == STARTED and ctl.start_cause == "pinned"
-    # Slow with the obstacle farther than the pinned range is driving, not stuck.
-    far = _view(STATE_SLOW, "slow_zone", min_range=0.45)
-    assert _ctl().step(0.0, far, (0, 0), True, _MY, 0.1, stalled_s=30.0) is None
-    # A latch starts at once, whatever the stall clock says.
-    assert _ctl().step(0.0, _LATCHED, (0, 0), True, _MY, 0.1, stalled_s=0.0) is not None
+def test_stopped_for_the_pinned_window_starts_a_retreat_whatever_the_cause():
+    """Pinned is any situation where the robot is stopped for a bit (Daniel,
+    2026-11-04): the slow band, plain OK with nothing near, a hold with no
+    free goal. The status only has to be drivable."""
+    for view in (_PINNED, _DRIVING):
+        ctl = _ctl()
+        assert ctl.step(0.0, view, (0, 0), True, _MY, 0.1, stopped_s=4.9) is None
+        step = ctl.step(0.0, view, (0, 0), True, _MY, 0.1, stopped_s=5.0)
+        assert step is not None and step.reason == STARTED and ctl.start_cause == "pinned"
+    # Stopped while killed, or under a stop that is not the latch, is not
+    # pinned: nothing can drive there, and the stopped clock does not count it.
+    assert _ctl().step(0.0, _view(STATE_KILLED, "killed"), (0, 0), True, _MY, 0.1, stopped_s=30.0) is None
+    assert _ctl().step(0.0, _view(STATE_STOPPED, "scan_stale"), (0, 0), True, _MY, 0.1, stopped_s=30.0) is None
+    # A latch starts at once, whatever the clock says.
+    assert _ctl().step(0.0, _LATCHED, (0, 0), True, _MY, 0.1, stopped_s=0.0) is not None
     assert _ctl().start_cause is None
 
 
-def test_a_pinned_retreat_ends_when_the_obstacle_is_back_past_the_pinned_range():
+def test_a_pinned_retreat_ends_by_distance_not_by_the_status():
+    """Moving again is what a retreat does; only the distance ends it."""
     ctl = _ctl()
-    ctl.step(0.0, _PINNED, (0, 0), True, _MY, 0.1, stalled_s=12.0)
-    still = _view(STATE_SLOW, "slow_zone", min_range=0.26)
-    assert ctl.step(0.5, still, (-0.05, 0.0), True, _MY, -0.12).done is False
-    done = ctl.step(1.0, _view(STATE_SLOW, "slow_zone", min_range=0.34), (-0.1, 0.0), True, _MY, -0.12)
-    assert done.done and done.reason == RELEASED
+    ctl.step(0.0, _PINNED, (0, 0), True, _MY, 0.1, stopped_s=6.0)
+    assert ctl.step(0.5, _DRIVING, (-0.05, 0.0), True, _MY, -0.12).done is False
+    assert ctl.step(1.0, _view(STATE_SLOW, "slow_zone", min_range=0.34), (-0.29, 0.0), True, _MY, -0.12).done is False
+    done = ctl.step(1.2, _DRIVING, (-0.30, 0.0), True, _MY, -0.12)
+    assert done.done and done.reason == DISTANCE
+
+
+def test_the_stopped_clock_counts_only_while_drivable_and_still():
+    clk = StoppedClock(move_m=0.05, yaw_rad=0.1)
+    assert clk.update(0.0, 0, 0, 0, drivable=False) == 0.0
+    assert clk.update(10.0, 0, 0, 0, drivable=False) == 0.0           # killed time never counts
+    assert clk.update(11.0, 0, 0, 0, drivable=True) == 0.0            # the clock starts at ARM
+    assert clk.update(14.0, 0.02, 0.01, 0.05, drivable=True) == pytest.approx(3.0)   # jitter inside the band
+    assert clk.update(15.0, 0.08, 0.0, 0.0, drivable=True) == 0.0     # moved: re-anchored
+    assert clk.update(18.0, 0.08, 0.0, 0.0, drivable=True) == pytest.approx(3.0)
+    assert clk.update(19.0, 0.08, 0.0, 0.3, drivable=True) == 0.0     # turned: re-anchored
+    assert clk.update(20.0, 0.08, 0.0, 0.3, drivable=False) == 0.0
+    assert clk.update(21.0, 0.08, 0.0, 0.3, drivable=True) == 0.0
+    # A crawl of a centimetre a second stays inside 0.05 m for five seconds: stopped.
+    clk = StoppedClock(0.05, 0.1)
+    clk.update(0.0, 0, 0, 0, True)
+    assert clk.update(4.9, 0.049, 0.0, 0.0, True) == pytest.approx(4.9)
+    # Yaw wraps: 3.1 to -3.1 is a 0.08 rad turn, inside the band.
+    clk = StoppedClock(0.05, 0.1)
+    clk.update(0.0, 0, 0, 3.1, True)
+    assert clk.update(2.0, 0, 0, -3.1, True) == pytest.approx(2.0)
+
+
+def test_drivable_is_a_fresh_ok_or_slow_status():
+    ctl = _ctl()
+    assert ctl.drivable(_DRIVING) and ctl.drivable(_PINNED) and ctl.drivable(_RETREATING)
+    assert not ctl.drivable(_LATCHED)
+    assert not ctl.drivable(_view(STATE_KILLED, "killed"))
+    assert not ctl.drivable(_view(STATE_STOPPED, "scan_stale"))
+    assert not ctl.drivable(SafetyView(None, "", 0.0, _MY))
+    stale = SafetyView(_DRIVING.state, _DRIVING.reason, 5.0, _MY, _DRIVING.min_range)
+    assert not ctl.drivable(stale)
 
 
 def test_a_latch_after_the_nodes_own_reverse_is_refused_with_a_reason():
@@ -135,14 +172,14 @@ def test_a_cooldown_bounds_pinned_retreats_but_a_fresh_latch_always_retreats():
     _start(ctl, 0.0)
     assert ctl.step(1.0, _DRIVING, (0.0, 0.0), True, _MY, -0.12).reason == RELEASED
     # Pinned again inside the cooldown: refused with the seconds left.
-    assert ctl.step(5.0, _PINNED, (0, 0), True, _MY, 0.1, stalled_s=30.0) is None
+    assert ctl.step(5.0, _PINNED, (0, 0), True, _MY, 0.1, stopped_s=30.0) is None
     assert "cooldown" in ctl.hold_reason
     # A fresh latch inside the cooldown: a latched robot can do nothing else.
     assert ctl.step(6.0, _LATCHED, (0, 0), True, _MY, 0.1).reason == STARTED
     assert ctl.status()["retreats"] == 2
     assert ctl.step(7.0, _DRIVING, (0.0, 0.0), True, _MY, -0.12).reason == RELEASED
     # Pinned after the cooldown: allowed.
-    assert ctl.step(28.0, _PINNED, (0, 0), True, _MY, 0.1, stalled_s=30.0).reason == STARTED
+    assert ctl.step(28.0, _PINNED, (0, 0), True, _MY, 0.1, stopped_s=30.0).reason == STARTED
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +216,7 @@ def test_under_a_held_latch_the_reverse_goes_on_to_the_bound():
 
 def test_distance_ends_a_pinned_retreat_at_retreat_m():
     ctl = _ctl()
-    ctl.step(0.0, _PINNED, (0, 0), True, _MY, 0.1, stalled_s=12.0)
+    ctl.step(0.0, _PINNED, (0, 0), True, _MY, 0.1, stopped_s=12.0)
     still = _view(STATE_SLOW, "slow_zone", min_range=0.26)
     assert ctl.step(1.0, still, (-0.29, 0.0), True, _MY, -0.12).done is False
     done = ctl.step(1.2, still, (-0.30, 0.0), True, _MY, -0.12)
@@ -304,7 +341,7 @@ def test_the_retreat_step_sits_after_the_pose_block_and_before_the_goal_block():
     assert "self._roam.retreated(now, scan)" in src
     assert "self._retreat.goal_fixed()" in src[src.index("def _fix_goal("):src.index("def _safety_cb(")]
     assert '{**self._roam.status(time.monotonic()), **self._retreat.status(),' in src
-    assert '**self._turn.status()}' in src
+    assert '**self._turn.status(), "stopped_s": round(self._stopped_s, 1)}' in src
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +412,8 @@ def test_the_node_turns_after_roam_hand_offs_only_with_clear_floor():
     assert src.index("self._turn_target_yaw = self._robot_yaw + bearing") < src.index("self._roam.retreated(now, scan)")
     block = src[src.index("if self._turn.active and self._goal_world_x is not None:"):]
     block = block[:block.index("# Goal must be defined")]
-    assert "nearest_return(scan, self._roam.limits.self_radius_m)" in block
+    assert "nearest_return(scan, self._roam.limits.self_radius_m," in block
+    assert "self._roam.limits.body_floor_m) >=" in block
     assert "self._publish_turn(turn.wz)" in block and "self._roam.goal_fixed(now)" in block
     assert src.index("self._retreat.step(") < src.index("if self._turn.active and") < src.index('reason="goal_undefined"')
     turn_pub = src[src.index("def _publish_turn("):src.index("def _publish_reverse(")]

@@ -131,7 +131,7 @@ def test_the_two_paths_and_roam_agree_on_the_body() -> None:
     """Independent files, the same measurement: the floor in every contract
     equals the safety file's; the sanitizer's radius equals roam's."""
     est = _cfg("safety_limits.yaml")["estop"]
-    assert est["body_floor_m"] == BODY_FLOOR_M
+    assert est["body_floor_m"] == BODY_FLOOR_M == _cfg("roam.yaml")["roam"]["body_floor_m"]
     assert est["body_radius_m"] == BODY_RADIUS_M == _cfg("roam.yaml")["roam"]["self_radius_m"]
 
 
@@ -155,3 +155,18 @@ def test_the_sanitizer_hides_the_corners_from_third_parties() -> None:
 def test_the_slam_launch_passes_the_radius_from_the_limits_file() -> None:
     src = open(_SLAM_LAUNCH, encoding="utf-8").read()
     assert "body_radius_m" in src and "safety_limits" in src
+
+
+def test_roam_turns_are_not_refused_by_the_chassis() -> None:
+    """Roam reads the raw scan with its own body rule. On the fixture every
+    turn was refused ("a return sits inside the corner sweep either way")
+    because the standoffs at 0.09 m sat inside the front-right corner's
+    reach; with the floor the nearest return is the real object."""
+    from rm_policy import roam
+    ranges, amin, ainc = _fixture()
+    scan = roam.Scan(ranges=ranges, angle_min=amin, angle_increment=ainc, range_min=0.01)
+    lim = roam.load_roam_limits(os.path.join(_CONFIG, "roam.yaml"))
+    assert roam.nearest_return(scan, lim.self_radius_m) < BODY_FLOOR_M          # the bug
+    assert roam.nearest_return(scan, lim.self_radius_m, lim.body_floor_m) > lim.turn_clear_m  # the fix: 0.39 m, a real object
+    assert roam.turn_direction(scan, math.radians(60.0), lim) is not None
+    assert roam.turn_direction(scan, math.radians(-60.0), lim) is not None

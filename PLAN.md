@@ -1,6 +1,6 @@
 # Plan: the robot's own body never reaches a scan consumer
 
-> Status: APPROVED 2026-11-04 (Daniel: "Go"); BUILT and DEPLOYED the same day (3f8448c on `feat/roam-mode`; 783 workstation tests; bernard-1 rebuilt and restarted with the zones on: no observation bin under 0.3 m on m9 or m8v2 with the nearest real return at 0.57 m, the sanitizer logging its 0.25 m radius). OPEN: the floor test of m9 (a goal ahead, then beside) and whether the SLAM map now holds its orientation. The M9 profile plan this file held before is built and deployed; git history keeps it. Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22).
+> Status: the body-floor plan below is BUILT and DEPLOYED (3f8448c, 2026-11-04). Revised the same day on Daniel's decision "pinned is any situation where it is stopped for a bit": `pinned` is now a drivable status plus the robot stopped for `pinned_after_s` (5 s, `StoppedClock` in retreat.py; killed time never counts), whatever the cause; `retreat_pinned_range_m` is gone; `roam.yaml` carries `body_floor_m` so roam's turn checks drop the standoffs too. BUILT (789 workstation tests); deploy and the m9 floor test OPEN. Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22).
 
 ## Context
 

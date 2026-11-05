@@ -70,7 +70,8 @@ def _limits(**overrides) -> RoamLimits:
                 draw_attempts=32, progress_window_s=10.0, progress_min_m=0.05,
                 self_radius_m=0.25, retreat_vx=0.12, retreat_m=0.3, retreat_max_m=0.8,
                 retreat_timeout_s=8.0, retreat_cooldown_s=20.0,
-                retreat_pinned_range_m=0.30, turn_wz=0.5, turn_tolerance_deg=15.0,
+                pinned_after_s=5.0, stopped_move_m=0.05, stopped_yaw_deg=6.0,
+                body_floor_m=0.12, turn_wz=0.5, turn_tolerance_deg=15.0,
                 turn_timeout_s=12.0, turn_clear_m=0.30,
                 recovery_turn_min_deg=0.0, recovery_turn_max_deg=180.0)
     base.update(overrides)
@@ -561,7 +562,10 @@ def test_non_numeric_and_non_integer_seed_are_refused(key, value, fragment):
     (dict(retreat_max_m=0.1), "retreat_max_m"),
     (dict(retreat_timeout_s=0.0), "retreat_timeout_s"),
     (dict(retreat_cooldown_s=-1.0), "retreat_cooldown_s"),
-    (dict(retreat_pinned_range_m=0.0), "retreat_pinned_range_m"),
+    (dict(pinned_after_s=1.0), "pinned_after_s"),
+    (dict(stopped_move_m=0.0), "stopped_move_m"),
+    (dict(stopped_yaw_deg=0.0), "stopped_yaw_deg"),
+    (dict(body_floor_m=0.3), "body_floor_m"),
     (dict(turn_wz=0.0), "turn_wz"),
     (dict(turn_tolerance_deg=180.0), "turn_tolerance_deg"),
     (dict(turn_timeout_s=0.0), "turn_timeout_s"),

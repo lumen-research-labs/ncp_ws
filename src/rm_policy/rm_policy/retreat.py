@@ -26,22 +26,27 @@ What it does:
 
       start    roam on, the node is the selected source (the status names
                its own command topic), the status is fresh and reads
-               either STOPPED / stop_zone (latched) or PINNED: SLOW with a
-               zone reason, the wide-arc min_range under
-               `retreat_pinned_range_m`, and no progress on the goal for
-               `retreat_pinned_after_s` (the slow zone brakes a forward push
-               to zero exactly at the stop boundary, so the latch never
-               trips there and the robot sits). Also: the node's last
+               either STOPPED / stop_zone (latched) or PINNED: a drivable
+               state (OK or SLOW, nothing stale) with the robot STOPPED
+               for `pinned_after_s`, whatever stopped it (boxed in with no
+               free goal, braked to a crawl at the slow zone's boundary, a
+               turn refused, a policy that commands nothing). "Stopped" is
+               `StoppedClock`: the pose has neither left a circle of
+               `stopped_move_m` nor turned `stopped_yaw_rad` since the
+               clock re-anchored, and the clock re-anchors whenever the
+               robot is not drivable, so time spent KILLED never counts
+               (Daniel, 2026-11-04: "pinned is any situation where it is
+               stopped for a bit"). Also: the node's last
                request was not itself a reverse (it drove forward into
                this), the current goal has not had a retreat yet, and the
                cooldown since the last one has passed. Otherwise the stop is
                seen but refused (`hold_reason` says why) and the node warns.
       drive    publish exactly (-retreat_vx, 0, 0) every tick, no network.
-      success  the status is neither latched {STOPPED/stop_zone,
-               SLOW/stop_zone_retreat} nor pinned (the wide-arc min_range
-               is back above `retreat_pinned_range_m`), or the robot has
-               moved `retreat_m` from where the retreat started. Then roam
-               draws the next goal.
+      success  a latched retreat ends when the status leaves the latched set
+               {STOPPED/stop_zone, SLOW/stop_zone_retreat}; a pinned one
+               ends by distance alone, `retreat_m` back from where it
+               started (`retreat_max_m` while a latch holds). Then roam
+               turns toward the most open floor and draws the next goal.
       timeout  `retreat_timeout_s` with the latch still held: stop, hold the
                current goal, warn (a lateral obstacle, dry_run, or wheels
                that did not move).
@@ -98,8 +103,9 @@ class RetreatLimits:
     retreat_max_m: float          # metres back after which a still-held latch gives up
     retreat_timeout_s: float      # seconds still stopped before giving up
     retreat_cooldown_s: float     # seconds between PINNED retreats (a latch always retreats)
-    retreat_pinned_range_m: float  # SLOW with the wide-arc min_range under this = pinned
-    retreat_pinned_after_s: float  # ... and no goal progress for this long starts a retreat
+    pinned_after_s: float         # stopped (no translation, no rotation) this long = pinned
+    stopped_move_m: float         # the pose leaving a circle this wide restarts the stopped clock
+    stopped_yaw_rad: float        # ... or the yaw leaving a band this wide
 
 
 @dataclass(frozen=True)
@@ -112,7 +118,6 @@ class SafetyView:
     min_range: float = math.inf   # the wide-arc minimum rm_safety reports
 
 
-_ZONE_REASONS = ("slow_zone", "stop_zone_prelatch")
 
 
 @dataclass(frozen=True)
@@ -129,11 +134,37 @@ def is_latched(view: SafetyView) -> bool:
     )
 
 
-def is_pinned(view: SafetyView, pinned_range_m: float) -> bool:
-    """Held in the slow band at the stop boundary: braked to a crawl by the
-    slow zone with the obstacle too close for the latch to be far off."""
-    return (view.state == STATE_SLOW and view.reason in _ZONE_REASONS
-            and math.isfinite(view.min_range) and view.min_range < pinned_range_m)
+def _wrap(angle: float) -> float:
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+
+class StoppedClock:
+    """Seconds the robot has been stopped: the pose has neither left a circle
+    of `move_m` nor turned `yaw_rad` since the clock re-anchored. It
+    re-anchors whenever the pose leaves that band and whenever the robot is
+    not drivable (killed, a stale input, a stop that is not the latch), so
+    time spent KILLED never counts and the clock starts at zero on ARM. A
+    crawl of a centimetre a second stays inside the band: that is stopped."""
+
+    def __init__(self, move_m: float, yaw_rad: float) -> None:
+        self._move_m = float(move_m)
+        self._yaw_rad = float(yaw_rad)
+        self._anchor: Optional[Tuple[float, float, float, float]] = None  # x, y, yaw, t
+
+    def update(self, now: float, x: float, y: float, yaw: float, drivable: bool) -> float:
+        """Once per tick with a trusted pose. Returns the seconds stopped."""
+        if not drivable:
+            self._anchor = None          # the next drivable tick starts the clock
+            return 0.0
+        if self._anchor is None:
+            self._anchor = (float(x), float(y), float(yaw), now)
+            return 0.0
+        ax, ay, ayaw, at = self._anchor
+        if (math.dist((x, y), (ax, ay)) > self._move_m
+                or abs(_wrap(yaw - ayaw)) > self._yaw_rad):
+            self._anchor = (float(x), float(y), float(yaw), now)
+            return 0.0
+        return max(0.0, now - at)
 
 
 class RetreatController:
@@ -172,6 +203,14 @@ class RetreatController:
         or when no latch is seen)."""
         return self._hold_reason
 
+    def drivable(self, view: SafetyView) -> bool:
+        """A fresh status in a state the robot can drive from: OK or SLOW
+        (the latch's own retreat state included), nothing stale, not killed.
+        The stopped clock counts only while this holds."""
+        usable = view.state is not None and view.age_s <= self._max_age
+        return (usable and view.state not in (STATE_KILLED, STATE_STOPPED)
+                and view.reason not in _ABORT_REASONS)
+
     def goal_fixed(self) -> None:
         """Every goal fix. Nothing to reset since the recovery turn: the
         cooldown alone bounds repeated retreats (a retreat always ends in a
@@ -195,13 +234,11 @@ class RetreatController:
 
     def step(self, now: float, view: SafetyView, pose_xy: Tuple[float, float],
              roam_on: bool, my_topic: str, last_cmd_vx: float,
-             stalled_s: float = 0.0) -> Optional[Step]:
-        """Once per control tick, with a trusted pose. `stalled_s`: seconds
-        without progress on the goal (the roam sequencer's clock). None:
-        nothing to do."""
+             stopped_s: float = 0.0) -> Optional[Step]:
+        """Once per control tick, with a trusted pose. `stopped_s`: seconds the
+        robot has been stopped (`StoppedClock`). None: nothing to do."""
         usable = view.state is not None and view.age_s <= self._max_age
         latched = usable and is_latched(view)
-        pinned = usable and is_pinned(view, self._limits.retreat_pinned_range_m)
         if self._active:
             if not roam_on:
                 return self._end(now, f"{ABORTED}:roam_off")
@@ -213,7 +250,7 @@ class RetreatController:
                 return self._end(now, f"{ABORTED}:{view.reason}")
             if view.command_topic != my_topic:
                 return self._end(now, f"{ABORTED}:source_changed")
-            if not latched and not pinned:
+            if self._start_cause == "latched" and not latched:
                 return self._end(now, RELEASED)
             back = math.dist(pose_xy, self._start_xy)
             # Under a held LATCH the reverse must go on: rm_safety releases
@@ -229,7 +266,7 @@ class RetreatController:
 
         self._hold_reason = None
         fresh_latch = latched and view.reason == REASON_LATCHED
-        stuck = pinned and stalled_s >= self._limits.retreat_pinned_after_s
+        stuck = self.drivable(view) and stopped_s >= self._limits.pinned_after_s
         if not (roam_on and (fresh_latch or stuck)):
             return None
         if view.command_topic != my_topic:

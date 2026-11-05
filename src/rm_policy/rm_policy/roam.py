@@ -78,7 +78,7 @@ KEYS = (
     "corridor_half_width_m", "clearance_m", "min_valid_fraction", "draw_attempts",
     "progress_window_s", "progress_min_m", "self_radius_m",
     "retreat_vx", "retreat_m", "retreat_max_m", "retreat_timeout_s", "retreat_cooldown_s",
-    "retreat_pinned_range_m",
+    "pinned_after_s", "stopped_move_m", "stopped_yaw_deg", "body_floor_m",
     "turn_wz", "turn_tolerance_deg", "turn_timeout_s", "turn_clear_m",
     "recovery_turn_min_deg", "recovery_turn_max_deg",
 )
@@ -108,7 +108,10 @@ class RoamLimits:
     retreat_max_m: float
     retreat_timeout_s: float
     retreat_cooldown_s: float
-    retreat_pinned_range_m: float
+    pinned_after_s: float
+    stopped_move_m: float
+    stopped_yaw_deg: float
+    body_floor_m: float
     # The turn in place toward a goal off the nose (rm_policy/retreat.py).
     turn_wz: float
     turn_tolerance_deg: float
@@ -180,8 +183,16 @@ def check_limits(limits: RoamLimits) -> Optional[str]:
         return f"roam.retreat_timeout_s must be > 0, got {limits.retreat_timeout_s}"
     if limits.retreat_cooldown_s < 0.0:
         return f"roam.retreat_cooldown_s must be >= 0, got {limits.retreat_cooldown_s}"
-    if limits.retreat_pinned_range_m <= 0.0:
-        return f"roam.retreat_pinned_range_m must be > 0, got {limits.retreat_pinned_range_m}"
+    if limits.pinned_after_s <= limits.dwell_s:
+        return (f"roam.pinned_after_s ({limits.pinned_after_s}) must exceed roam.dwell_s "
+                f"({limits.dwell_s}): the dwell at a reached goal is a stop, not pinned")
+    if limits.stopped_move_m <= 0.0:
+        return f"roam.stopped_move_m must be > 0, got {limits.stopped_move_m}"
+    if not 0.0 < limits.stopped_yaw_deg < 90.0:
+        return f"roam.stopped_yaw_deg must be within (0, 90), got {limits.stopped_yaw_deg}"
+    if not 0.0 <= limits.body_floor_m < limits.self_radius_m:
+        return (f"roam.body_floor_m must be >= 0 and below roam.self_radius_m "
+                f"({limits.self_radius_m}), got {limits.body_floor_m}")
     if limits.turn_wz <= 0.0:
         return f"roam.turn_wz must be > 0, got {limits.turn_wz}"
     if not 0.0 < limits.turn_tolerance_deg < 180.0:
@@ -246,17 +257,22 @@ def _wrap(angle: float) -> float:
 BODY_SECTOR_FROM_DEG = 95.0
 
 
-def is_return(r: float, phi: float, scan: Scan, self_radius_m: float) -> bool:
-    """A valid return from the world: finite, above the sensor floor, and
-    not the robot's own body (a short return in the rear body sectors)."""
+def is_return(r: float, phi: float, scan: Scan, self_radius_m: float,
+              body_floor_m: float = 0.0) -> bool:
+    """A valid return from the world: finite, above the sensor floor, not
+    under the body floor (nothing in the world is nearer the lidar than the
+    chassis; the standoffs read 0.06-0.11 m, 2026-11-04), and not the
+    robot's own body (a short return in the rear body sectors)."""
     if not (math.isfinite(r) and r > 0.0 and r >= scan.range_min):
+        return False
+    if r < body_floor_m:
         return False
     if r < self_radius_m and abs(math.degrees(phi)) >= BODY_SECTOR_FROM_DEG:
         return False
     return True
 
 
-def nearest_return(scan: Scan, self_radius_m: float) -> float:
+def nearest_return(scan: Scan, self_radius_m: float, body_floor_m: float = 0.0) -> float:
     """The closest return from the world, any bearing; inf when there is
     none (or the scan cannot be read)."""
     if (not scan.ranges or not math.isfinite(scan.angle_increment)
@@ -265,7 +281,7 @@ def nearest_return(scan: Scan, self_radius_m: float) -> float:
     nearest = math.inf
     for i, r in enumerate(scan.ranges):
         phi = _wrap(scan.angle_min + i * scan.angle_increment)
-        if is_return(r, phi, scan, self_radius_m) and r < nearest:
+        if is_return(r, phi, scan, self_radius_m, body_floor_m) and r < nearest:
             nearest = r
     return nearest
 
@@ -294,7 +310,7 @@ def free_depth(scan: Scan, bearing: float, limits: RoamLimits,
         sectored = abs(delta) <= half_sector
         if sectored:
             in_sector += 1
-        if not is_return(r, phi, scan, limits.self_radius_m):
+        if not is_return(r, phi, scan, limits.self_radius_m, limits.body_floor_m):
             continue
         if sectored:
             valid_in_sector += 1
@@ -328,7 +344,7 @@ def sweep_clear(scan: Scan, direction: float, angle_rad: float, limits: RoamLimi
     reach = max(r for r, _ in corners) + SWEEP_MARGIN_M
     for i, r in enumerate(scan.ranges):
         phi = _wrap(scan.angle_min + i * scan.angle_increment)
-        if not is_return(r, phi, scan, limits.self_radius_m) or r > reach:
+        if not is_return(r, phi, scan, limits.self_radius_m, limits.body_floor_m) or r > reach:
             continue
         for radius, start in corners:
             if r > radius + SWEEP_MARGIN_M:
@@ -410,7 +426,7 @@ def strip_is_free(scan: Scan, bearing: float, distance: float, limits: RoamLimit
         windowed = abs(delta) <= half_angle
         if windowed:
             in_window += 1
-        if not is_return(r, phi, scan, limits.self_radius_m):
+        if not is_return(r, phi, scan, limits.self_radius_m, limits.body_floor_m):
             continue
         if windowed:
             valid_in_window += 1

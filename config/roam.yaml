@@ -70,6 +70,13 @@ roam:
   # counting them blocked the whole circle on 2026-10-23. A real object this
   # close is touching the robot, and the stop zone owns that.
   self_radius_m: 0.25
+  # Nothing in the world is nearer the lidar than the chassis is, so a return
+  # under this is the robot at ANY bearing (the right standoffs read
+  # 0.06-0.11 m out to -94 deg on 2026-11-04, inside the sectors above, and
+  # refused every turn: "a return sits inside the corner sweep either way").
+  # Same number as config/interface*.yaml and safety_limits.yaml
+  # body_floor_m, pinned equal by a test.
+  body_floor_m: 0.12
   # Random candidates per hand-off, then as many bearings at the shortest
   # leg. If none is free the node HOLDS the current goal (last_reason
   # no_free_goal, counted in held) and retries once a second: a boxed-in
@@ -130,19 +137,30 @@ roam:
   #      is wheels that did not move, dry_run, or an obstacle along the
   #      side. Then the node holds the goal and warns.
   retreat_timeout_s: 8.0
-  # 20 s between PINNED retreats: the bound on the slow-band loop. A fresh
-  # stop-zone latch always retreats at once: it needs a drive to happen
-  # again, and a latched robot can do nothing but reverse, so a cooldown
-  # there only froze the robot (2026-11-04).
+  # 20 s between PINNED retreats: the bound on the back-turn-draw loop of a
+  # robot that is truly walled in (three a minute, not a standstill). A
+  # fresh stop-zone latch always retreats at once: it needs a drive to
+  # happen again, and a latched robot can do nothing but reverse, so a
+  # cooldown there only froze the robot (2026-11-04).
   retreat_cooldown_s: 20.0
-  # PINNED: the slow zone brakes a forward push to zero exactly at the stop
-  # boundary, so under a forward push the latch never trips: on 2026-10-23
-  # the robot sat at min_range 0.20 m, the policy asking 0.84 m/s and
-  # rm_safety passing 0.009, with no latch and no retreat. A retreat also
-  # starts when rm_safety reports SLOW with the wide-arc min_range under
-  # this AND the goal has made no progress for progress_window_s. 0.30 m:
-  # the same range the latch releases at.
-  retreat_pinned_range_m: 0.30
+  # PINNED is any situation where the robot is STOPPED for a bit (Daniel,
+  # 2026-11-04). Until then it meant "SLOW with the obstacle under 0.30 m
+  # and no goal progress", which missed the case that held the robot for
+  # seven minutes that day: at a REACHED goal, boxed in with no free leg to
+  # draw, the progress clock reads zero, so nothing ever fired. Now the
+  # cause does not matter: braked to a crawl at the slow boundary, holding
+  # with no free goal, a turn refused, a policy commanding nothing. After
+  # pinned_after_s stopped the node backs out retreat_m, turns toward the
+  # most open floor and draws again; the cooldown above bounds the loop.
+  # 5 s: above the 1 s dwell at a reached goal (a stop that is not pinned;
+  # the loader refuses pinned_after_s <= dwell_s) and five failed draws of
+  # a hold. Time spent KILLED never counts; the clock starts at ARM.
+  pinned_after_s: 5.0
+  # Stopped means the pose has stayed inside a circle this wide AND the yaw
+  # inside a band this wide since the clock last re-anchored. 0.05 m / 6 deg:
+  # above map-pose jitter at rest; a crawl of 1 cm/s stays inside for 5 s.
+  stopped_move_m: 0.05
+  stopped_yaw_deg: 6.0
 
   # ---- the turn: face a goal the policy cannot steer to ------------------
   # The draw's fallback puts a goal beside or behind when nothing ahead is

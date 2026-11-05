@@ -26,13 +26,15 @@ What it does:
          goal the robot takes too long to reach switches anyway; a finished
          goal is never retried; with no free candidate in view the current
          goal is held and the node says so. If rm_safety's stop zone
-         latches while roaming and this node is the selected source, it
+         latches while roaming and this node is the selected source, or the
+         robot has been STOPPED for `pinned_after_s` whatever stopped it
+         (boxed in with no free goal, braked to a crawl, a turn refused), it
          backs STRAIGHT out at `retreat_vx` (the one command rm_safety
          passes under its latch), without running the network, until the
-         latch releases or `retreat_m` is covered, then draws the next goal
-         (reason `retreated`). One retreat per goal, with a cooldown; a
-         timeout holds and warns; a kill, a stale input or a pose jump
-         aborts it with zero published.
+         latch releases or `retreat_m` is covered, turns toward the most
+         open floor, then draws the next goal (reason `retreated`). A
+         cooldown bounds pinned retreats; a timeout holds and warns; a kill,
+         a stale input or a pose jump aborts it with zero published.
       3. Calls `rm_policy.observation_builder` to assemble the 724-element
          observation (720 lidar + 2 dynamic robot-frame goal + 2 previous
          action), with the lidar geometry, search window and self-occlusion
@@ -176,6 +178,7 @@ from rm_policy.policy_runner import PolicyRunner
 from rm_policy.pose_source import Pose2D, detect_pose_jump, pose_is_usable
 from rm_interfaces.msg import SafetyStatus
 from rm_policy.retreat import (
+    StoppedClock,
     ABORTED, DISTANCE, NOT_CLEAR, RELEASED, STARTED, TIMEOUT as RETREAT_TIMEOUT,
     TURNED, RetreatController, RetreatLimits, SafetyView, TurnController, TurnLimits,
 )
@@ -454,11 +457,17 @@ class PolicyNode(rclpy.node.Node):
                 retreat_max_m=roam_limits.retreat_max_m,
                 retreat_timeout_s=roam_limits.retreat_timeout_s,
                 retreat_cooldown_s=roam_limits.retreat_cooldown_s,
-                retreat_pinned_range_m=roam_limits.retreat_pinned_range_m,
-                retreat_pinned_after_s=roam_limits.progress_window_s,
+                pinned_after_s=roam_limits.pinned_after_s,
+                stopped_move_m=roam_limits.stopped_move_m,
+                stopped_yaw_rad=math.radians(roam_limits.stopped_yaw_deg),
             ),
             status_max_age_s=self._odom_timeout_ms / 1000.0,
         )
+        # "Pinned is any situation where it is stopped for a bit": the clock
+        # behind that, re-anchored by every move, turn, or non-drivable tick.
+        self._stopped = StoppedClock(
+            roam_limits.stopped_move_m, math.radians(roam_limits.stopped_yaw_deg))
+        self._stopped_s = 0.0
         self._turn = TurnController(TurnLimits(
             turn_wz=roam_limits.turn_wz, turn_tolerance_deg=roam_limits.turn_tolerance_deg,
             turn_timeout_s=roam_limits.turn_timeout_s, turn_clear_m=roam_limits.turn_clear_m,
@@ -997,7 +1006,7 @@ class PolicyNode(rclpy.node.Node):
             # reason and the age of the current goal, so the timeout is
             # visible before it fires.
             "roam": {**self._roam.status(time.monotonic()), **self._retreat.status(),
-                     **self._turn.status()},
+                     **self._turn.status(), "stopped_s": round(self._stopped_s, 1)},
             "weights": self._runner.weights_path or None,
             # Short hash is enough to tell two checkpoints apart at a glance
             # while keeping this message small at 5 Hz; the full hash is in
@@ -1141,10 +1150,15 @@ class PolicyNode(rclpy.node.Node):
         # not run and previous_action is untouched while it reverses). The
         # safety status feeds this and nothing else in the node.
         # ------------------------------------------------------------------
+        view = self._safety_view(now)
+        self._stopped_s = self._stopped.update(
+            now, self._robot_x, self._robot_y, self._robot_yaw,
+            drivable=self._retreat.drivable(view),
+        )
         step = self._retreat.step(
-            now, self._safety_view(now), (self._robot_x, self._robot_y),
+            now, view, (self._robot_x, self._robot_y),
             self._roam.on, self._cmd_vel_topic, self._prev_action_v,
-            stalled_s=self._roam.no_progress_s(now),
+            stopped_s=self._stopped_s,
         )
         if step is not None:
             if not step.done:
@@ -1154,7 +1168,7 @@ class PolicyNode(rclpy.node.Node):
                     lim = self._retreat.limits
                     self.get_logger().warn(
                         f"policy_node: retreat START ({self._retreat.start_cause}: "
-                        f"{'stop-zone latched' if self._retreat.start_cause == 'latched' else 'pinned in the slow band with no progress'}"
+                        f"{'stop-zone latched' if self._retreat.start_cause == 'latched' else f'stopped for {self._stopped_s:.0f} s'}"
                         f" while roaming); reversing straight at {lim.retreat_vx} m/s, "
                         f"up to {lim.retreat_m} m or {lim.retreat_timeout_s} s, until "
                         f"rm_safety reports clear."
@@ -1212,7 +1226,8 @@ class PolicyNode(rclpy.node.Node):
         # robot turns. Only with nothing within turn_clear_m of the body.
         # ------------------------------------------------------------------
         if self._turn.active and self._goal_world_x is not None:
-            clear = nearest_return(scan, self._roam.limits.self_radius_m) >= \
+            clear = nearest_return(scan, self._roam.limits.self_radius_m,
+                                   self._roam.limits.body_floor_m) >= \
                 self._turn.limits.turn_clear_m
             recovering = self._turn_target_yaw is not None
             error = (math.atan2(math.sin(self._turn_target_yaw - self._robot_yaw),
