@@ -1,6 +1,6 @@
 # Plan: a trained checkpoint becomes a dashboard button (first case: M9)
 
-> Status: APPROVED 2026-11-04 (Daniel); BUILT the same day on `feat/roam-mode` (29c3cc5, a6350d5 + docs) and upstream `feat/720-beam-270fov` (0e1bbe1, `weights/actor_m9.pt`); 742 workstation tests. OPEN: the deploy, rebuild and restart on bernard-1 (the robot left the network mid-deploy) and the floor test. Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22). Revised in place as implementation finds things.
+> Status: APPROVED 2026-11-04 (Daniel); BUILT the same day on `feat/roam-mode` (29c3cc5, a6350d5, 5df544b) and upstream `feat/720-beam-270fov` (0e1bbe1, `weights/actor_m9.pt`); 767 workstation tests. DEPLOYED to bernard-1 2026-11-04 (weights verified both ends, rm_policy + rm_bringup rebuilt, stack up with the zones on: three policy nodes, m9 logs interface 5.0.0 with bounds +-0.25/+-0.8 and sha bf4e1ba21b73, the dashboard lists m9). OPEN: the floor test (select m9, ARM, a goal ahead, then one beside). Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22).
 
 ## Context
 

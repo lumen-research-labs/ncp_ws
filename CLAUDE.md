@@ -1940,11 +1940,16 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     `s1627328` stays on the box. Docs: `docs/add_a_policy_profile.md`
     (how-to), `docs/interface_versions.md` (the contract doc split at the
     600-word cap), `tests/unit/test_docs.py` (index, cap, em-dash, the
-    how-to's registration points). 29c3cc5, a6350d5 + docs. The robot
-    dropped off the network during the deploy (no route to .100); the
-    deploy, the rebuild and the restart are owed, then the floor test
-    (select m9, ARM, a goal ahead, then one beside: M8-v2 ignores it, M9
-    should turn). The roam cone is still the shared +-45 deg; M9 trained on
+    how-to's registration points). 29c3cc5, a6350d5, 5df544b. The robot
+    dropped off the network during the first deploy attempt (powered off);
+    deployed after it came back the same day: weights verified both ends,
+    rm_policy + rm_bringup rebuilt, stack up with the zones on, three
+    policy nodes, `policy_node_m9` logging interface 5.0.0 with the bounds
+    and sha bf4e1ba21b73, the dashboard listing m9, KILLED, 11.8 V. Owed:
+    the floor test (select m9, ARM, a goal ahead, then one beside: M8-v2
+    ignores it, M9 should turn). Seen while killed with no goal driven: the
+    m9 action sits at its bounds [0.25, 0.8]; watch whether it unsticks
+    once armed. The roam cone is still the shared +-45 deg; M9 trained on
     random bearings, so a wider per-profile cone is the follow-up.
   * **Second live run (zones on): the robot reached its first goal and HELD
     there** ("no candidate goal in free space"). The captured scan
