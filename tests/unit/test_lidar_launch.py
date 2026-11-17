@@ -42,6 +42,7 @@ def test_both_drivers_share_the_by_id_port_and_the_tf_frame() -> None:
     assert '"baudrate": 512000' in tg30
     assert '"serial_baudrate": 115200' in a1
     assert '"scan_mode": "Standard"' in a1, "the driver default Sensitivity is an A2/A3 mode the A1 rejects"
+    assert '"scan_frequency": 5.5' in a1, "2 kHz over 360 slots needs the 5.5 Hz design rate"
 
 
 def test_each_driver_node_is_gated_on_with_lidar_and_the_lidar_name() -> None:

@@ -2,9 +2,9 @@
 
 **Machine-readable source of truth: the profile's file under [`../config/`](../config/)**: `interface.yaml` (4.0.0), `interface_m9.yaml` (5.0.0), `interface_m4.yaml` (3.0.0). When they disagree, the YAML wins.
 
-This page describes the layout 4.0.0 and 5.0.0 share. [`interface_versions.md`](interface_versions.md) lists every version with its checkpoint. [3.0.0](interface_contract_3.0.0_superseded.md) holds the rationale for the goal and previous-action blocks.
+The layout 4.0.0 and 5.0.0 share. [`interface_versions.md`](interface_versions.md) lists every version with its checkpoint. [3.0.0](interface_contract_3.0.0_superseded.md) holds the goal and previous-action rationale.
 
-**Profiles.** `ncp.launch.py` runs one policy node per profile in `profiles:=` (default `m8v2,m4,m9`), each on its own contract file and checkpoint. `rm_safety` forwards the one named by `command_source`. `policy_node` builds the network to its contract's width and clips to its bounds. Another width, an unknown version, or a lidar block that differs from the vendored `BEAMS` and `FOV_DEG` is a startup crash.
+**Profiles.** `ncp.launch.py` runs one policy node per profile in `profiles:=` (default `m8v2,m4,m9`), each on its own contract and checkpoint. `rm_safety` forwards the one named by `command_source`. `policy_node` builds the network to its contract's width and clips to its bounds. Another width, an unknown version, or a lidar block that differs from the vendored `BEAMS` and `FOV_DEG` is a startup crash.
 
 ## Observation, 724 dims, float32
 
@@ -27,7 +27,7 @@ The arithmetic is upstream's own, `prepare_scan → local_goal → build_obs` in
 | resample range | 0.01 m to 30.0 m. `0.0`, negatives, `inf`, `NaN`, masked rays and returns under the body floor become 30 m |
 | body floor | `body_floor_m` 0.12 m: nearer than this is the chassis (standoffs 0.06 to 0.11 m, 2026-11-04) |
 | normalization | `clip(r, 0, 5) → (r − 2.5) / 5 × 2` |
-| empty-bin policy | `fault` |
+| empty-bin policy | `fault` when no ray is within the search window |
 
 [`lidar_sampling.md`](lidar_sampling.md) explains the window, the zones and the `0.0` mapping, each a measured decision. `rm_safety` computes its e-stop from the full-resolution scan, independently. Never wire this block into a safety path.
 

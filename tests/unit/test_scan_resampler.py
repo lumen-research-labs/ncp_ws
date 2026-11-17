@@ -835,3 +835,68 @@ def test_invalid_mask_zone_faults_closed(zones) -> None:
     result = _nearest(ranges, amin, inc, 6, 180.0, mask_zones_deg=zones)
     assert result.bins is None
     assert result.fault == "invalid_mask_zone"
+
+
+# ---------------------------------------------------------------------------
+# A lidar coarser than the bin grid: bernard-3's RPLIDAR A1 (2026-11-18)
+# ---------------------------------------------------------------------------
+A1_FIXTURE = os.path.join(FIXTURES_DIR, "rplidar_a1_scan_2026-11-18.yaml") if "FIXTURES_DIR" in dir() else os.path.join(
+    os.path.dirname(SAMPLE_FIXTURE), "rplidar_a1_scan_2026-11-18.yaml")
+
+
+def _a1_scan():
+    return next(iter(_load_scans(A1_FIXTURE)))
+
+
+def test_a1_rays_are_one_degree_apart_so_most_bins_have_no_member() -> None:
+    scan = _a1_scan()
+    assert len(scan["ranges"]) == 360
+    assert math.degrees(scan["angle_increment"]) == pytest.approx(1.0, abs=0.01)
+    bin_width = ARC_270 / BEAMS_720
+    members = [0] * BEAMS_720
+    for i in range(len(scan["ranges"])):
+        a = math.degrees(scan["angle_min"] + i * scan["angle_increment"])
+        a = (a + 180.0) % 360.0 - 180.0
+        if -ARC_270 / 2 <= a <= ARC_270 / 2:
+            members[min(int((a + ARC_270 / 2) / bin_width), BEAMS_720 - 1)] += 1
+    assert sum(1 for m in members if m == 0) > BEAMS_720 // 2
+
+
+def test_strict_mode_faults_on_the_a1_but_the_window_serves_every_bin() -> None:
+    scan = _a1_scan()
+    strict = _nearest(scan["ranges"], scan["angle_min"], scan["angle_increment"],
+                      BEAMS_720, ARC_270, search_window_bins=0)
+    assert strict.fault is not None and strict.fault.startswith("empty_bin:")
+    window = _nearest(scan["ranges"], scan["angle_min"], scan["angle_increment"],
+                      BEAMS_720, ARC_270, search_window_bins=2)
+    assert window.fault is None and len(window.bins) == BEAMS_720
+    assert all(0.0 < b <= RANGE_MAX_M for b in window.bins)
+    # The nearest real return inside the arc on that scan (0.459 m at ~-120 deg)
+    # reaches the bins; everything the A1 did not see reads range_max.
+    assert min(window.bins) == pytest.approx(0.459, abs=0.01)
+
+
+def test_a_bin_with_no_ray_within_reach_is_still_a_fault_with_the_window() -> None:
+    """The window serves a coarse sensor, never a gap: four rays 60 deg
+    apart against 5 deg bins leave bins with nothing within 0.9 deg."""
+    n_points = 4
+    angle_min = -math.pi / 2
+    angle_increment = math.pi / (n_points - 1)
+    result = resample_forward_arc(
+        [1.0] * n_points, angle_min, angle_increment, n_bins=36, arc_deg=180.0,
+        range_min=RANGE_MIN_M, range_max=RANGE_MAX_M,
+        sampling=SAMPLING_NEAREST_RAY, search_window_bins=2,
+    )
+    assert result.fault is not None and result.fault.startswith("empty_bin:")
+
+
+def test_the_tg30_never_has_an_empty_bin_so_the_fallback_is_a_no_op_there() -> None:
+    bin_width = ARC_270 / BEAMS_720
+    for scan in _all_fixture_scans():
+        members = [0] * BEAMS_720
+        for i in range(len(scan["ranges"])):
+            a = math.degrees(scan["angle_min"] + i * scan["angle_increment"])
+            a = (a + 180.0) % 360.0 - 180.0
+            if -ARC_270 / 2 <= a <= ARC_270 / 2:
+                members[min(int((a + ARC_270 / 2) / bin_width), BEAMS_720 - 1)] += 1
+        assert min(members) >= 1

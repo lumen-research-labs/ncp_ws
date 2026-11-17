@@ -383,6 +383,13 @@ _A1_LIDAR_PARAMS = {
     "inverted": False,
     "angle_compensate": True,
     "scan_mode": "Standard",
+    # 5.5 Hz, the A1's design rate: Standard mode samples at 2 kHz, so 10 Hz
+    # (the driver default; the motor settled at 7 Hz anyway) fills only ~200
+    # of the 360 angle-compensated slots per revolution and the rest arrive
+    # as no-returns (290 of 360 on the first scan, 2026-11-18). At 5.5 Hz
+    # every slot is a real sample. rm_safety's 500 ms scan timeout and the
+    # 5 Hz policy tick both sit inside the 182 ms period.
+    "scan_frequency": 5.5,
 }
 _LIDARS = ("tg30", "a1")
 

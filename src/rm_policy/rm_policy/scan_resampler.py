@@ -212,10 +212,16 @@ def resample_forward_arc(
     mean), so a narrow obstacle is never averaged away.
 
     Empty-bin policy: `fault` (never `range_max`, per `config/interface.yaml`
-    `empty_bin_policy: fault`). If any bin ends up with zero member rays after
-    the arc selection — e.g. `n_bins` too fine for the sensor's angular
-    resolution, or the scan is malformed — this is a sensor/config fault, not
-    a "clear path" reading, and the whole call fails closed.
+    `empty_bin_policy: fault`). A bin with zero member rays after the arc
+    selection is first offered the search window (2026-11-18): a sensor
+    coarser than the bin grid (the RPLIDAR A1's 1 deg rays against 0.375 deg
+    bins) leaves most bins without a member of their own, and the nearest
+    ray within reach serves them exactly as it serves a bin whose members
+    are all no-returns; a no-return within reach keeps the bin at
+    range_max. Only a bin with NO ray within reach (an angular gap in the
+    scan, a malformed scan, or strict mode with `search_window_bins` 0) is
+    a sensor/config fault, not a "clear path" reading, and the whole call
+    fails closed.
 
     Parameters
     ----------
@@ -286,7 +292,8 @@ def resample_forward_arc(
     "invalid_mask_zone"     - a mask zone is not a `[lo, hi]` pair of finite
                                   degrees with lo <= hi.
     "empty_bin:<index>"     - bin `<index>` (0-based) received zero member
-                                  rays after arc selection.
+                                  rays after arc selection and, with a
+                                  search window, no ray lies within reach.
     "internal_error"        - an unexpected exception was caught; fail closed
                                   exactly like `rm_safety.safety_logic.evaluate`.
     """
@@ -390,6 +397,7 @@ def _resample_forward_arc_inner(
     bin_pick: List[float] = [math.inf] * n_bins
     bin_best: List[float] = [math.inf] * n_bins
     bin_count: List[int] = [0] * n_bins
+    ray_angles: List[float] = []          # every in-reach ray, usable or not
     # (angle, range) of every real, unmasked ray in the extended arc — the
     # pool the search-window fallback draws from. Empty when the window is 0.
     candidates: List[Tuple[float, float]] = []
@@ -403,6 +411,7 @@ def _resample_forward_arc_inner(
             continue
 
         r = ranges[i]
+        ray_angles.append(angle)
         # A masked ray is a no-return for every purpose below: the robot is
         # looking at itself, and the training sensor saw "clear" there.
         usable = not _is_no_return(r, range_min) and not any(
@@ -445,9 +454,26 @@ def _resample_forward_arc_inner(
                 bin_best[idx] = offset
                 bin_pick[idx] = r_effective
 
-    for idx in range(n_bins):
-        if bin_count[idx] == 0:
-            return ScanResampleResult(bins=None, fault=f"empty_bin:{idx}")
+    # A bin without a member ray of its own: a fault in strict mode, and with
+    # a search window only when no ray at all (no-returns included) lies
+    # within reach. The window fallback below then fills it from the nearest
+    # usable ray, or it reads range_max like any bin whose rays are all
+    # no-returns. See the docstring's empty-bin policy.
+    if window_rad > 0.0:
+        ray_angles.sort()
+        reach = window_rad + bin_width / 2.0
+        for idx in range(n_bins):
+            if bin_count[idx] != 0:
+                continue
+            bin_centre = -half_arc + (idx + 0.5) * bin_width
+            j = bisect.bisect_left(ray_angles, bin_centre)
+            if not any(0 <= k < len(ray_angles) and abs(ray_angles[k] - bin_centre) <= reach
+                       for k in (j - 1, j)):
+                return ScanResampleResult(bins=None, fault=f"empty_bin:{idx}")
+    else:
+        for idx in range(n_bins):
+            if bin_count[idx] == 0:
+                return ScanResampleResult(bins=None, fault=f"empty_bin:{idx}")
 
     if sampling == SAMPLING_MIN_POOL:
         return ScanResampleResult(bins=bin_min, fault=None)

@@ -272,7 +272,11 @@ observation:
       self_occlusion_zones_deg:
         - [92.0, 123.0]
         - [-135.0, -97.0]
-      empty_bin_policy: fault        # never range_max — that would be fail-open
+      empty_bin_policy: fault        # never range_max — that would be fail-open.
+                                     # A bin with no ray of its own takes the
+                                     # nearest within the search window first
+                                     # (a 1 deg lidar against 0.375 deg bins,
+                                     # 2026-11-18); the fault is for a gap.
 
     - name: goal_local
       # NEW in 3.0.0. The policy is a point-to-point navigator trained in BARN;

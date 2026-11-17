@@ -2046,6 +2046,18 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     dashboard) and the self-occlusion zones are bernard-1's. Also on this
     unit: Docker holds Yahboom's Noetic images but no container; the
     control code is native (`~/yahboomcar_ros2_ws`, `~/Rosmaster`).
+    With the A1 scanning (health OK, Standard mode, 7 Hz) the three
+    720-beam profiles FAULTED `obs_fault:lidar:empty_bin:1` on every scan
+    while m4 ran: angle-compensated A1 scans are 360 rays at 1.0 deg, so
+    two 0.375 deg bins in three have no member ray, and the resampler
+    faulted on the first before its search window ever ran. Now a bin
+    without a member is offered the window like a bin whose members are
+    all no-returns, and the fault is reserved for a bin with no ray within
+    reach (a gap); strict mode (window 0) and the TG30 (2 rays per bin,
+    never empty) are unchanged. Also the A1 at the driver's default 10 Hz
+    fills only ~200 of its 360 slots per revolution (290 no-returns on the
+    first scan), so the a1 block runs it at its 5.5 Hz design rate.
+    Fixture `tests/fixtures/rplidar_a1_scan_2026-11-18.yaml`.
   * **Second live run (zones on): the robot reached its first goal and HELD
     there** ("no candidate goal in free space"). The captured scan
     (`tests/fixtures/tg30_roam_hold_scan.yaml`, 2020 rays, 29 % no-returns)
