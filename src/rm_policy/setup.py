@@ -22,6 +22,7 @@ setup(
             'policy_node = rm_policy.policy_node:main',
             'scan_bridge_node = rm_policy.scan_bridge_node:main',
             'scan_sanitizer_node = rm_policy.scan_sanitizer_node:main',
+            'scan_rotate_node = rm_policy.scan_rotate_node:main',
         ],
     },
 )

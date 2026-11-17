@@ -75,6 +75,7 @@ OUR_NODES=(
   policy_node
   scan_bridge_node
   scan_sanitizer_node
+  scan_rotate_node
   dashboard_node
   safety_node
   rm_base_node

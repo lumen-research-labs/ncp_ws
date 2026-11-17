@@ -128,6 +128,12 @@ Launch arguments:
                   adapters are a CP2102 on the same by-id path; only the
                   protocol differs, and the wrong driver opens the port and
                   then reads nothing (2026-11-18). Anything else is refused.
+    lidar_yaw_deg "0" (default). The direction the lidar's zero points, in
+                  degrees left of the robot's +x. Non-zero starts
+                  rm_policy/scan_rotate_node between the driver (remapped to
+                  /scan_driver) and /scan, so every consumer reads the world
+                  the right way round. bernard-3's A1 is mounted zero-backward:
+                  lidar:=a1 lidar_yaw_deg:=180 (measured 2026-11-18).
     with_base     "true" (default) starts rm_base (base.launch.py), the
                   mecanum driver that OWNS the base-board serial port.
     with_odom     "true" (default) starts odom.launch.py — the vendor odom
@@ -255,6 +261,7 @@ Usage (on the robot, after colcon build + source install/setup.bash):
     ros2 launch rm_bringup ncp.launch.py profiles:=m8v2 weights:=''
 """
 
+import math
 import pathlib
 import subprocess
 
@@ -395,13 +402,23 @@ _LIDARS = ("tg30", "a1")
 
 
 def _refuse_unknown_lidar(context):
-    """Fail fast on a lidar name this file has no driver block for."""
+    """Fail fast on a lidar name this file has no driver block for, or a
+    yaw offset that is not a finite number of degrees."""
     lidar = LaunchConfiguration("lidar").perform(context)
     if lidar not in _LIDARS:
         raise RuntimeError(
             f"ncp.launch.py: lidar:={lidar!r} is not one of {_LIDARS}; the robot's "
             f"lidar must be named explicitly (bernard-1/-2 tg30, bernard-3 a1)."
         )
+    yaw = LaunchConfiguration("lidar_yaw_deg").perform(context)
+    try:
+        if not math.isfinite(float(yaw)):
+            raise ValueError
+    except ValueError:
+        raise RuntimeError(
+            f"ncp.launch.py: lidar_yaw_deg:={yaw!r} must be a finite number of "
+            f"degrees (0 for a lidar whose zero points along the robot's +x)."
+        ) from None
     return []
 
 
@@ -662,6 +679,12 @@ def generate_launch_description() -> LaunchDescription:
     command_source = LaunchConfiguration("command_source")
     with_lidar = LaunchConfiguration("with_lidar")
     lidar = LaunchConfiguration("lidar")
+    lidar_yaw_deg = LaunchConfiguration("lidar_yaw_deg")
+    # With a yaw offset the driver publishes /scan_driver and scan_rotate_node
+    # owns /scan; without one the driver publishes /scan directly.
+    rotated = PythonExpression(["float('", lidar_yaw_deg, "') != 0.0"])
+    driver_scan_topic = PythonExpression(
+        ["'/scan_driver' if float('", lidar_yaw_deg, "') != 0.0 else '/scan'"])
     with_base = LaunchConfiguration("with_base")
     with_odom = LaunchConfiguration("with_odom")
     control_mode = LaunchConfiguration("control_mode")
@@ -795,6 +818,12 @@ def generate_launch_description() -> LaunchDescription:
                         "bernard-1/-2) or a1 (SLAMTEC RPLIDAR A1, bernard-3).",
         ),
         DeclareLaunchArgument(
+            "lidar_yaw_deg", default_value="0",
+            description="Where the lidar's zero points, degrees left of the "
+                        "robot's +x; non-zero rotates the scan at the source "
+                        "(bernard-3: 180).",
+        ),
+        DeclareLaunchArgument(
             "with_base", default_value="true",
             description="Start rm_base, the mecanum driver. It OWNS the "
                         "base-board serial port -- the vendor "
@@ -880,6 +909,7 @@ def generate_launch_description() -> LaunchDescription:
             name="ydlidar_ros2_driver_node",
             output="screen",
             parameters=[_LIDAR_PARAMS],
+            remappings=[("scan", driver_scan_topic)],
         ),
         Node(
             condition=IfCondition(PythonExpression(
@@ -889,6 +919,20 @@ def generate_launch_description() -> LaunchDescription:
             name="sllidar_node",
             output="screen",
             parameters=[_A1_LIDAR_PARAMS],
+            remappings=[("scan", driver_scan_topic)],
+        ),
+        Node(
+            condition=IfCondition(PythonExpression(
+                ["'", with_lidar, "' == 'true' and ", rotated])),
+            package="rm_policy",
+            executable="scan_rotate_node",
+            name="scan_rotate",
+            output="screen",
+            parameters=[{
+                "input_topic": "/scan_driver",
+                "output_topic": "/scan",
+                "yaw_deg": PythonExpression(["float('", lidar_yaw_deg, "')"]),
+            }],
         ),
 
         IncludeLaunchDescription(

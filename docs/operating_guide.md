@@ -45,7 +45,7 @@ at 20 Hz, until someone explicitly calls `/safety/reset`.
 | address | `192.168.4.100` (static, `RobotLab` WiFi) | `bernard-2.local` (mDNS — its IP moves) | `192.168.4.102` (wired RobotLab segment; factory hostname `yahboom`, mDNS `yahboom.local`) |
 | SSH key | `~/.ssh/lumen` | `~/.ssh/bernard-2` | `~/.ssh/lumen` |
 | user | `jetson` | `jetson` | `jetson` |
-| lidar | YDLIDAR TG30 (`lidar:=tg30`, the default) | YDLIDAR TG30 (`lidar:=tg30`) | SLAMTEC RPLIDAR A1 (`lidar:=a1`, required) |
+| lidar | YDLIDAR TG30 (`lidar:=tg30`, the default) | YDLIDAR TG30 (`lidar:=tg30`) | SLAMTEC RPLIDAR A1 mounted zero-backward (`lidar:=a1 lidar_yaw_deg:=180`, both required) |
 | status | the working robot; all validation is on this unit | not brought up on the current stack | stack and dashboard up 2026-11-17; base calibration and lidar cabling still owed ([`calibration.md`](calibration.md)) |
 
 `run_stack.sh` puts every robot on `ROS_DOMAIN_ID=28`. **Two robots on one

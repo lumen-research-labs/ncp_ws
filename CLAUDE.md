@@ -2058,6 +2058,22 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     fills only ~200 of its 360 slots per revolution (290 no-returns on the
     first scan), so the a1 block runs it at its 5.5 Hz design rate.
     Fixture `tests/fixtures/rplidar_a1_scan_2026-11-18.yaml`.
+    Then Daniel: "the lidar is reversed from what you think it is". The
+    half of the scan the mount blocks (0 returns in 50 rays, every sector
+    from -90 to +90) is the robot's REAR, and his hand at the rear showed
+    up ahead: the A1 is mounted with its zero pointing backward (Yahboom's
+    own URDF has laser_link at rpy 0 0 0 and their launches use the stock
+    sllidar_launch.py, so this is how the unit ships). Fix at the source:
+    `ncp.launch.py lidar_yaw_deg:=` (default 0) remaps the driver to
+    /scan_driver and runs the new `rm_policy/scan_rotate_node` to publish
+    /scan with angle_min shifted by the yaw, so the policies, the e-stop
+    arcs, roam, the dashboard and SLAM all read the same frame; rotating
+    laser_link in TF would have fixed SLAM alone. Also added that day:
+    `scripts/diagnostics/scan_view.py` (the raw scan, every ray, live,
+    served from the robot on :8090; no mask, no resampling), which is how
+    the blind half was seen. bernard-3 launches with
+    `lidar:=a1 lidar_yaw_deg:=180 with_waypoint:=true` (the jog and
+    waypoint buttons are greyed without rm_waypoint).
   * **Second live run (zones on): the robot reached its first goal and HELD
     there** ("no candidate goal in free space"). The captured scan
     (`tests/fixtures/tg30_roam_hold_scan.yaml`, 2020 rays, 29 % no-returns)

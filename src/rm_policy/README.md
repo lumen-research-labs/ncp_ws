@@ -25,6 +25,7 @@ observation, runs the network, and publishes a *candidate* command.
 | `lidar_contract.py` | pure module | Reads the lidar block of `config/interface.yaml` (bins, arc, range bounds, search window, self-occlusion zones, body floor) for both nodes. |
 | `action_contract.py` | pure module | Reads the action block (the trained bounds) of a profile's interface file; 5.0.0 (M9) differs from the vendored constants. See [`docs/interface_versions.md`](../../docs/interface_versions.md). |
 | `scan_bridge_node.py` | ROS2 node | `/scan` → `/ncp/scan`, 720 beams. Exists only so the *upstream* node can run unmodified. |
+| `scan_rotate_node.py` | ROS2 node | `/scan_driver` → `/scan` with the angles shifted by `yaw_deg`, for a lidar whose zero does not point along the robot's +x (bernard-3's A1, 180°). Started by `ncp.launch.py lidar_yaw_deg:=`. |
 | `scan_sanitizer_node.py` | ROS2 node | `/scan` → `/scan_sanitized`, full resolution, `0.0` → `+inf`, and returns under the body radius (the chassis corners) → `+inf`. For third-party consumers (slam_toolbox). |
 
 ---

@@ -59,3 +59,17 @@ def test_stack_down_stops_both_lidar_drivers() -> None:
     src = open(os.path.join(_REPO_ROOT, "scripts", "stack_down.sh"), encoding="utf-8").read()
     order = src[src.index("ORDER=("):src.index(")", src.index("ORDER=("))]
     assert "ydlidar_ros2_driver_node" in order and "sllidar_node" in order
+
+
+def test_a_yaw_offset_puts_the_rotate_relay_between_the_driver_and_scan() -> None:
+    src = _src()
+    assert '"lidar_yaw_deg", default_value="0"' in src
+    assert "'/scan_driver' if float('\", lidar_yaw_deg, \"') != 0.0 else '/scan'" in src
+    assert src.count('remappings=[("scan", driver_scan_topic)]') == 2, "both drivers get the remap"
+    assert 'executable="scan_rotate_node"' in src
+    assert '"input_topic": "/scan_driver"' in src and '"output_topic": "/scan"' in src
+    assert "' == 'true' and \", rotated]" in src, "the relay runs only with the lidar and a non-zero yaw"
+    setup = open(os.path.join(_REPO_ROOT, "src", "rm_policy", "setup.py"), encoding="utf-8").read()
+    assert "scan_rotate_node = rm_policy.scan_rotate_node:main" in setup
+    down = open(os.path.join(_REPO_ROOT, "scripts", "stack_down.sh"), encoding="utf-8").read()
+    assert "scan_rotate_node" in down[down.index("OUR_NODES=("):down.index(")", down.index("OUR_NODES=("))]
