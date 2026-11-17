@@ -24,7 +24,7 @@ not after something fails.
 | Camera | Microdia USB webcam (`0c45:6340`) | Astra Plus (depth) | unchecked |
 | Extra HW | mic, gamepad, LED badge (cradle-era) | — | — |
 | Other repos | `~/Desktop/cradle`, `~/Desktop/firmware`, `~/cpt_ws` | `~/Desktop/firmware` | none; `~/ncp_ws` + `~/NCP-on-Rosmaster` deployed 2026-11-17 |
-| Lidar | YDLIDAR TG30, serial …0082 | YDLIDAR TG30, serial …0084 | not seen yet: no CP2102 on USB on 2026-11-17 (data cable unplugged); only the CH340 base board |
+| Lidar | YDLIDAR TG30, serial …0082 | YDLIDAR TG30, serial …0084 | **SLAMTEC RPLIDAR A1** (model 0x18, fw 1.29): `run_stack.sh lidar:=a1`; sllidar_ros2 at 115200, scan_mode Standard. The TG30 driver opens its port and reads nothing |
 
 Both are `ROS_DOMAIN_ID=28`, both run ROS2 Humble natively on the host, both
 have the same lidar model (consecutive units from one batch).
@@ -107,8 +107,11 @@ ssh bernard-1 'ls -l /dev/serial/by-id/ /dev/rplidar /dev/ydlidar'
 
 ## 3. Lidar: what "broken" actually looks like
 
-The unit is a **YDLIDAR TG30**, not an RPLIDAR — despite `RPLIDAR_TYPE=a1` in
-the robot's own `.bashrc` banner, which is wrong on both robots. Never use
+On bernard-1 and bernard-2 the unit is a **YDLIDAR TG30**, not an RPLIDAR —
+despite `RPLIDAR_TYPE=a1` in their `.bashrc` banners. On **bernard-3 it IS an
+RPLIDAR A1** (stock Yahboom; probed 2026-11-18, GET_INFO answers at 115200),
+so that robot launches with `lidar:=a1` and the rules below about `sllidar`
+do not apply to it. Never use
 SLAMTEC `sllidar` on it; its protocol times out and that red herring cost
 three sessions.
 

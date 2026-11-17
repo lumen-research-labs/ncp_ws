@@ -119,8 +119,15 @@ Launch arguments:
     with_safety   "true" (default) also launches safety.launch.py. Set
                   "false" only when rm_safety is already running.
 
-    with_lidar    "true" (default) starts the YDLIDAR TG30 on its by-id
+    with_lidar    "true" (default) starts the lidar driver on its by-id
                   CP2102 port. Set "false" if the lidar is already up.
+    lidar         Which lidar this robot carries: "tg30" (default; bernard-1
+                  and bernard-2, YDLIDAR TG30 via ydlidar_ros2_driver at
+                  512000 baud) or "a1" (bernard-3, a SLAMTEC RPLIDAR A1 via
+                  sllidar_ros2 at 115200 baud, scan_mode Standard). Both
+                  adapters are a CP2102 on the same by-id path; only the
+                  protocol differs, and the wrong driver opens the port and
+                  then reads nothing (2026-11-18). Anything else is refused.
     with_base     "true" (default) starts rm_base (base.launch.py), the
                   mecanum driver that OWNS the base-board serial port.
     with_odom     "true" (default) starts odom.launch.py — the vendor odom
@@ -359,6 +366,37 @@ _LIDAR_PARAMS = {
     # maps to range_max.
     "fixed_resolution": True,
 }
+
+# The SLAMTEC RPLIDAR A1 that a stock Yahboom X3 ships with (bernard-3,
+# identified 2026-11-18 by its GET_INFO reply: model 0x18, firmware 1.29).
+# sllidar_ros2's own default scan_mode is "Sensitivity", an A2/A3 mode the A1
+# rejects (2026-08-12); "Standard" is the A1's. frame_id:=laser_link for the
+# same TF reason as the TG30. No-returns arrive as +inf, which the sanitizer,
+# the resampler and rm_safety already treat as "nothing there". The mount's
+# orientation (inverted) is unverified on bernard-3: check that an object
+# ahead of the robot appears dead ahead on the dashboard before trusting it.
+_A1_LIDAR_PARAMS = {
+    "channel_type": "serial",
+    "serial_port": _LIDAR_PORT,
+    "serial_baudrate": 115200,
+    "frame_id": "laser_link",
+    "inverted": False,
+    "angle_compensate": True,
+    "scan_mode": "Standard",
+}
+_LIDARS = ("tg30", "a1")
+
+
+def _refuse_unknown_lidar(context):
+    """Fail fast on a lidar name this file has no driver block for."""
+    lidar = LaunchConfiguration("lidar").perform(context)
+    if lidar not in _LIDARS:
+        raise RuntimeError(
+            f"ncp.launch.py: lidar:={lidar!r} is not one of {_LIDARS}; the robot's "
+            f"lidar must be named explicitly (bernard-1/-2 tg30, bernard-3 a1)."
+        )
+    return []
+
 
 # The bridge's output. The upstream consumer reads this, never the raw /scan.
 _NCP_SCAN_TOPIC = "/ncp/scan"
@@ -616,6 +654,7 @@ def generate_launch_description() -> LaunchDescription:
     with_safety = LaunchConfiguration("with_safety")
     command_source = LaunchConfiguration("command_source")
     with_lidar = LaunchConfiguration("with_lidar")
+    lidar = LaunchConfiguration("lidar")
     with_base = LaunchConfiguration("with_base")
     with_odom = LaunchConfiguration("with_odom")
     control_mode = LaunchConfiguration("control_mode")
@@ -631,6 +670,7 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
         # FIRST action: refuse to stack a second copy on a running one.
         OpaqueFunction(function=_refuse_if_stack_already_running),
+        OpaqueFunction(function=_refuse_unknown_lidar),
 
         DeclareLaunchArgument(
             "consumer", default_value="policy_node",
@@ -740,7 +780,12 @@ def generate_launch_description() -> LaunchDescription:
         ),
         DeclareLaunchArgument(
             "with_lidar", default_value="true",
-            description="Start the YDLIDAR TG30 on its by-id CP2102 port.",
+            description="Start the lidar driver on its by-id CP2102 port.",
+        ),
+        DeclareLaunchArgument(
+            "lidar", default_value="tg30",
+            description="Which lidar this robot carries: tg30 (YDLIDAR TG30, "
+                        "bernard-1/-2) or a1 (SLAMTEC RPLIDAR A1, bernard-3).",
         ),
         DeclareLaunchArgument(
             "with_base", default_value="true",
@@ -821,12 +866,22 @@ def generate_launch_description() -> LaunchDescription:
         # Lidar first: the scan bridge and both consumers are useless without
         # /scan, and rm_safety treats missing perception as a stop condition.
         Node(
-            condition=IfCondition(with_lidar),
+            condition=IfCondition(PythonExpression(
+                ["'", with_lidar, "' == 'true' and '", lidar, "' == 'tg30'"])),
             package="ydlidar_ros2_driver",
             executable="ydlidar_ros2_driver_node",
             name="ydlidar_ros2_driver_node",
             output="screen",
             parameters=[_LIDAR_PARAMS],
+        ),
+        Node(
+            condition=IfCondition(PythonExpression(
+                ["'", with_lidar, "' == 'true' and '", lidar, "' == 'a1'"])),
+            package="sllidar_ros2",
+            executable="sllidar_node",
+            name="sllidar_node",
+            output="screen",
+            parameters=[_A1_LIDAR_PARAMS],
         ),
 
         IncludeLaunchDescription(

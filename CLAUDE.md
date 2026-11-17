@@ -2029,6 +2029,23 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     (base_calibration.yaml is bernard-1's and does not transfer), a
     hostname of its own, and a ROS_DOMAIN_ID that is not 28 if it is ever
     on with bernard-1 (run_stack.sh forces 28 on every robot).
+  * **2026-11-18: bernard-3's lidar is a SLAMTEC RPLIDAR A1, not a TG30.**
+    Once its data lead reached a host port (the robot's USB-C socket is
+    the Jetson's device-mode port; the lead had to go into a USB-A port
+    on the Orin, where it enumerated as a CP2102 on hub port 1-2.3), the
+    TG30 driver "connected" and then failed health/info/scan. A raw probe
+    answered NOTHING at any YDLIDAR baud, and everything at the SLAMTEC
+    protocol on 115200: GET_INFO model 0x18 firmware 1.29, health good,
+    scan data flowing. A stock Yahboom X3 ships with the A1 and this unit
+    is factory-default. `ncp.launch.py` gained `lidar:=tg30|a1` (refuses
+    anything else): the `a1` branch runs `sllidar_ros2 sllidar_node` on
+    the same by-id port at 115200, `scan_mode Standard`, `frame_id
+    laser_link`, `angle_compensate`; the TG30 block is unchanged and the
+    default. `tests/unit/test_lidar_launch.py` pins it. Mount orientation
+    on bernard-3 is unverified (an object ahead must appear ahead on the
+    dashboard) and the self-occlusion zones are bernard-1's. Also on this
+    unit: Docker holds Yahboom's Noetic images but no container; the
+    control code is native (`~/yahboomcar_ros2_ws`, `~/Rosmaster`).
   * **Second live run (zones on): the robot reached its first goal and HELD
     there** ("no candidate goal in free space"). The captured scan
     (`tests/fixtures/tg30_roam_hold_scan.yaml`, 2020 rays, 29 % no-returns)
