@@ -75,8 +75,10 @@ def test_the_vendored_constants_are_those_numbers() -> None:
     pytest.importorskip("torch", reason="torch not installed (workstation tier)")
     pytest.importorskip("ncps", reason="ncps not installed (workstation tier)")
     from rm_policy.vendor import ncp_policy
-    assert tuple(float(v) for v in ncp_policy.ACTION_LOW) == VENDORED_NUMBERS.low
-    assert tuple(float(v) for v in ncp_policy.ACTION_HIGH) == VENDORED_NUMBERS.high
+    # The vendored arrays are float32, so compare at float32: -3.14 as a
+    # float64 literal is not bit-equal to float32(-3.14).
+    assert np.array_equal(ncp_policy.ACTION_LOW, np.asarray(VENDORED_NUMBERS.low, dtype=np.float32))
+    assert np.array_equal(ncp_policy.ACTION_HIGH, np.asarray(VENDORED_NUMBERS.high, dtype=np.float32))
 
 
 def test_normalize_is_the_training_formula() -> None:

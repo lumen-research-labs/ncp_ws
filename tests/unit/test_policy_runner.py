@@ -40,17 +40,22 @@ def test_default_bounds_are_the_vendored_ones() -> None:
 
 
 def test_actions_are_clipped_to_the_contract_bounds() -> None:
+    """The clip is exercised deterministically: the actor is made to emit an
+    action outside M9's bounds (random weights do not reliably saturate in a
+    few ticks, as the first robot-tier run showed), and the runner must
+    return the clipped value, which is what the node publishes and feeds back."""
     runner = PolicyRunner(seed=0, action_bounds=M9)
-    seen_outside_vendored_default = False
     for obs in _obs_sequence(seed=1):
         res = runner.act(obs)
         assert res.fault is None
         v, w = res.action
         assert -0.25 <= v <= 0.25 and -0.8 <= w <= 0.8
-        seen_outside_vendored_default |= abs(v) == 0.25 or abs(w) == 0.8
-    # Random weights saturate somewhere in 30 ticks; if they never did the
-    # clip was not exercised and this test proves nothing.
-    assert seen_outside_vendored_default
+    runner._actor.act = lambda obs, state: (np.array([0.9, -2.0], dtype=np.float32), state)
+    res = runner.act(_obs_sequence(1, seed=3)[0])
+    assert res.fault is None
+    assert res.action == pytest.approx((0.25, -0.8))
+    runner._actor.act = lambda obs, state: (np.array([-0.1, 0.4], dtype=np.float32), state)
+    assert runner.act(_obs_sequence(1, seed=4)[0]).action == pytest.approx((-0.1, 0.4))
 
 
 def test_with_the_vendored_bounds_the_action_is_the_actors_own() -> None:
