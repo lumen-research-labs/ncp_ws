@@ -1,12 +1,12 @@
 # Lidar sampling, why the 720-beam block is built the way it is
 
-The lidar block of the contract ([`interface_contract.md`](interface_contract.md)) is 720 beams over 270°, reduced from the TG30's ~2000 rays by `src/rm_policy/rm_policy/scan_resampler.py`. The policy trained on a simulated sensor with one ray per beam, no dropout and no view of its chassis. Measured facts about the real sensor decide how the reduction reproduces that.
+The lidar block of the contract ([`interface_contract.md`](interface_contract.md)) is 720 beams over 270°, reduced from the TG30's ~2000 rays by `src/rm_policy/rm_policy/scan_resampler.py`. The policy trained on a simulated sensor with one ray per beam, no dropout and no view of its chassis. Measured facts about the real sensor decide how the reduction reproduces it.
 
 ## About two rays per bin, and a third of them missing
 
 The TG30 returns ~1514 rays across the 270° arc, about 2.1 per 0.375° bin, and drops 28 to 39% of rays as `0.0`. `nearest_valid_ray` takes the real return nearest each bin's centre. A bin whose two rays are both dropouts has no real return. On the fixtures in `tests/fixtures/`, strict per-bin sampling leaves 5.4 to 8.3% of the 720 bins in that state, each reading "clear at 5 m" with a real return a fraction of a degree away; simulation never produced that.
 
-`nearest_ray_search_window_bins: 2` lets such a bin borrow the real return nearest its centre within ±2 bins, a reach of 0.9375°. On the same fixtures this leaves 1.2 to 1.4% of bins empty. Rays inside the bin always win, so the window is a fallback and never a smoothing. A bin with no ray of its own is served the same way (bernard-3's RPLIDAR A1 spaces rays 1° apart, so two bins in three have none); a bin with no ray within reach is a fault. Tests pin both.
+`nearest_ray_search_window_bins: 2` lets such a bin borrow the real return nearest its centre within ±2 bins, a reach of 0.9375°. On the same fixtures this leaves 1.2 to 1.4% of bins empty. Rays inside the bin always win: the window is a fallback, never a smoothing. A bin with no ray of its own is served the same way (bernard-3's RPLIDAR A1 spaces rays 1° apart, so two bins in three have none); a bin with no ray within reach is a fault. Tests pin both.
 
 ## The 270° arc sees the chassis
 
