@@ -2004,6 +2004,31 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     Hazard accepted: a walled-in robot now backs 0.3 m blind, turns and
     redraws every 20 s (the cooldown) instead of standing still; KILL in
     hand, as before.
+  * **2026-11-17: a THIRD ROBOT brought up (Daniel: "just setup a new
+    robot... get the dashboard up and running on it").** Factory hostname
+    `yahboom`, Jetson Orin Nano Super, on the WIRED RobotLab segment at
+    192.168.4.102. Finding it cost a few rounds: a /24 sweep from this PC's
+    wifi found the PC itself (`192.168.4.125` is wlp2s0 on the lab /22), and
+    `yahboom.local` resolved to .102 but read "No route to host" because
+    the /22 wifi route swallows it; the fix was a `192.168.4.102/32` route
+    on the `robotlab-wired` profile (nmcli, no sudo needed), mirroring
+    bernard-1's. SSH alias `bernard-3` (lumen key accepted). The robot has
+    torch (NVIDIA build) and numpy but NO `ncps` and no internet, so the
+    wheel (plus `future`) was fetched on the Hetzner box and installed
+    offline (`pip install --user --no-index --find-links ~/wheels`).
+    `deploy_to_robot.sh bernard-3` + `deploy_upstream.sh bernard-3` (all
+    four checkpoints verified), all seven packages built in 33 s, stack up
+    KILLED with the dashboard at http://192.168.4.102:8080, odom 30 Hz,
+    12.1 V. **No lidar:** `lsusb` shows only the CH340 base board, so the
+    TG30's USB-C data cable is not in the Jetson (and the micro-USB power
+    lead belongs in the hub); the driver exits "Unknown error" and rm_safety
+    holds scan_stale. The robot tier ran for the first time on a machine
+    with torch and caught two of my own tests (float32 vs float64 on the
+    vendored bounds; random weights not saturating): fixed in 42393b9, then
+    850 passed. OWED on this unit: the lidar cable, `docs/calibration.md`
+    (base_calibration.yaml is bernard-1's and does not transfer), a
+    hostname of its own, and a ROS_DOMAIN_ID that is not 28 if it is ever
+    on with bernard-1 (run_stack.sh forces 28 on every robot).
   * **Second live run (zones on): the robot reached its first goal and HELD
     there** ("no candidate goal in free space"). The captured scan
     (`tests/fixtures/tg30_roam_hold_scan.yaml`, 2020 rays, 29 % no-returns)

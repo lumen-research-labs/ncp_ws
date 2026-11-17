@@ -72,7 +72,7 @@ bernard-1 sits on the RobotLab router (192.168.4.0/24, no internet), which overl
 
 ```bash
 nmcli con add type ethernet ifname enp1s0 con-name robotlab-wired \
-  ipv4.method manual ipv4.addresses 192.168.4.250/32 ipv4.routes 192.168.4.100/32 \
+  ipv4.method manual ipv4.addresses 192.168.4.250/32 ipv4.routes "192.168.4.100/32, 192.168.4.102/32" \
   ipv4.never-default yes connection.autoconnect-priority 10
 ```
 

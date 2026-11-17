@@ -38,17 +38,18 @@ at 20 Hz, until someone explicitly calls `/safety/reset`.
 
 ## 1. Connect
 
-### The two robots
+### The three robots
 
-| | `bernard-1` | `bernard-2` |
-|---|---|---|
-| address | `192.168.4.100` (static, `RobotLab` WiFi) | `bernard-2.local` (mDNS — its IP moves) |
-| SSH key | `~/.ssh/bernard-1` | `~/.ssh/bernard-2` |
-| user | `jetson` | `jetson` |
-| status | the working robot; all validation is on this unit | not brought up on the current stack |
+| | `bernard-1` | `bernard-2` | `bernard-3` |
+|---|---|---|---|
+| address | `192.168.4.100` (static, `RobotLab` WiFi) | `bernard-2.local` (mDNS — its IP moves) | `192.168.4.102` (wired RobotLab segment; factory hostname `yahboom`, mDNS `yahboom.local`) |
+| SSH key | `~/.ssh/lumen` | `~/.ssh/bernard-2` | `~/.ssh/lumen` |
+| user | `jetson` | `jetson` | `jetson` |
+| status | the working robot; all validation is on this unit | not brought up on the current stack | stack and dashboard up 2026-11-17; base calibration and lidar cabling still owed ([`calibration.md`](calibration.md)) |
 
-Both are `ROS_DOMAIN_ID=28`. **Running both on one network shares `/cmd_vel`** —
-do not power up the second one during a run.
+`run_stack.sh` puts every robot on `ROS_DOMAIN_ID=28`. **Two robots on one
+network share `/cmd_vel`**: power up one at a time until each has its own
+domain.
 
 ```bash
 ssh bernard-1        # the alias is already in ~/.ssh/config

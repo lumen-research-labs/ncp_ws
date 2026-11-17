@@ -14,17 +14,17 @@ not after something fails.
 
 ## Which robot am I on?
 
-| | bernard-1 | bernard-2 |
-|---|---|---|
-| Address | `192.168.4.100` static, wifi `RobotLab` | `bernard-2.local` (mDNS; IP has moved 3x) |
-| SSH key | `~/.ssh/bernard-1` | `~/.ssh/bernard-2` |
-| Board | Jetson Orin **NX** 16GB | Jetson Orin **Nano** Super |
-| Internet | **NONE** — RobotLab has no WAN uplink | via lab wifi |
-| Clock | **~3 months behind, no NTP** (see §5) | synced |
-| Camera | Microdia USB webcam (`0c45:6340`) | Astra Plus (depth) |
-| Extra HW | mic, gamepad, LED badge (cradle-era) | — |
-| Other repos | `~/Desktop/cradle`, `~/Desktop/firmware`, `~/cpt_ws` | `~/Desktop/firmware` |
-| Lidar | YDLIDAR TG30, serial …0082 | YDLIDAR TG30, serial …0084 |
+| | bernard-1 | bernard-2 | bernard-3 |
+|---|---|---|---|
+| Address | `192.168.4.100` static, wifi `RobotLab` | `bernard-2.local` (mDNS; IP has moved 3x) | `192.168.4.102`, WIRED RobotLab segment (reach it via `enp1s0`: a `192.168.4.102/32` route in the `robotlab-wired` profile, else the lab wifi /22 swallows it as "No route to host"); factory hostname `yahboom` |
+| SSH key | `~/.ssh/lumen` | `~/.ssh/bernard-2` | `~/.ssh/lumen` (factory password `yahboom`) |
+| Board | Jetson Orin **NX** 16GB | Jetson Orin **Nano** Super | Jetson Orin **Nano** Super (6 cores, 7 GB, 12 GB disk free) |
+| Internet | **NONE** — RobotLab has no WAN uplink | via lab wifi | **NONE**; `ncps` was installed from a wheel fetched on the training box (`~/wheels`) |
+| Clock | **~3 months behind, no NTP** (see §5) | synced | right on 2026-11-17; push it anyway |
+| Camera | Microdia USB webcam (`0c45:6340`) | Astra Plus (depth) | unchecked |
+| Extra HW | mic, gamepad, LED badge (cradle-era) | — | — |
+| Other repos | `~/Desktop/cradle`, `~/Desktop/firmware`, `~/cpt_ws` | `~/Desktop/firmware` | none; `~/ncp_ws` + `~/NCP-on-Rosmaster` deployed 2026-11-17 |
+| Lidar | YDLIDAR TG30, serial …0082 | YDLIDAR TG30, serial …0084 | not seen yet: no CP2102 on USB on 2026-11-17 (data cable unplugged); only the CH340 base board |
 
 Both are `ROS_DOMAIN_ID=28`, both run ROS2 Humble natively on the host, both
 have the same lidar model (consecutive units from one batch).
