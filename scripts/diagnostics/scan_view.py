@@ -142,14 +142,20 @@ def main() -> None:
     args = ap.parse_args()
     rclpy.init()
     node = _ScanTap(args.topic)
-    threading.Thread(target=rclpy.spin, args=(node,), daemon=True).start()
+    # The HTTP server lives in a daemon thread and rclpy owns the main
+    # thread: rclpy installs the SIGINT/SIGTERM handlers, and a `kill` then
+    # ends spin() and the process. The other way round (server in main)
+    # left a page serving a frozen scan with no subscriber behind it
+    # (2026-11-18).
     server = ThreadingHTTPServer(("0.0.0.0", args.port), _make_handler(args.topic))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"scan_view: http://0.0.0.0:{args.port}/  ({args.topic})", flush=True)
     try:
-        server.serve_forever()
+        rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
+        server.shutdown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
