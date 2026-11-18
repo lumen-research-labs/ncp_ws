@@ -47,7 +47,10 @@ Several policy nodes run at once (`ncp.launch.py profiles:=`, one per row of
 policy most recently selected, else the first one publishing
 (`rm_dashboard/sources.py`). The header names it next to its checkpoint
 hash, and the observation panel, the chain and the command table read its
-debug stream and request topic.
+debug stream and request topic. The header and the tab title also name the
+ROBOT (from `robot_profile_path`, this unit's `config/robots/<name>.yaml`),
+so two open dashboards cannot be confused; the node refuses to run on a
+domain other than the profile's.
 
 with **rate, jitter and staleness on every hop**, plus safety state/reason/
 `min_range`, per-wheel base telemetry with its flags, and the SLAM panel.

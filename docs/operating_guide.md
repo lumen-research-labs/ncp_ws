@@ -25,9 +25,12 @@ Open this in its own terminal, before you start anything, and leave it there:
 
 ```bash
 ssh bernard-1
-source /opt/ros/humble/setup.bash && export ROS_DOMAIN_ID=28
+source /opt/ros/humble/setup.bash && source ~/ncp_ws/scripts/robot_env.sh
 ros2 service call /safety/kill std_srvs/srv/Trigger
 ```
+
+`robot_env.sh` puts the shell on THIS robot's ROS domain, from its profile
+(`config/robots/<name>.yaml`). A stop button on another domain stops nothing.
 
 The dashboard also has a **KILL** button, which does the same thing.
 
@@ -45,12 +48,15 @@ at 20 Hz, until someone explicitly calls `/safety/reset`.
 | address | `192.168.4.100` (static, `RobotLab` WiFi) | `bernard-2.local` (mDNS — its IP moves) | `192.168.4.102` (wired RobotLab segment; factory hostname `yahboom`, mDNS `yahboom.local`) |
 | SSH key | `~/.ssh/lumen` | `~/.ssh/bernard-2` | `~/.ssh/lumen` |
 | user | `jetson` | `jetson` | `jetson` |
-| lidar | YDLIDAR TG30 (`lidar:=tg30`, the default) | YDLIDAR TG30 (`lidar:=tg30`) | SLAMTEC RPLIDAR A1 mounted zero-backward (`lidar:=a1 lidar_yaw_deg:=180`, both required) |
-| status | the working robot; all validation is on this unit | not brought up on the current stack | stack and dashboard up 2026-11-17; base calibration and lidar cabling still owed ([`calibration.md`](calibration.md)) |
+| profile | `config/robots/bernard-1.yaml`: domain 28, TG30, yaw 0, the measured zones | none yet | `config/robots/bernard-3.yaml`: domain 29, RPLIDAR A1 mounted zero-backward (yaw 180), no zones, its own calibration file |
+| status | the working robot; all validation is on this unit | not brought up on the current stack | stack and dashboard up 2026-11-17; base calibration a copy, lidar rear half blocked at the mount ([`add_a_robot.md`](add_a_robot.md)) |
 
-`run_stack.sh` puts every robot on `ROS_DOMAIN_ID=28`. **Two robots on one
-network share `/cmd_vel`**: power up one at a time until each has its own
-domain.
+**One profile per robot.** `run_stack.sh` resolves it from the hostname,
+puts the stack on the profile's ROS domain and configures the lidar driver,
+its yaw and the base calibration from it; no per-unit launch arguments.
+bernard-1 and bernard-3 run on distinct domains, so both can be on at once,
+each with its own dashboard and stop button. Workstation `ros2` tools see one
+robot at a time: `export ROS_DOMAIN_ID=<its domain>`.
 
 ```bash
 ssh bernard-1        # the alias is already in ~/.ssh/config
@@ -160,8 +166,9 @@ bash scripts/run_stack.sh command_source:=teleop with_slam:=true
 ```
 
 `run_stack.sh` sources the four ROS setup files a non-interactive shell does
-not get from `~/.bashrc`, sets `ROS_DOMAIN_ID=28`, and passes every argument
-straight through to `ncp.launch.py`.
+not get from `~/.bashrc`, sources `robot_env.sh` (which prints
+`robot: <name> (domain N, <profile>)` and refuses an unknown hostname), and
+passes every argument straight through to `ncp.launch.py`.
 
 This starts about 14 nodes: lidar → `rm_base` → odom chain → `rm_safety` →
 scan bridge → `policy_node_m8v2`, `policy_node_m4`, `policy_node_m9` and `policy_node_dynabarn` →

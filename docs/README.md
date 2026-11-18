@@ -10,6 +10,7 @@
 | [`checkpoints.md`](checkpoints.md) | The network behind each profile (M4, M8-v2, M9, DynaBARN-X3): files, hashes, runs, held-out figures, exports. | current |
 | [`add_a_policy_profile.md`](add_a_policy_profile.md) | **How to add a trained checkpoint as a profile** with its own dashboard button: export, contract file, table row, pins, deploy. | current (4.0.0) |
 | [`lidar_sampling.md`](lidar_sampling.md) | Why the 720-beam lidar block is reduced the way it is: the search window, the self-occlusion zones and the `0.0` no-return mapping, with the measurements behind each. | current |
+| [`add_a_robot.md`](add_a_robot.md) | **How to add a robot.** One profile file per unit (`config/robots/<name>.yaml`): hostname, ROS domain, lidar model and yaw, mount measurements, base calibration; how to measure each and verify the deploy. | current |
 | [`calibration.md`](calibration.md) | **How to bring `rm_base` up on a NEW robot.** The per-robot measurement procedure, in order, wheels-up before wheels-down. The numbers in `config/base_calibration.yaml` are bernard-1's and do not transfer. | current |
 | [`safety_validation.md`](safety_validation.md) | The Phase 2 sign-off record: which test tiers have passed, what is still operator-only, and which limits are running above their signed values. | current |
 | [`workstation_setup.md`](workstation_setup.md) | **Set up a fresh PC.** Packages, the two clones side by side, tests, the workstation build, SSH and the wired link to the robot, deploy. | current |

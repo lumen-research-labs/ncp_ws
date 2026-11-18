@@ -21,6 +21,7 @@ from that one fact.
 | `rm_safety/safety_logic.py` | The decision core. **Pure**: no ROS, no I/O, no clock reads, no logging. One function, `evaluate()`, takes a snapshot and returns a `Decision`. |
 | `rm_safety/safety_node.py` | The ROS2 shell. Owns the timer, the subscriptions, the services, the kill-state file — and the sole `/cmd_vel` publisher. |
 | `rm_safety/command_sources.py` | The command-source table, loaded and validated from `config/topics.yaml`. Pure. `ncp.launch.py` and `rm_dashboard` import it so all three agree on every name and topic; nothing here imports them. |
+| `rm_safety/robot_profile.py` | The robot profiles, `config/robots/<name>.yaml`, resolved by hostname. Pure. The launches, the scripts, `rm_policy` and `rm_dashboard` read a unit's domain, lidar and mount through it. See [`docs/add_a_robot.md`](../../docs/add_a_robot.md). |
 
 The split is deliberate and must not be collapsed. `safety_logic` has no clock
 and no I/O, so every safety decision in the system is reachable from a unit

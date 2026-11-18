@@ -62,6 +62,19 @@ def test_docs_have_no_em_dash(name) -> None:
     assert "—" not in _read(os.path.join(_DOCS, name)), f"docs/{name} has an em-dash"
 
 
+def test_the_robot_how_to_names_every_fact_the_profile_holds() -> None:
+    """What the robot profile tests pin, the how-to must send the reader to."""
+    text = _read(os.path.join(_DOCS, "add_a_robot.md"))
+    for needle in (
+        "config/robots/<name>.yaml", "hostnames", "ros_domain_id", "model", "yaw_deg",
+        "self_occlusion_zones_deg", "body_floor_m", "body_radius_m", "calibration",
+        "encoder_sign", "robot_profile.py", "test_robot_profile.py", "scan_view.py",
+        "per_motor.py", "calibration.md", "run_stack.sh", "deploy_to_robot.sh",
+        "sign_fault", "ROS_DOMAIN_ID",
+    ):
+        assert needle in text, f"add_a_robot.md does not mention {needle!r}"
+
+
 def test_the_profile_how_to_names_every_registration_point() -> None:
     """What the profile tests pin, the how-to must send the reader to."""
     text = _read(os.path.join(_DOCS, "add_a_policy_profile.md"))

@@ -1,6 +1,6 @@
 # Plan: one stack, several robots: a robot profile per unit
 
-> Status: APPROVED 2026-11-18 (Daniel); BUILDING on `feat/dynabarn-profile`. The previous plans this file held (M9 profile, body floor, pinned-is-stopped) are built and deployed; git history keeps them. Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22). Revised in place as implementation finds things.
+> Status: BUILT 2026-11-18 on `feat/dynabarn-profile` (commits 6343b60, 6df144d, 91f8b8a, db1fdd8 and the docs commit); suite 850 green; DEPLOY to bernard-3 next, bernard-1 when it is back. The previous plans this file held (M9 profile, body floor, pinned-is-stopped) are built and deployed; git history keeps them. Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22). Revised in place as implementation finds things.
 
 ## Context
 

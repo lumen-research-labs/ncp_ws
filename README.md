@@ -120,9 +120,9 @@ YDLIDAR TG30 ──► /scan ──┬──► policy_node_m8v2 ──► /poli
 | Controller board | Jetson Orin Nano Super — L4T R36.4.3 / JetPack 6.2 |
 | ROS2 distro | Humble, running **natively on the Jetson host** (not in a container) |
 | Physical E-stop | **None** — `/safety/kill` only |
-| `ROS_DOMAIN_ID` | **28** (both machines) |
+| `ROS_DOMAIN_ID` | per robot, from its profile (`config/robots/<name>.yaml`): bernard-1 28, bernard-3 29 |
 | Lidar | YDLIDAR **TG30** (TOF), 360°, ~10.1 Hz. Encodes no-returns as `0.0`, not `inf`. |
-| Robots | `bernard-1` at `192.168.4.100` (the working unit) · `bernard-2` at `bernard-2.local` |
+| Robots | one profile each under `config/robots/` ([`docs/add_a_robot.md`](docs/add_a_robot.md)): `bernard-1` at `192.168.4.100` (the working unit, TG30) · `bernard-3` at `192.168.4.102` (RPLIDAR A1) · `bernard-2` at `bernard-2.local` (no profile yet) |
 | Policies | `m8v2`: interface **4.0.0**, 724-dim observation, 720 beams over 270° · `m4`: interface 3.0.0, 36-dim, 32 beams over 180°. Both run by default; `command_source` (a dashboard button) picks the one that drives. Action is `[vx, wz]` in both. |
 
 `bernard-1` has **no internet** and its clock resets ~3 months behind on every
@@ -192,9 +192,11 @@ Full procedure, including verification and troubleshooting:
 BUILD-PLAN.md   the authority on scope and phase gates
 CLAUDE.md       the working-state project brain and session log
 config/         interface.yaml (THE contract), safety_limits.yaml,
-                base_calibration.yaml, waypoint.yaml, roam.yaml,
+                base_calibration*.yaml, waypoint.yaml, roam.yaml,
                 slam_toolbox.yaml, topics.yaml, fastdds_unicast_peers.xml,
-                interface_m4.yaml, interface_m9.yaml, interface_dynabarn.yaml
+                interface_m4.yaml, interface_m9.yaml, interface_dynabarn.yaml,
+                robots/<name>.yaml (one profile per robot: domain, lidar,
+                mount measurements, calibration file)
 docs/           architecture, operating_guide, roam, interface_contract,
                 interface_versions, checkpoints, add_a_policy_profile, safety_validation,
                 deployment, workstation_setup

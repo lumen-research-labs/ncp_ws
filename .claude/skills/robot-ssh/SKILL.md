@@ -24,15 +24,16 @@ not after something fails.
 | Camera | Microdia USB webcam (`0c45:6340`) | Astra Plus (depth) | unchecked |
 | Extra HW | mic, gamepad, LED badge (cradle-era) | — | — |
 | Other repos | `~/Desktop/cradle`, `~/Desktop/firmware`, `~/cpt_ws` | `~/Desktop/firmware` | none; `~/ncp_ws` + `~/NCP-on-Rosmaster` deployed 2026-11-17 |
-| Lidar | YDLIDAR TG30, serial …0082 | YDLIDAR TG30, serial …0084 | **SLAMTEC RPLIDAR A1** (model 0x18, fw 1.29): `run_stack.sh lidar:=a1 lidar_yaw_deg:=180` (its zero points BACKWARD; scan_rotate_node turns the scan at the source); sllidar_ros2 at 115200, scan_mode Standard. The TG30 driver opens its port and reads nothing |
+| Lidar | YDLIDAR TG30, serial …0082 | YDLIDAR TG30, serial …0084 | **SLAMTEC RPLIDAR A1** (model 0x18, fw 1.29), its zero pointing BACKWARD; the profile says `model: a1`, `yaw_deg: 180` and scan_rotate_node turns the scan at the source; sllidar_ros2 at 115200, scan_mode Standard. The TG30 driver opens its port and reads nothing |
+| Profile | `config/robots/bernard-1.yaml`, domain **28** | none yet | `config/robots/bernard-3.yaml`, domain **29** |
 
-Both are `ROS_DOMAIN_ID=28`, both run ROS2 Humble natively on the host, both
-have the same lidar model (consecutive units from one batch).
-
-**DOMAIN ID COLLISION:** both robots default to domain 28. If they are ever
-powered on the same network they share every topic — including `/cmd_vel`, so
-one robot's commands drive the other. Give one of them a different domain
-before running them together.
+All run ROS2 Humble natively on the host. **Each robot has its own ROS
+domain, from its profile** (`config/robots/<name>.yaml`, resolved by
+hostname; `source ~/ncp_ws/scripts/robot_env.sh` exports it). bernard-1 and
+bernard-3 can therefore be on at once; a remote command meant for one must
+be on that one's domain or it sees nothing (or the other robot). Two robots
+on ONE domain share every topic, `/cmd_vel` included: one robot's commands
+drive the other. Never give two profiles the same domain (the loader refuses).
 
 ## 0. Session preflight — do this first, every session
 
@@ -63,10 +64,13 @@ early for non-interactive shells, before the ROS lines. So
 ssh bernard-1 'source /opt/ros/humble/setup.bash && \
   source /home/jetson/yahboomcar_ros2_ws/software/library_ws/install/setup.bash && \
   source /home/jetson/yahboomcar_ros2_ws/yahboomcar_ws/install/setup.bash && \
-  export ROS_DOMAIN_ID=28 && \
+  source /home/jetson/ncp_ws/scripts/robot_env.sh && \
   export FASTRTPS_DEFAULT_PROFILES_FILE=/home/jetson/fastdds_unicast.xml && \
   <COMMAND>'
 ```
+
+`robot_env.sh` exports THIS robot's `ROS_DOMAIN_ID` from its profile (28 on
+bernard-1, 29 on bernard-3). A hardcoded 28 on bernard-3 talks to nothing.
 
 Sourcing the Yahboom workspace also matters for *checking whether a package
 exists*: `ydlidar_ros2_driver` looks absent until that workspace is sourced.
@@ -110,8 +114,8 @@ ssh bernard-1 'ls -l /dev/serial/by-id/ /dev/rplidar /dev/ydlidar'
 On bernard-1 and bernard-2 the unit is a **YDLIDAR TG30**, not an RPLIDAR —
 despite `RPLIDAR_TYPE=a1` in their `.bashrc` banners. On **bernard-3 it IS an
 RPLIDAR A1** (stock Yahboom; probed 2026-11-18, GET_INFO answers at 115200),
-so that robot launches with `lidar:=a1` and the rules below about `sllidar`
-do not apply to it. Never use
+so its profile says `model: a1` and the rules below about `sllidar` do not
+apply to it. Never use
 SLAMTEC `sllidar` on it; its protocol times out and that red herring cost
 three sessions.
 

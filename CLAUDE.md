@@ -24,7 +24,7 @@ the authority; this file is the working-state summary of it.
 | ROS2 distro on robot | Humble |
 | Physical E-stop | **NONE.** `/safety/kill` is the only stop; battery pull is last resort |
 | Network | Same subnet, direct DDS — no NAT/VLAN, no discovery server |
-| `ROS_DOMAIN_ID` | **28** — confirmed from the host banner 2026-08-08 |
+| `ROS_DOMAIN_ID` | per robot, from `config/robots/<name>.yaml` (2026-11-18): bernard-1 28 (the host banner's, 2026-08-08), bernard-3 29 |
 | Robot address | `bernard-2.local` (mDNS) — IP has changed 3x this project (last seen `192.168.0.190`, 2026-08-14); `~/.ssh/config` now resolves by mDNS, not a hardcoded IP |
 | Camera | `astraplus` per host banner — NOT the Astra Pro the previous team documented |
 
@@ -97,8 +97,11 @@ ncp_ws/
 ├── config/
 │   ├── interface.yaml      # THE FROZEN CONTRACT — obs/action shape, units, control rate
 │   ├── safety_limits.yaml  # clamps, e-stop distances, timeouts
-│   └── topics.yaml         # the command-source table: the rows rm_safety
-│                           #   forwards; the launch and dashboard read it too
+│   ├── topics.yaml         # the command-source table: the rows rm_safety
+│   │                       #   forwards; the launch and dashboard read it too
+│   └── robots/<name>.yaml  # ONE PROFILE PER ROBOT, resolved by hostname: ROS
+│                           #   domain, lidar model + yaw, mount measurements
+│                           #   (zones, body floor, radius), calibration file
 ├── src/
 │   ├── rm_interfaces/  # custom msg/srv defs (ROBOT + WORKSTATION)
 │   ├── rm_safety/      # ROBOT — sole publisher of /cmd_vel
@@ -2096,6 +2099,40 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     ncp_ws` five branches, `NCP-on-Rosmaster` `feat/720-beam-270fov`, new
     private `optomotive`), and bernard-1 came back after a week off the
     network (clock pushed, stack up with the default profiles).
+
+- 2026-11-18 (later): **ONE STACK, SEVERAL ROBOTS: A ROBOT PROFILE PER UNIT**
+  (branch `feat/dynabarn-profile`, five commits, `PLAN.md`). Daniel asked
+  whether running bernard-1 and bernard-3 at the same time needs two
+  dashboards or a dashboard option. Neither: the dashboard is served from
+  each robot. What differed were launch-time facts about the unit, each
+  patched in a different place (domain 28 hardcoded in `run_stack.sh`,
+  `lidar:=` and `lidar_yaw_deg:=` arguments, bernard-1's self-occlusion
+  zones and body floor written into four contracts, `safety_limits.yaml`
+  and `roam.yaml`, bernard-1's calibration file, the encoder negation in
+  `wheel_control.py`). Now `config/robots/<name>.yaml` holds them all
+  (`rm_safety/robot_profile.py`, pure loader: refuses a malformed file
+  naming the key, two profiles sharing a hostname or domain, an unknown
+  hostname listing the known names). `scripts/robot_env.sh` resolves it
+  from `hostname` (or `ROBOT=`) and exports `ROS_DOMAIN_ID`,
+  `RM_ROBOT_PROFILE`; `run_stack.sh`, `stack_down.sh`, `bench_up.sh`,
+  `bench_down.sh`, `drive_test.sh` source it. `ncp.launch.py robot_profile:=`
+  (default: the hostname's) picks the lidar driver and the yaw relay,
+  rm_base's calibration file, sets `ROS_DOMAIN_ID` for every child and
+  refuses a shell whose domain differs (the stop button must share it).
+  `lidar_contract_from(cfg, mount)` and `Limits.from_dict(cfg, mount)` take
+  the zones and the floor from the profile and REFUSE a contract or limits
+  file that still carries them; `slam.launch.py` takes the sanitizer's
+  radius from it; policy_node sets roam's body floor from it. `encoder_sign`
+  (+1 / -1, REQUIRED) in every calibration file: bernard-1 -1, bernard-3 +1
+  (`config/base_calibration_bernard3.yaml`, a copy of bernard-1's generic
+  wheel model, not a fit). The dashboard takes `robot_profile_path`, puts
+  the robot's name in the header and the tab title, and refuses a domain
+  other than the profile's. bernard-1's profile carries the numbers the
+  files carried, so its behaviour is unchanged (the tests rebuild the old
+  `LidarContract` and `Limits` from it). bernard-1: domain 28; bernard-3:
+  domain 29. `docs/add_a_robot.md` is the how-to. 850 workstation tests.
+  Deploy to bernard-3 follows; bernard-1 when it is back (its hostname is
+  listed unverified).
 
 ## 4. Current Goal
 

@@ -76,7 +76,7 @@ nmcli con add type ethernet ifname enp1s0 con-name robotlab-wired \
   ipv4.never-default yes connection.autoconnect-priority 10
 ```
 
-Test with `ssh bernard-1 echo up`. A silent robot is powered off, not a routing problem. The traps that cost sessions (the clock, the base-board serial port, the lidar symlink race, the `pkill -f` self-match) are in `.claude/skills/robot-ssh/SKILL.md`. Read it before the first remote command.
+Test with `ssh bernard-1 echo up`. A silent robot is powered off, not a routing problem. Each robot has its own ROS domain (`config/robots/<name>.yaml`): `export ROS_DOMAIN_ID=<it>` before any workstation `ros2` command. The traps that cost sessions (the clock, the base-board serial port, the lidar symlink race, the `pkill -f` self-match) are in `.claude/skills/robot-ssh/SKILL.md`. Read it before the first remote command.
 
 ## 6. Deploy
 

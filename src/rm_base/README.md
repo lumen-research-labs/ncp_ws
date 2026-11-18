@@ -1,6 +1,6 @@
 # `rm_base` — the mecanum base driver
 
-**The calibration numbers in `config/base_calibration.yaml` are bernard-1's and do NOT transfer to another robot.** To bring the base up on a new unit, follow [`docs/calibration.md`](../../docs/calibration.md).
+**The calibration numbers in `config/base_calibration.yaml` are bernard-1's and do NOT transfer to another robot.** Each robot's profile (`config/robots/<name>.yaml` `base.calibration`) names its own file, and every file carries that board's `encoder_sign`. To bring the base up on a new unit, follow [`docs/calibration.md`](../../docs/calibration.md).
 
 **Runs on: the robot.** Replaces the Yahboom `Mcnamu_driver_X3`. Owns the
 base-board serial link and turns `/cmd_vel` into four wheel PWM values.
