@@ -1,6 +1,6 @@
 # Plan: the safety zones are clearances beyond the robot's `min_range_m`
 
-> Status: APPROVED 2026-11-18 (Daniel: "shouldn't we just have min range m and then we set it to the length to bumper or min lidar length? And yes go ahead"); BUILDING on `feat/dynabarn-profile`. The previous plan (one profile per robot) is built and deployed to bernard-3; git history keeps it. Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22).
+> Status: BUILT and DEPLOYED to bernard-3 2026-11-18 (cdd27f8; 872 workstation tests; approved by Daniel: "shouldn't we just have min range m and then we set it to the length to bumper or min lidar length? And yes go ahead"). bernard-1 owed when it is back (its zones are unchanged by construction). The previous plan (one profile per robot) is built and deployed to bernard-3; git history keeps it. Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22).
 
 ## Context
 

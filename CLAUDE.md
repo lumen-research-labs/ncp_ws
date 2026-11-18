@@ -2168,6 +2168,27 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   * `scan_view.py` names its node by port (0551e1c): two viewers were a
     false "duplicate node" alarm. A stale dashboard page after RESET MAP
     showed no robot and no goal; a reload fixed it (not chased).
+  * **bernard-3 DROVE INTO THINGS WITH BOTH ZONES ON, and the zones were
+    the reason** (Daniel's hunch: "the stopping point is too close").
+    `safety_limits.yaml`'s 0.15 / 0.55 m were LIDAR RANGES and bernard-1's:
+    its TG30 sees to 0.05 m and its bumper is 0.07 m from the lidar (stock
+    mount: laser_link +0.0435, chassis mesh to +0.116). The A1 returns
+    nothing inside 0.15 m, so on bernard-3 the stop zone sat on the blind
+    radius and could NEVER fire, and the slow zone failed open: the object
+    scaling the speed toward zero crossed into the blind radius 7.5 cm
+    before the bumper, vanished from the arcs, and the scale jumped back up.
+    Fix (cdd27f8, PLAN.md, Daniel's simplification): the profile carries
+    `lidar.min_range_m`, the larger of the sensor's blind radius and the
+    lidar-to-bumper distance (bernard-1 0.07, bernard-3 0.15), and
+    safety_limits.yaml carries `stop_clearance_m` 0.08 / `slow_clearance_m`
+    0.48 beyond it; `Limits.from_dict` adds the two (the EstopLimits ranges
+    keep their meaning; evaluate, slow_scale, retreat, dashboard untouched)
+    and refuses a file with `stop_zone_m`/`slow_zone_m` or a mount without
+    `min_range_m`. bernard-1 unchanged by construction (0.15 / 0.55);
+    bernard-3 0.23 / 0.63 from the lidar. Deployed and the start line
+    verified the same day. LESSON: any safety distance measured from the
+    sensor is a per-robot number; write it from the body, or from the
+    nearest range the sensor can see.
 
 ## 4. Current Goal
 
