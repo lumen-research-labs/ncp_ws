@@ -1,6 +1,6 @@
 # Plan: one stack, several robots: a robot profile per unit
 
-> Status: BUILT 2026-11-18 on `feat/dynabarn-profile` (commits 6343b60, 6df144d, 91f8b8a, db1fdd8 and the docs commit); suite 850 green; DEPLOY to bernard-3 next, bernard-1 when it is back. The previous plans this file held (M9 profile, body floor, pinned-is-stopped) are built and deployed; git history keeps them. Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22). Revised in place as implementation finds things.
+> Status: DEPLOYED to bernard-3 2026-11-18 (commits 6343b60, 6df144d, 91f8b8a, db1fdd8, 75936d9; 854 workstation tests). Verified on the robot: `robot: bernard-3 (domain 29, ...)` from the scripts, the A1 driver and the 180 deg relay from the profile with no lidar arguments, 18 nodes, one `/cmd_vel` publisher, no duplicate node names, 0 errors, nothing of this robot visible on domain 28, the dashboard snapshot carries `robot: {bernard-3, 29, a1, 180}`. OWED: the jog (both ways, no `sign_fault`) is the operator's; bernard-1 was unreachable (powered off): confirm its hostname, deploy, verify unchanged start lines; battery on bernard-3 read 10.0 V. The previous plans this file held (M9 profile, body floor, pinned-is-stopped) are built and deployed; git history keeps them. Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22). Revised in place as implementation finds things.
 
 ## Context
 
