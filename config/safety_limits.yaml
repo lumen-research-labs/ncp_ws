@@ -95,7 +95,8 @@ estop:
   # SAFETY layer has to:
   #     0.90 m  policy spins away         (upstream obstacle_dist)
   #     0.55 m  safety starts scaling     (this)
-  #     0.35 m  safety zeroes and latches (stop_zone_m)
+  #     0.35 m  safety zeroes and latches (the stop zone; both are now
+  #             clearances beyond lidar.min_range_m, see below)
   #
   # Unaffected by either move: the chassis standoffs at ~0.48-0.54 m sit
   # inside self_occlusion_zones_deg below and are dropped before the arc
@@ -116,15 +117,26 @@ estop:
   # measured chassis extent, see self_occlusion_zones_deg). Reducing this
   # radius further REQUIRES widening the cone to compensate, or the slow zone
   # stops covering the robot's own width.
-  slow_zone_m: 0.55     # scale commanded velocity down proportionally
-  # 0.35 -> 0.15, operator decision 2026-08-29. Band is now 0.40 m against
-  # 0.117 m of stopping distance (3.4x), so the margin is not the constraint.
-  # WHAT IS: 0.15 m is measured from the LIDAR, and the chassis standoffs
-  # read 0.106-0.125 m (see self_occlusion_zones_deg). Those are masked, but
-  # the gap between the mask and this threshold is now ~2.5 cm — any chassis
-  # return that falls outside the masked sectors latches the e-stop
-  # immediately. That was the 2026-08-14 permanent-latch bug.
-  stop_zone_m: 0.15     # zero velocity and LATCH
+  #
+  # CLEARANCES, NOT LIDAR RANGES (2026-11-18). Both zones are measured
+  # beyond the robot profile's lidar.min_range_m, the larger of the sensor's
+  # blind radius and the lidar-to-bumper distance; rm_safety adds the two
+  # and runs on the sum. The numbers above (0.55 / 0.15 from the lidar) were
+  # bernard-1's: its TG30 sees to 0.05 m and its bumper is 0.07 m out, so
+  # min_range 0.07 + these clearances reproduces them exactly. bernard-3's
+  # A1 is blind inside 0.15 m, so the same 0.15 m stop zone written as a
+  # range could never fire, and the slow zone failed open as an object
+  # crossed into the blind radius 7.5 cm before the bumper; with min_range
+  # 0.15 it gets 0.63 / 0.23 from the lidar. A stop_zone_m or slow_zone_m
+  # key here is refused.
+  slow_clearance_m: 0.48   # scale commanded velocity down proportionally
+  # Stop: 0.35 -> 0.15 (from the lidar), operator decision 2026-08-29, i.e.
+  # 8 cm in front of bernard-1's bumper. The band to the slow zone is 0.40 m
+  # against 0.117 m of stopping distance (3.4x), so the margin is not the
+  # constraint. WHAT WAS: bernard-1's chassis standoffs read 0.106-0.125 m
+  # and the gap to a 0.15 m threshold was ~2.5 cm; the body floor
+  # (profile lidar.body_floor_m) now drops them before the arc check.
+  stop_clearance_m: 0.08   # zero velocity and LATCH
   forward_arc_deg: 90   # centered on +x. THE STOP ZONE'S ARC, and the default
                         # for the slow zone when the two keys below are unset.
 

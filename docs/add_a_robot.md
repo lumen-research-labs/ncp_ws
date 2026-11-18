@@ -16,6 +16,7 @@ lidar:
   self_occlusion_zones_deg: []      # [[lo, hi], ...] bearings the chassis blocks
   body_floor_m: 0.12                # a return nearer than this is the robot
   body_radius_m: 0.25               # the sanitizer hides returns under this
+  min_range_m: 0.15                 # the larger of the blind radius and lidar-to-bumper
 base:
   calibration: config/base_calibration_bernard4.yaml
 ```
@@ -50,8 +51,13 @@ python3 scripts/diagnostics/scan_view.py        # http://<robot>:8090
   source, so every consumer reads the robot's frame.
 - **self_occlusion_zones_deg**: bearings where the chassis returns under
   `body_floor_m` in every scan. On an A1 (minimum range 0.15 m) usually none.
-- **body_floor_m** and **body_radius_m**: the nose and the corner sweep; 0.12
-  and 0.25 on the X3. The floor must be below `estop.stop_zone_m`.
+- **body_floor_m** and **body_radius_m**: the standoffs and the corner sweep;
+  0.12 and 0.25 on the X3.
+- **min_range_m**: the larger of the sensor's blind radius (TG30 about 0.05,
+  A1 0.15) and the distance from the lidar centre to the front bumper (0.075
+  on the stock mount). The safety stop and slow zones are
+  `safety_limits.yaml`'s clearances beyond this number, so a blind sensor
+  gets its zones pushed out automatically.
 
 ## 3. The base
 

@@ -74,6 +74,12 @@ def real_limits() -> Limits:
     return Limits.from_dict(raw, mount)
 
 
+def _b1_mount() -> dict:
+    """bernard-1's lidar block, for tests that rebuild limits from a tweaked file."""
+    with open(os.path.join(_REPO_ROOT, "config", "robots", "bernard-1.yaml"), "r") as fh:
+        return yaml.safe_load(fh)["lidar"]
+
+
 def _make_inputs(
     limits: Limits,
     *,
@@ -1347,7 +1353,7 @@ class TestStopZoneRetreat:
         with open(_CONFIG_PATH, "r") as fh:
             raw = yaml.safe_load(fh)
         del raw["estop"]["retreat_max_vx"]
-        absent = Limits.from_dict(raw)
+        absent = Limits.from_dict(raw, _b1_mount())
         assert absent.estop.retreat_max_vx == 0.0 and not absent.estop.retreat_enabled
         for limits in (absent, _with_estop(real_limits, retreat_max_vx=0.0)):
             dec = evaluate(_latched_inputs(limits), limits)
@@ -1366,7 +1372,7 @@ class TestStopZoneRetreat:
             raw = yaml.safe_load(fh)
         raw["estop"].update(fields)
         with pytest.raises(ValueError, match=fragment):
-            Limits.from_dict(raw)
+            Limits.from_dict(raw, _b1_mount())
 
     @pytest.mark.parametrize("override", [
         dict(is_killed=True), dict(scan_age_ms=1e6), dict(odom_stale=True),

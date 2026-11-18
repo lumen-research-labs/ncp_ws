@@ -68,7 +68,7 @@ def test_the_robot_how_to_names_every_fact_the_profile_holds() -> None:
     for needle in (
         "config/robots/<name>.yaml", "hostnames", "ros_domain_id", "model", "yaw_deg",
         "self_occlusion_zones_deg", "body_floor_m", "body_radius_m", "calibration",
-        "encoder_sign", "robot_profile.py", "test_robot_profile.py", "scan_view.py",
+        "encoder_sign", "min_range_m", "robot_profile.py", "test_robot_profile.py", "scan_view.py",
         "per_motor.py", "calibration.md", "run_stack.sh", "deploy_to_robot.sh",
         "sign_fault", "ROS_DOMAIN_ID",
     ):

@@ -29,7 +29,7 @@ def _good(**over) -> dict:
     d = {
         "robot": {"name": "testbot", "hostnames": ["testbot", "jetson-x"], "ros_domain_id": 40},
         "lidar": {"model": "tg30", "yaw_deg": 0.0, "self_occlusion_zones_deg": [[92.0, 123.0]],
-                  "body_floor_m": 0.12, "body_radius_m": 0.25},
+                  "body_floor_m": 0.12, "body_radius_m": 0.25, "min_range_m": 0.07},
         "base": {"calibration": "config/base_calibration.yaml"},
     }
     for k, v in over.items():
@@ -54,6 +54,8 @@ def test_the_shipped_profiles_load_and_agree() -> None:
     assert b1.lidar.self_occlusion_zones_deg == ((92.0, 123.0), (-135.0, -97.0))
     assert b1.lidar.body_floor_m == 0.12 and b1.lidar.body_radius_m == 0.25
     assert b3.lidar.self_occlusion_zones_deg == ()
+    # the TG30 sees to the bumper (0.07 m); the A1 is blind inside 0.15 m
+    assert b1.lidar.min_range_m == 0.07 and b3.lidar.min_range_m == 0.15
     assert os.path.isfile(b1.calibration_path) and os.path.isfile(b3.calibration_path)
     assert b1.calibration_path.endswith("base_calibration.yaml")
     assert b3.calibration_path.endswith("base_calibration_bernard3.yaml")
@@ -62,7 +64,7 @@ def test_the_shipped_profiles_load_and_agree() -> None:
 def test_the_mount_view_is_what_the_readers_take() -> None:
     b1 = {p.name: p for p in list_profiles(_ROBOTS)}["bernard-1"]
     assert b1.mount == {"self_occlusion_zones_deg": [[92.0, 123.0], [-135.0, -97.0]],
-                        "body_floor_m": 0.12, "body_radius_m": 0.25}
+                        "body_floor_m": 0.12, "body_radius_m": 0.25, "min_range_m": 0.07}
 
 
 def test_resolution_by_hostname_or_name() -> None:
@@ -93,6 +95,11 @@ def test_resolution_by_hostname_or_name() -> None:
     ({"lidar__body_floor_m": 0.3}, "body_floor_m"),
     ({"lidar__body_floor_m": -0.1}, "body_floor_m"),
     ({"lidar__body_radius_m": None}, "body_radius_m"),
+    ({"lidar__min_range_m": None}, "min_range_m"),
+    ({"lidar__min_range_m": 0.0}, "min_range_m"),
+    ({"lidar__min_range_m": -0.1}, "min_range_m"),
+    ({"lidar__min_range_m": 2.0}, "min_range_m"),
+    ({"lidar__min_range_m": "near"}, "min_range_m"),
     ({"base__calibration": "config/no_such_file.yaml"}, "base.calibration"),
     ({"base__calibration": None}, "base.calibration"),
 ])

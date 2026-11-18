@@ -88,7 +88,18 @@ class AccelerationLimits:
 
 @dataclass(frozen=True)
 class EstopLimits:
-    """Lidar e-stop zone configuration."""
+    """Lidar e-stop zone configuration.
+
+    ``slow_zone_m`` and ``stop_zone_m`` are LIDAR RANGES, what evaluate() and
+    slow_scale() compare min_range against. Since 2026-11-18 they are not
+    written in safety_limits.yaml: that file carries ``slow_clearance_m`` and
+    ``stop_clearance_m``, clearances beyond the robot profile's
+    ``lidar.min_range_m`` (the larger of the sensor's blind radius and the
+    lidar-to-bumper distance), and from_dict() adds the two. A zone written
+    as a lidar range was bernard-1's number: on bernard-3, whose A1 is blind
+    inside 0.15 m, a 0.15 m stop zone could never fire and the slow zone
+    failed open at the bumper.
+    """
     slow_zone_m: float
     stop_zone_m: float
     # The STOP zone's arcs, and the default for the slow zone.
@@ -164,6 +175,10 @@ class EstopLimits:
     # zones. 0.0 = off. See safety_limits.yaml estop.body_floor_m.
     body_floor_m: float = 0.0
     retreat_release_ticks: int = 10
+    # Where the two zones above came from (for the start line and the page).
+    min_range_m: float = 0.0
+    stop_clearance_m: float = 0.0
+    slow_clearance_m: float = 0.0
 
     @property
     def retreat_enabled(self) -> bool:
@@ -295,14 +310,35 @@ class Limits:
                 f"estop carries {stray}: mount facts live in the robot profile "
                 f"(config/robots/<name>.yaml lidar:), not in safety_limits.yaml"
             )
+        ranges = [k for k in ("stop_zone_m", "slow_zone_m") if k in e]
+        if ranges:
+            raise ValueError(
+                f"estop carries {ranges}: a zone written as a lidar range is one robot's "
+                f"number (on an A1, blind inside 0.15 m, a 0.15 m stop zone never fires). "
+                f"Write stop_clearance_m / slow_clearance_m, clearances beyond the robot "
+                f"profile's lidar.min_range_m."
+            )
         mount_zones: Tuple[Tuple[float, float], ...] = ()
         mount_floor = 0.0
+        mount_min_range = 0.0
         if mount is not None:
-            missing = [k for k in ("self_occlusion_zones_deg", "body_floor_m") if k not in mount]
+            missing = [k for k in ("self_occlusion_zones_deg", "body_floor_m", "min_range_m") if k not in mount]
             if missing:
                 raise ValueError(f"robot profile lidar block is missing {missing}")
             mount_zones = tuple((float(lo), float(hi)) for lo, hi in mount["self_occlusion_zones_deg"])
             mount_floor = float(mount["body_floor_m"])
+            mount_min_range = float(mount["min_range_m"])
+        stop_clear = float(e["stop_clearance_m"])
+        slow_clear = float(e["slow_clearance_m"])
+        if not (math.isfinite(mount_min_range) and mount_min_range >= 0.0):
+            raise ValueError(f"robot profile lidar.min_range_m ({mount_min_range}) must be finite and >= 0")
+        if not (math.isfinite(stop_clear) and stop_clear > 0.0):
+            raise ValueError(f"estop.stop_clearance_m ({stop_clear}) must be finite and > 0")
+        if not (math.isfinite(slow_clear) and slow_clear > stop_clear):
+            raise ValueError(
+                f"estop.slow_clearance_m ({slow_clear}) must be finite and exceed "
+                f"stop_clearance_m ({stop_clear}): slow_scale divides by the band between them"
+            )
         t = d["timeouts"]
 
         limits = Limits(
@@ -319,8 +355,14 @@ class Limits:
                 max_alpha_z=float(a["max_alpha_z"]),
             ),
             estop=EstopLimits(
-                slow_zone_m=float(e["slow_zone_m"]),
-                stop_zone_m=float(e["stop_zone_m"]),
+                # Lidar ranges: the robot's min_range plus the shared clearances,
+                # rounded so 0.07 + 0.08 is 0.15 and not 0.15000000000000002
+                # (the floor check below compares against it).
+                slow_zone_m=round(mount_min_range + slow_clear, 6),
+                stop_zone_m=round(mount_min_range + stop_clear, 6),
+                min_range_m=mount_min_range,
+                stop_clearance_m=stop_clear,
+                slow_clearance_m=slow_clear,
                 forward_arc_deg=float(e["forward_arc_deg"]),
                 lateral_arc_deg=float(e["lateral_arc_deg"]),
                 slow_forward_arc_deg=(

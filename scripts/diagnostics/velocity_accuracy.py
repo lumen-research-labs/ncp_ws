@@ -359,7 +359,13 @@ def run_leg(node: Leg, kind: str, val: float, secs: float, limits: dict,
     # exactly when it is skipped without being noticed.
     if not wait_for_scan(node, SCAN_WAIT_SECS):
         print(f"  (no /scan yet after {SCAN_WAIT_SECS:.0f} s)")
-    slow = float(limits["estop"]["slow_zone_m"])
+    # The slow zone is a lidar range built from THIS robot's profile
+    # (lidar.min_range_m) plus the file's clearance; build it the way
+    # rm_safety does rather than reading a key that no longer exists.
+    from rm_safety.robot_profile import DEFAULT_ROBOTS_DIR, load_robot_profile, resolve_profile_path
+    from rm_safety.safety_logic import Limits
+    mount = load_robot_profile(resolve_profile_path(DEFAULT_ROBOTS_DIR)).mount
+    slow = Limits.from_dict(limits, mount).estop.slow_zone_m
     reversing = vx < 0.0
     where = "behind" if reversing else "ahead"
     runway = node.min_range(math.pi if reversing else 0.0)

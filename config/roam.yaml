@@ -105,7 +105,7 @@ roam:
   timeout_s: 30.0
 
   # ---- the retreat: back out of a stop-zone e-stop ------------------------
-  # With both zones on, a robot that creeps to within stop_zone_m of a wall
+  # With both zones on, a robot that creeps into the stop zone at a wall
   # is latched and, until 2026-10-23, stuck until a human moved it. Now
   # rm_safety passes one thing under the latch, a fresh pure straight
   # reverse (safety_limits.yaml estop.retreat_*), and releases the latch on

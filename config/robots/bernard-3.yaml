@@ -24,6 +24,13 @@ lidar:
   self_occlusion_zones_deg: []
   body_floor_m: 0.12
   body_radius_m: 0.25
+  # The A1 returns nothing inside 0.15 m, farther than the bumper (0.075 m
+  # from the lidar, stock mount), so 0.15 is the nearest range the zones can
+  # use. With safety_limits.yaml's clearances the zones are 0.63 / 0.23 m
+  # from the lidar: the stop zone 15.5 cm in front of the bumper. Written as
+  # bernard-1's 0.15 m range the stop zone could never fire here (2026-11-18,
+  # the robot drove into things with both zones on).
+  min_range_m: 0.15
 
 base:
   # A STARTING POINT, not a fit: bernard-1's generic wheel model on all

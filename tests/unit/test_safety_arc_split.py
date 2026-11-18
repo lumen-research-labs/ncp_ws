@@ -32,11 +32,18 @@ from rm_safety.safety_logic import (  # noqa: E402
 )
 
 _CONFIG_PATH = os.path.join(_REPO_ROOT, "config", "safety_limits.yaml")
+_PROFILE_PATH = os.path.join(_REPO_ROOT, "config", "robots", "bernard-1.yaml")
 
 
 def _raw() -> dict:
     with open(_CONFIG_PATH, "r") as fh:
         return yaml.safe_load(fh)
+
+
+def _mount() -> dict:
+    """bernard-1's lidar block: the zones are clearances beyond its min_range."""
+    with open(_PROFILE_PATH, "r") as fh:
+        return yaml.safe_load(fh)["lidar"]
 
 
 @pytest.fixture
@@ -46,7 +53,7 @@ def raw() -> dict:
 
 @pytest.fixture
 def limits(raw) -> Limits:
-    return Limits.from_dict(raw)
+    return Limits.from_dict(raw, _mount())
 
 
 # One ray per degree over the full circle, all clear at 5 m.
@@ -224,7 +231,7 @@ def test_a_config_without_the_new_keys_behaves_exactly_as_before(raw) -> None:
     """Every config written before 2026-08-29 must be bit-identical."""
     del raw["estop"]["slow_forward_arc_deg"]
     del raw["estop"]["slow_lateral_arc_deg"]
-    old = Limits.from_dict(raw)
+    old = Limits.from_dict(raw, _mount())
     assert old.estop.slow_arcs_differ is False
     assert old.estop.effective_slow_forward_arc_deg == old.estop.forward_arc_deg
     assert old.estop.effective_slow_lateral_arc_deg == old.estop.lateral_arc_deg
@@ -235,7 +242,7 @@ def test_a_config_without_the_new_keys_behaves_exactly_as_before(raw) -> None:
 def test_explicit_null_means_inherit(raw) -> None:
     raw["estop"]["slow_forward_arc_deg"] = None
     raw["estop"]["slow_lateral_arc_deg"] = None
-    lim = Limits.from_dict(raw)
+    lim = Limits.from_dict(raw, _mount())
     assert lim.estop.slow_arcs_differ is False
 
 
@@ -257,19 +264,19 @@ def test_a_slow_arc_wider_than_the_stop_arc_is_refused(raw) -> None:
     """A slow zone with no stop zone behind it inverts the layering."""
     raw["estop"]["slow_forward_arc_deg"] = 120.0  # > forward_arc_deg 90
     with pytest.raises(ValueError, match="slow_forward_arc_deg"):
-        Limits.from_dict(raw)
+        Limits.from_dict(raw, _mount())
 
 
 def test_a_wider_slow_lateral_arc_is_refused(raw) -> None:
     raw["estop"]["slow_lateral_arc_deg"] = 90.0  # > lateral_arc_deg 60
     with pytest.raises(ValueError, match="slow_lateral_arc_deg"):
-        Limits.from_dict(raw)
+        Limits.from_dict(raw, _mount())
 
 
 def test_equal_arcs_are_allowed(raw) -> None:
     raw["estop"]["slow_forward_arc_deg"] = raw["estop"]["forward_arc_deg"]
     raw["estop"]["slow_lateral_arc_deg"] = raw["estop"]["lateral_arc_deg"]
-    lim = Limits.from_dict(raw)
+    lim = Limits.from_dict(raw, _mount())
     assert lim.estop.slow_arcs_differ is False
 
 

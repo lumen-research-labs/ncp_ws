@@ -48,8 +48,10 @@ from rm_safety.safety_logic import (  # noqa: E402
 def _limits_dict(**estop_overrides) -> dict:
     """A complete, valid safety_limits.yaml dict, tweakable in the estop block."""
     estop = {
-        "slow_zone_m": 0.55,
-        "stop_zone_m": 0.15,
+        # Clearances beyond the profile's min_range_m; with no mount passed
+        # (min_range 0) they ARE the lidar ranges, so the numbers read as before.
+        "slow_clearance_m": 0.55,
+        "stop_clearance_m": 0.15,
         "forward_arc_deg": 90.0,
         "lateral_arc_deg": 60.0,
         "slow_forward_arc_deg": 30.0,

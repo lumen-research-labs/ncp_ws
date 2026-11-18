@@ -64,8 +64,8 @@ the live one is a parameter set, never a restart.
 
 ```
 0.90 m   policy spins away        (obstacle_dist)
-0.55 m   safety scales velocity   (slow_zone_m)
-0.15 m   safety zeroes + latches  (stop_zone_m)
+0.55 m   safety scales velocity   (slow_clearance_m 0.48 beyond the profile's lidar.min_range_m; bernard-1's range)
+0.15 m   safety zeroes + latches  (stop_clearance_m 0.08 beyond it)
 ```
 
 The policy must react *before* the safety layer has to. Upstream's 1.5 m is

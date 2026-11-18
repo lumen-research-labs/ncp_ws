@@ -34,6 +34,12 @@ lidar:
   # return 0.17-0.23 m, under the radius. Measured 2026-11-04.
   body_floor_m: 0.12
   body_radius_m: 0.25
+  # The nearest range the safety zones may reference: the larger of the
+  # TG30's blind radius (~0.05 m) and the lidar-to-bumper distance, 0.07 m
+  # here (stock mount: laser_link 0.0435 m ahead of base_link, the chassis
+  # mesh ends at 0.116 m; tape-check). safety_limits.yaml's clearances
+  # 0.48 / 0.08 beyond it give the 0.55 / 0.15 m zones this unit always had.
+  min_range_m: 0.07
 
 base:
   # Tape-fitted 2026-08-29 on this unit, with the front-right stiction

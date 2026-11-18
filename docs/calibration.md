@@ -208,7 +208,7 @@ refit the wheels.
 - **`closed_loop.guards` in the YAML SHADOWS the module defaults** in
   `wheel_control.Guards`. A stale key there silently overrode the code for
   several hardware runs. Change both, or delete the key.
-- **`max_vx` is coupled to `max_pwm` and to `slow_zone_m`.** Raising the speed
+- **`max_vx` is coupled to `max_pwm` and to `slow_clearance_m`.** Raising the speed
   limit without raising the PWM ceiling leaves wheels saturated and unable to
   reach the commanded speed. Raising it also means redoing the stopping-distance
   sum for the slow zone.

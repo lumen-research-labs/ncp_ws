@@ -527,7 +527,9 @@ class SafetyNode(rclpy.node.Node):
         if es.slow_zone_enabled and es.stop_zone_enabled:
             self.get_logger().info(
                 f"safety_node: lidar e-stop ACTIVE — "
-                f"slow {es.slow_zone_m} m / stop {es.stop_zone_m} m.{retreat}"
+                f"slow {es.slow_zone_m:.2f} m / stop {es.stop_zone_m:.2f} m from the lidar "
+                f"(the profile's min_range {es.min_range_m:.2f} m + clearances "
+                f"{es.slow_clearance_m:.2f} / {es.stop_clearance_m:.2f}).{retreat}"
             )
             return
 

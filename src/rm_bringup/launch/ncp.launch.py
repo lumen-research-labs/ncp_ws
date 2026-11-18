@@ -61,8 +61,11 @@ Launch arguments:
                   The three thresholds must stay ordered so the POLICY reacts
                   before the SAFETY layer has to:
                       0.90 m  policy spins away       (this)
-                      0.50 m  safety scales velocity  (slow_zone_m)
-                      0.35 m  safety zeroes + latches (stop_zone_m)
+                      0.55 m  safety scales velocity  (the slow zone)
+                      0.15 m  safety zeroes + latches (the stop zone)
+                  Both zones are clearances beyond the robot profile's
+                  lidar.min_range_m (safety_limits.yaml); the ranges above
+                  are bernard-1's.
                   Upstream's 1.5 is measured across the whole 270 deg arc
                   including the sides, so in a normal room something is nearly
                   always inside it and the robot spins continuously instead of

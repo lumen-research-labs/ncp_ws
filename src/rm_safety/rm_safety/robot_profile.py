@@ -56,6 +56,7 @@ REPO_ROOT = _THIS_DIR.parents[2]
 DEFAULT_ROBOTS_DIR = str(REPO_ROOT / "config" / "robots")
 
 LIDAR_MODELS = ("tg30", "a1")
+_MIN_RANGE_MAX_M = 1.0   # a min_range beyond this is a typo, not a mount
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*$")
 # ROS 2 domain IDs: 0..101 is the range every platform supports; 232 is the
@@ -70,6 +71,12 @@ class LidarMount:
     self_occlusion_zones_deg: Tuple[Tuple[float, float], ...]
     body_floor_m: float                          # under this: the chassis, not the world
     body_radius_m: float                         # the corners; the sanitizer's floor for third parties
+    # The nearest range the safety zones may reference: the LARGER of the
+    # sensor's blind radius and the lidar-to-bumper distance. Inside it the
+    # zones can see nothing, or it is already contact. safety_limits.yaml's
+    # stop/slow clearances are measured beyond this (2026-11-18: bernard-3's
+    # A1 is blind to 0.15 m and the shared 0.15 m stop zone could never fire).
+    min_range_m: float
 
 
 @dataclasses.dataclass(frozen=True)
@@ -88,6 +95,7 @@ class RobotProfile:
             "self_occlusion_zones_deg": [list(z) for z in self.lidar.self_occlusion_zones_deg],
             "body_floor_m": self.lidar.body_floor_m,
             "body_radius_m": self.lidar.body_radius_m,
+            "min_range_m": self.lidar.min_range_m,
         }
 
 
@@ -156,6 +164,12 @@ def parse_robot_profile(raw: Any, path: str, repo_root: pathlib.Path = REPO_ROOT
             f"{path}: lidar.body_floor_m ({floor}) must be >= 0 and below lidar.body_radius_m ({radius}); "
             f"the floor is the standoffs, the radius the chassis corners"
         )
+    min_range = _number(lidar, "min_range_m", path)
+    if not 0.0 < min_range <= _MIN_RANGE_MAX_M:
+        raise ValueError(
+            f"{path}: lidar.min_range_m ({min_range}) must be in (0, {_MIN_RANGE_MAX_M}] m: the larger of "
+            f"the sensor's blind radius and the lidar-to-bumper distance"
+        )
 
     cal = base.get("calibration")
     if not isinstance(cal, str) or not cal:
@@ -169,7 +183,7 @@ def parse_robot_profile(raw: Any, path: str, repo_root: pathlib.Path = REPO_ROOT
     return RobotProfile(
         name=name, hostnames=tuple(hostnames), ros_domain_id=domain,
         lidar=LidarMount(model=model, yaw_deg=yaw, self_occlusion_zones_deg=zones,
-                         body_floor_m=floor, body_radius_m=radius),
+                         body_floor_m=floor, body_radius_m=radius, min_range_m=min_range),
         calibration_path=str(cal_path), path=str(path),
     )
 

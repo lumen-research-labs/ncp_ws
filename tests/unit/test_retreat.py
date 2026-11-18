@@ -298,7 +298,9 @@ def test_the_requested_reverse_is_within_both_safety_bounds():
     from rm_safety.safety_logic import Limits  # noqa: E402
     roam = load_roam_limits(_ROAM_YAML)
     with open(_SAFETY_YAML, encoding="utf-8") as handle:
-        safety = Limits.from_dict(yaml.safe_load(handle))
+        with open(os.path.join(_REPO_ROOT, "config", "robots", "bernard-1.yaml"), encoding="utf-8") as prof:
+            mount = yaml.safe_load(prof)["lidar"]
+        safety = Limits.from_dict(yaml.safe_load(handle), mount)
     assert 0.0 < roam.retreat_vx <= safety.estop.retreat_max_vx
     assert roam.retreat_vx <= safety.velocity.max_vx
     # Far enough back to clear the release range from the stop boundary.

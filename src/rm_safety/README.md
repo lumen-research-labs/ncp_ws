@@ -133,13 +133,15 @@ oversight:
 
 | | radius | forward arc | lateral arc |
 |---|---|---|---|
-| slow | `slow_zone_m` 0.55 m | 30° cone | disabled (0.0) |
-| stop | `stop_zone_m` 0.15 m | 90° | 60° each side |
+| slow | `slow_clearance_m` 0.48 m beyond the profile's `lidar.min_range_m` (0.55 m from bernard-1's lidar, 0.63 from bernard-3's) | 30° cone | disabled (0.0) |
+| stop | `stop_clearance_m` 0.08 m beyond `lidar.min_range_m` (0.15 / 0.23 m from the lidar) | 90° | 60° each side |
+
+`min_range_m` is the larger of the sensor's blind radius and the lidar-to-bumper distance; a zone written as a lidar range was one robot's number (bernard-3's A1 is blind inside 0.15 m, so a 0.15 m stop zone never fired, 2026-11-18). `Limits.from_dict` adds the two and refuses a file carrying `stop_zone_m` or `slow_zone_m`.
 
 The slow cone is deliberately too narrow to serve as a stop arc
 (0.35·tan15° = 0.094 m is narrower than the robot), so `Limits.from_dict`
 **refuses** a slow arc wider than the stop arc. Three constants are coupled and
-must be changed together: `slow_zone_m`, `max_vx` (the band must cover braking
+must be changed together: `slow_clearance_m`, `max_vx` (the band must cover braking
 distance plus travel during the 3-scan filter), and `slow_forward_arc_deg` (the
 cone must still subtend the robot's half-width at the slow radius). Both
 couplings are pinned by `tests/unit/test_safety_arc_split.py`.
