@@ -130,7 +130,7 @@ def test_manual_paths_refuse_on_any_policy_kind_source() -> None:
 def test_snapshot_carries_the_table_and_the_active_policy() -> None:
     src = _read(_NODE)
     body = src[src.index("def _snapshot("):src.index("def _dispatch(")]
-    for key in ('"sources":', '"active_policy":', '"live": ', '"params_ready": '):
+    for key in ('"sources":', '"active_policy":', '"live": ', '"params_ready": ', '"robot": {'):
         assert key in body, key
     assert "self._active_policy(topics)" in body and "self._live_sources(topics)" in body
     helpers = src[src.index("def _live_sources("):src.index("def _policy_debug(")]

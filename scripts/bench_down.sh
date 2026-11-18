@@ -3,7 +3,8 @@
 # Runs ON the robot (paths are bernard-1's). Pairs with bench_up.sh.
 source /opt/ros/humble/setup.bash
 source /home/jetson/yahboomcar_ros2_ws/yahboomcar_ws/install/setup.bash
-export ROS_DOMAIN_ID=28
+# The robot's domain, from its profile: /safety/kill must reach THIS stack.
+source "$(dirname "$0")/robot_env.sh"
 
 echo "== stopping test nodes =="
 pkill -f 'topic pub .*policy/cmd_vel'

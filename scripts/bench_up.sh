@@ -19,9 +19,10 @@
 #   --mode    rm_base control mode. open_loop (default) drives PWM straight
 #             from the calibration table. closed_loop adds the per-wheel PI
 #             trim on the sign-corrected encoders -- prove it wheels-UP first.
-#   --cal     calibration file. A path, or the word "floor" for
+#   --cal     calibration file. Default: the robot profile's base.calibration
+#             (config/robots/<name>.yaml). A path, or the word "floor" for
 #             config/base_calibration_floor.yaml (cut PWM ceilings, for the
-#             first wheels-DOWN run).
+#             first wheels-DOWN run; bernard-1's numbers).
 #   --live    dry_run:=false. Without this rm_base computes and publishes its
 #             intended PWM on /base/debug but writes ZERO to the motors, so a
 #             wheels-up dry run previews the real command safely.
@@ -38,7 +39,7 @@
 set -o pipefail
 
 MODE=open_loop
-CAL=/home/jetson/ncp_ws/config/base_calibration.yaml
+CAL=""     # empty: the robot profile's base.calibration (set after robot_env.sh)
 DRY_RUN=true
 SOURCE=policy
 
@@ -65,13 +66,18 @@ esac
 case "$SOURCE" in policy|teleop) ;; *)
   echo "ERROR: --source must be policy or teleop, got '$SOURCE'" >&2; exit 1 ;;
 esac
-[ -f "$CAL" ] || { echo "ERROR: calibration file not found: $CAL" >&2; exit 1; }
-
 source /opt/ros/humble/setup.bash
 source /home/jetson/yahboomcar_ros2_ws/yahboomcar_ws/install/setup.bash
 source /home/jetson/yahboomcar_ros2_ws/software/library_ws/install/setup.bash
 source /home/jetson/ncp_ws/install/setup.bash
-export ROS_DOMAIN_ID=28
+# Which robot: the profile sets the domain and names this unit's calibration.
+source "$(dirname "$0")/robot_env.sh"
+if [ -z "$CAL" ]; then
+  CAL="$(python3 -c "import sys; sys.path.insert(0, '/home/jetson/ncp_ws/src/rm_safety')
+from rm_safety.robot_profile import load_robot_profile
+print(load_robot_profile(sys.argv[1]).calibration_path)" "$RM_ROBOT_PROFILE")" || exit 1
+fi
+[ -f "$CAL" ] || { echo "ERROR: calibration file not found: $CAL" >&2; exit 1; }
 
 # by-id, never /dev/rplidar: that symlink races between the lidar (CP2102)
 # and the base board (CH340) across reboots and has pointed at the WRONG

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NCP Stack — bernard</title>
+<title>NCP stack</title>
 <style>
 /* Self-contained on purpose: bernard-1 has no WAN uplink, so no CDN font,
    no CDN chart library. Everything below is hand-rolled against the system
@@ -166,7 +166,7 @@ input[type=range]{accent-color:var(--accent)}
 <body>
 
 <header>
-  <div class="brand">NCP STACK <small id="ckpt">checkpoint —</small></div>
+  <div class="brand"><span id="robot">NCP STACK</span> <small id="robotmeta"></small> <small id="ckpt">checkpoint —</small></div>
   <span class="pill"><span class="dot" id="conndot"></span><span id="conn">connecting</span></span>
   <span class="pill" id="battpill"><span class="dot" id="battdot"></span><span id="batt">— V</span></span>
   <span class="pill mono" id="uptime">0s</span>
@@ -1096,6 +1096,16 @@ function renderWaypoint(snap){
 
 /* ---------------- header ---------------- */
 function renderHeader(snap){
+  // Which robot this page is, first: with two robots on one network the
+  // header and the tab title are what keep two open dashboards apart.
+  const robot = snap.robot;
+  if(robot && robot.name){
+    $("robot").textContent = robot.name.toUpperCase();
+    const lid = robot.lidar || {};
+    $("robotmeta").textContent = `domain ${robot.domain} · ${lid.model || "?"}`
+      + (lid.yaw_deg ? ` yaw ${lid.yaw_deg}°` : "");
+    document.title = `${robot.name} · NCP stack`;
+  }
   const v = val(snap,"/voltage");
   $("batt").textContent = v ? v.volts.toFixed(2)+" V" : "— V";
   $("battdot").className = "dot " + (v ? (v.level==="good"?"ok":v.level==="low"?"warn":"bad") : "");

@@ -28,7 +28,8 @@ set -o pipefail
 
 source /opt/ros/humble/setup.bash
 source /home/jetson/ncp_ws/install/setup.bash
-export ROS_DOMAIN_ID=28
+# The robot's domain, from its profile.
+source "$(dirname "$0")/robot_env.sh"
 
 RATE=20
 TOPIC=/policy/cmd_vel

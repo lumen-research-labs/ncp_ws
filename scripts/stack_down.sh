@@ -61,7 +61,7 @@ ORDER=(
   async_slam_toolbox_node
   # sensors last: nothing downstream is left to be confused by their absence
   ydlidar_ros2_driver_node
-  sllidar_node              # the RPLIDAR A1 driver (lidar:=a1, bernard-3)
+  sllidar_node              # the RPLIDAR A1 driver (profile lidar.model a1, bernard-3)
 )
 
 # OUR nodes are matched by INSTALL PREFIX rather than by name, so a node added

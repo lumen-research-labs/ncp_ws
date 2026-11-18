@@ -129,6 +129,7 @@ from std_srvs.srv import Trigger
 from rm_interfaces.msg import BaseDebug, SafetyStatus, WaypointStatus
 from rm_interfaces.srv import Jog, SetWaypoint
 from rm_safety.command_sources import DEFAULT_TOPICS_PATH, load_command_sources
+from rm_safety.robot_profile import load_robot_profile
 from rm_dashboard.frames import world_to_body_offset
 from rm_dashboard.slam_restart import find_slam_pids, reset_refusal
 from rm_dashboard.sources import active_policy, is_live
@@ -247,6 +248,7 @@ class DashboardNode(rclpy.node.Node):
         self.declare_parameter("map_max_cells", 400)
         self.declare_parameter("tf_poll_hz", 5.0)
         self.declare_parameter("topics_path", DEFAULT_TOPICS_PATH)
+        self.declare_parameter("robot_profile_path", "")
 
         host = self.get_parameter("host").get_parameter_value().string_value
         port = int(self.get_parameter("port").get_parameter_value().integer_value)
@@ -274,6 +276,32 @@ class DashboardNode(rclpy.node.Node):
         # buttons that do nothing, the failure this page exists to show.
         topics_path = self.get_parameter("topics_path").get_parameter_value().string_value
         self._sources = load_command_sources(topics_path)
+        # Which robot this page is: name, domain, lidar, from the robot
+        # profile. Required, and fatal if wrong, for the same reason as the
+        # table: with two robots on one network the page's only defence
+        # against showing one robot while the operator kills the other is to
+        # say, in its header, which it is. It also refuses to run on a domain
+        # other than the profile's: it would then show robot A's name over
+        # robot B's topics, the exact confusion the name exists to prevent.
+        profile_path = self.get_parameter("robot_profile_path").get_parameter_value().string_value
+        if not profile_path:
+            raise RuntimeError(
+                "dashboard_node: robot_profile_path is required (config/robots/<name>.yaml; "
+                "ncp.launch.py and dashboard.launch.py pass the one the hostname selects)"
+            )
+        self._robot = load_robot_profile(profile_path)
+        domain = os.environ.get("ROS_DOMAIN_ID", "")
+        if domain and domain != str(self._robot.ros_domain_id):
+            raise RuntimeError(
+                f"dashboard_node: ROS_DOMAIN_ID={domain} but {self._robot.name}'s profile "
+                f"says {self._robot.ros_domain_id}; this page would name one robot and "
+                f"show another. Launch through scripts/run_stack.sh."
+            )
+        if not domain:
+            self.get_logger().warn(
+                f"ROS_DOMAIN_ID is unset (ROS default 0); {self._robot.name}'s profile says "
+                f"{self._robot.ros_domain_id}. The stack is expected to be on that domain."
+            )
         # Policy rows in table order; the active-policy choice walks this.
         self._policies: List[str] = [
             name for name, source in self._sources.items() if source.is_policy
@@ -948,6 +976,14 @@ class DashboardNode(rclpy.node.Node):
             "uptime_s": round(time.monotonic() - self._started_at, 1),
             "topics": topics,
             "controls_enabled": self._enable_controls,
+            # Which robot this is, for the header and the tab title. From the
+            # robot profile, so it is the same name the launch configured
+            # the stack from.
+            "robot": {
+                "name": self._robot.name,
+                "domain": self._robot.ros_domain_id,
+                "lidar": {"model": self._robot.lidar.model, "yaw_deg": self._robot.lidar.yaw_deg},
+            },
             # rm_safety's ACTIVE source, read back from the node itself.
             # None means "not yet known", which the page renders as unknown
             # rather than guessing at a default.

@@ -664,8 +664,8 @@ def test_roam_status_is_published_and_safety_state_feeds_only_the_retreat():
 def test_the_launch_passes_the_config_path_to_every_policy_node_and_has_no_roam_argument():
     src = _read(_LAUNCH)
     assert '_DEFAULT_ROAM_PATH = str(_REPO_ROOT / "config" / "roam.yaml")' in src
-    loop = src[src.index("for _name, source, interface, weights in profiles:"):
-               src.index("nodes.append(Node(")]
+    start = src.index("for _name, source, interface, weights in profiles:")
+    loop = src[start:src.index("nodes.append(Node(", start)]
     assert '"roam_config_path": _DEFAULT_ROAM_PATH' in loop
     assert '"profile": _name' in loop  # each node applies its own roam.yaml profiles: block
     declared = re.findall(r'DeclareLaunchArgument\(\s*"(\w+)"', src)

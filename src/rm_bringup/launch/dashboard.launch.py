@@ -69,15 +69,29 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+from rm_safety.robot_profile import DEFAULT_ROBOTS_DIR, resolve_profile_path
+
 _DEFAULT_TOPICS_PATH = str(
     pathlib.Path(__file__).resolve().parents[3] / "config" / "topics.yaml"
 )
+
+
+def _default_robot_profile() -> str:
+    """The profile this unit's hostname selects, or "" when no profile lists
+    it; the node then refuses to start, naming the known profiles."""
+    try:
+        return resolve_profile_path(DEFAULT_ROBOTS_DIR)
+    except ValueError:
+        return ""
 
 
 def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
         DeclareLaunchArgument("port", default_value="8080"),
         DeclareLaunchArgument("topics_path", default_value=_DEFAULT_TOPICS_PATH),
+        # Which robot this page shows: its name goes in the header and the
+        # tab title, so two open dashboards cannot be confused.
+        DeclareLaunchArgument("robot_profile_path", default_value=_default_robot_profile()),
         DeclareLaunchArgument("host", default_value="0.0.0.0"),
         DeclareLaunchArgument("enable_controls", default_value="true"),
         DeclareLaunchArgument("stream_hz", default_value="10.0"),
@@ -98,6 +112,7 @@ def generate_launch_description() -> LaunchDescription:
                 "map_max_cells": LaunchConfiguration("map_max_cells"),
                 "tf_poll_hz": LaunchConfiguration("tf_poll_hz"),
                 "topics_path": LaunchConfiguration("topics_path"),
+                "robot_profile_path": LaunchConfiguration("robot_profile_path"),
             }],
         ),
     ])

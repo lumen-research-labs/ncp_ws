@@ -125,20 +125,20 @@ Launch arguments:
                   "false" only when rm_safety is already running.
 
     with_lidar    "true" (default) starts the lidar driver on its by-id
-                  CP2102 port. Set "false" if the lidar is already up.
-    lidar         Which lidar this robot carries: "tg30" (default; bernard-1
-                  and bernard-2, YDLIDAR TG30 via ydlidar_ros2_driver at
+                  CP2102 port. Set "false" if the lidar is already up. WHICH
+                  driver, and which way the lidar points, come from the robot
+                  profile's lidar: block, not from arguments: model "tg30"
+                  (bernard-1/-2, YDLIDAR TG30 via ydlidar_ros2_driver at
                   512000 baud) or "a1" (bernard-3, a SLAMTEC RPLIDAR A1 via
-                  sllidar_ros2 at 115200 baud, scan_mode Standard). Both
-                  adapters are a CP2102 on the same by-id path; only the
-                  protocol differs, and the wrong driver opens the port and
-                  then reads nothing (2026-11-18). Anything else is refused.
-    lidar_yaw_deg "0" (default). The direction the lidar's zero points, in
-                  degrees left of the robot's +x. Non-zero starts
+                  sllidar_ros2 at 115200 baud, scan_mode Standard; both
+                  adapters are a CP2102 on the same by-id path and the wrong
+                  driver opens the port and reads nothing, 2026-11-18), and
+                  yaw_deg, the direction the lidar's zero points in degrees
+                  left of the robot's +x. A non-zero yaw starts
                   rm_policy/scan_rotate_node between the driver (remapped to
                   /scan_driver) and /scan, so every consumer reads the world
-                  the right way round. bernard-3's A1 is mounted zero-backward:
-                  lidar:=a1 lidar_yaw_deg:=180 (measured 2026-11-18).
+                  the right way round (bernard-3's A1 is mounted
+                  zero-backward: yaw 180, measured 2026-11-18).
     with_base     "true" (default) starts rm_base (base.launch.py), the
                   mecanum driver that OWNS the base-board serial port.
     with_odom     "true" (default) starts odom.launch.py — the vendor odom
@@ -154,7 +154,9 @@ Launch arguments:
                   full NCP stack implies intending to drive. rm_safety still
                   starts KILLED, and command_source still defaults to
                   "teleop", so two explicit acts are still required.
-    calibration_path  path to config/base_calibration.yaml.
+    calibration_path  rm_base's calibration file. Empty (default) means the
+                  robot profile's base.calibration; pass a path to override it
+                  (config/base_calibration_floor.yaml for a first floor run).
 
     with_slam     "true" (DEFAULT) starts slam_toolbox, which publishes
                   map -> odom and corrects the odometry drift, and switches
@@ -266,7 +268,7 @@ Usage (on the robot, after colcon build + source install/setup.bash):
     ros2 launch rm_bringup ncp.launch.py profiles:=m8v2 weights:=''
 """
 
-import math
+import os
 import pathlib
 import subprocess
 
@@ -276,6 +278,7 @@ from launch.actions import (
     ExecuteProcess,
     IncludeLaunchDescription,
     OpaqueFunction,
+    SetEnvironmentVariable,
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -283,7 +286,9 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 from rm_safety.command_sources import load_command_sources
-from rm_safety.robot_profile import DEFAULT_ROBOTS_DIR, load_robot_profile, resolve_profile_path
+from rm_safety.robot_profile import (
+    DEFAULT_ROBOTS_DIR, LIDAR_MODELS, load_robot_profile, resolve_profile_path,
+)
 
 _LAUNCH_DIR = pathlib.Path(__file__).resolve().parent
 _REPO_ROOT = _LAUNCH_DIR.parents[2]
@@ -308,8 +313,9 @@ def _default_robot_profile() -> str:
         return ""
 
 
-def _refuse_without_robot_profile(context):
-    """Fail fast: the stack must know which robot it is on."""
+def _robot_profile(context):
+    """The profile the launch runs for, loaded (not cached: a refusal must
+    carry this launch's path)."""
     path = LaunchConfiguration("robot_profile").perform(context)
     if not path:
         try:
@@ -317,10 +323,27 @@ def _refuse_without_robot_profile(context):
         except ValueError as exc:
             raise RuntimeError(f"ncp.launch.py: {exc} Or pass robot_profile:=<path>.") from None
     try:
-        load_robot_profile(path)
+        return load_robot_profile(path)
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"ncp.launch.py: robot_profile:={path!r}: {exc}") from None
-    return []
+
+
+def _refuse_without_robot_profile(context):
+    """Fail fast: the stack must know which robot it is on. Then put every
+    child on the profile's ROS domain, so two robots on one network never
+    share a topic, and refuse a launching shell whose own ROS_DOMAIN_ID
+    disagrees: the stop button (`ros2 service call /safety/kill`) is typed in
+    that shell, and a stop button on the wrong domain stops nothing."""
+    profile = _robot_profile(context)
+    shell = os.environ.get("ROS_DOMAIN_ID", "")
+    if shell and shell != str(profile.ros_domain_id):
+        raise RuntimeError(
+            f"ncp.launch.py: this shell has ROS_DOMAIN_ID={shell} but {profile.name}'s "
+            f"profile ({profile.path}) says {profile.ros_domain_id}. The stack and its "
+            f"stop button must share one domain: `source scripts/robot_env.sh` (what "
+            f"run_stack.sh does) or unset ROS_DOMAIN_ID."
+        )
+    return [SetEnvironmentVariable("ROS_DOMAIN_ID", str(profile.ros_domain_id))]
 
 # The row the UPSTREAM consumer (and the bench tools) publish on. No policy
 # node of ours stands behind it, which is why it is not a profile.
@@ -356,8 +379,6 @@ _DEFAULT_UPSTREAM_PATH = str(_REPO_ROOT.parent / "NCP-on-Rosmaster")
 # node FAILS TO START if the file is missing, which is far better than
 # silently exercising an untrained network in a run the operator believes is
 # testing a policy. Pass weights:='' for a plumbing run.
-
-_DEFAULT_CALIBRATION_PATH = str(_REPO_ROOT / "config" / "base_calibration.yaml")
 
 # by-id, never /dev/rplidar: that symlink races between the lidar (CP2102) and
 # the base board (CH340) across reboots and has pointed at the wrong device on
@@ -428,28 +449,70 @@ _A1_LIDAR_PARAMS = {
     # 5 Hz policy tick both sit inside the 182 ms period.
     "scan_frequency": 5.5,
 }
-_LIDARS = ("tg30", "a1")
+# One driver block per lidar model a robot profile may name. The loader
+# accepts exactly LIDAR_MODELS; a model it accepts and this table lacks would
+# be a launch that starts no driver and a stack that waits on /scan forever,
+# so the two are pinned equal here, loudly, at import.
+_DRIVERS = {
+    "tg30": ("ydlidar_ros2_driver", "ydlidar_ros2_driver_node", _LIDAR_PARAMS),
+    "a1": ("sllidar_ros2", "sllidar_node", _A1_LIDAR_PARAMS),
+}
+if set(_DRIVERS) != set(LIDAR_MODELS):
+    raise RuntimeError(
+        f"ncp.launch.py: driver blocks {sorted(_DRIVERS)} must match "
+        f"robot_profile.LIDAR_MODELS {sorted(LIDAR_MODELS)}"
+    )
 
 
-def _refuse_unknown_lidar(context):
-    """Fail fast on a lidar name this file has no driver block for, or a
-    yaw offset that is not a finite number of degrees."""
-    lidar = LaunchConfiguration("lidar").perform(context)
-    if lidar not in _LIDARS:
-        raise RuntimeError(
-            f"ncp.launch.py: lidar:={lidar!r} is not one of {_LIDARS}; the robot's "
-            f"lidar must be named explicitly (bernard-1/-2 tg30, bernard-3 a1)."
-        )
-    yaw = LaunchConfiguration("lidar_yaw_deg").perform(context)
-    try:
-        if not math.isfinite(float(yaw)):
-            raise ValueError
-    except ValueError:
-        raise RuntimeError(
-            f"ncp.launch.py: lidar_yaw_deg:={yaw!r} must be a finite number of "
-            f"degrees (0 for a lidar whose zero points along the robot's +x)."
-        ) from None
-    return []
+def _lidar_driver(context):
+    """The lidar driver this robot's profile names, and, when its zero does
+    not point along +x, the rotate relay that owns /scan. With a yaw the
+    driver publishes /scan_driver and scan_rotate_node turns it; without one
+    the driver publishes /scan directly. Nothing with with_lidar:=false."""
+    if LaunchConfiguration("with_lidar").perform(context).lower() != "true":
+        return []
+    lidar = _robot_profile(context).lidar
+    package, executable, params = _DRIVERS[lidar.model]
+    rotated = lidar.yaw_deg != 0.0
+    nodes = [Node(
+        package=package,
+        executable=executable,
+        name=executable,
+        output="screen",
+        parameters=[params],
+        remappings=[("scan", "/scan_driver" if rotated else "/scan")],
+    )]
+    if rotated:
+        nodes.append(Node(
+            package="rm_policy",
+            executable="scan_rotate_node",
+            name="scan_rotate",
+            output="screen",
+            parameters=[{
+                "input_topic": "/scan_driver",
+                "output_topic": "/scan",
+                "yaw_deg": float(lidar.yaw_deg),
+            }],
+        ))
+    return nodes
+
+
+def _base_driver(context):
+    """rm_base on the profile's calibration file, unless calibration_path:=
+    names another (the floor file for a first wheels-down run)."""
+    if LaunchConfiguration("with_base").perform(context).lower() != "true":
+        return []
+    path = LaunchConfiguration("calibration_path").perform(context)
+    if not path:
+        path = _robot_profile(context).calibration_path
+    return [IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(str(_LAUNCH_DIR / "base.launch.py")),
+        launch_arguments={
+            "control_mode": LaunchConfiguration("control_mode"),
+            "dry_run": LaunchConfiguration("dry_run"),
+            "calibration_path": path,
+        }.items(),
+    )]
 
 
 # The bridge's output. The upstream consumer reads this, never the raw /scan.
@@ -711,19 +774,7 @@ def generate_launch_description() -> LaunchDescription:
     with_safety = LaunchConfiguration("with_safety")
     command_source = LaunchConfiguration("command_source")
     robot_profile = LaunchConfiguration("robot_profile")
-    with_lidar = LaunchConfiguration("with_lidar")
-    lidar = LaunchConfiguration("lidar")
-    lidar_yaw_deg = LaunchConfiguration("lidar_yaw_deg")
-    # With a yaw offset the driver publishes /scan_driver and scan_rotate_node
-    # owns /scan; without one the driver publishes /scan directly.
-    rotated = PythonExpression(["float('", lidar_yaw_deg, "') != 0.0"])
-    driver_scan_topic = PythonExpression(
-        ["'/scan_driver' if float('", lidar_yaw_deg, "') != 0.0 else '/scan'"])
-    with_base = LaunchConfiguration("with_base")
     with_odom = LaunchConfiguration("with_odom")
-    control_mode = LaunchConfiguration("control_mode")
-    dry_run = LaunchConfiguration("dry_run")
-    calibration_path = LaunchConfiguration("calibration_path")
     with_slam = LaunchConfiguration("with_slam")
     pose_source = LaunchConfiguration("pose_source")
     with_dashboard = LaunchConfiguration("with_dashboard")
@@ -734,8 +785,8 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
         # FIRST action: refuse to stack a second copy on a running one.
         OpaqueFunction(function=_refuse_if_stack_already_running),
+        # Second: which robot, and its domain for every node below.
         OpaqueFunction(function=_refuse_without_robot_profile),
-        OpaqueFunction(function=_refuse_unknown_lidar),
 
         DeclareLaunchArgument(
             "consumer", default_value="policy_node",
@@ -846,23 +897,15 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             "robot_profile", default_value=_default_robot_profile(),
             description="This unit's config/robots/<name>.yaml: resolved from the "
-                        "hostname by default; the mount facts (self-occlusion "
-                        "zones, body floor, body radius) every node reads.",
+                        "hostname by default. Its ROS domain, lidar model and "
+                        "yaw, mount facts (self-occlusion zones, body floor, "
+                        "body radius) and base calibration configure the stack.",
         ),
         DeclareLaunchArgument(
             "with_lidar", default_value="true",
-            description="Start the lidar driver on its by-id CP2102 port.",
-        ),
-        DeclareLaunchArgument(
-            "lidar", default_value="tg30",
-            description="Which lidar this robot carries: tg30 (YDLIDAR TG30, "
-                        "bernard-1/-2) or a1 (SLAMTEC RPLIDAR A1, bernard-3).",
-        ),
-        DeclareLaunchArgument(
-            "lidar_yaw_deg", default_value="0",
-            description="Where the lidar's zero points, degrees left of the "
-                        "robot's +x; non-zero rotates the scan at the source "
-                        "(bernard-3: 180).",
+            description="Start the lidar driver the robot profile names, on its "
+                        "by-id CP2102 port, plus the rotate relay if its yaw is "
+                        "not 0.",
         ),
         DeclareLaunchArgument(
             "with_base", default_value="true",
@@ -888,8 +931,9 @@ def generate_launch_description() -> LaunchDescription:
                         "still starts KILLED.",
         ),
         DeclareLaunchArgument(
-            "calibration_path", default_value=_DEFAULT_CALIBRATION_PATH,
-            description="Path to config/base_calibration.yaml.",
+            "calibration_path", default_value="",
+            description="rm_base's calibration file. Empty (default): the robot "
+                        "profile's base.calibration. A path overrides it.",
         ),
         DeclareLaunchArgument(
             "with_slam", default_value="true",
@@ -942,49 +986,11 @@ def generate_launch_description() -> LaunchDescription:
         # ---- hardware layer, bottom up -------------------------------------
         # Lidar first: the scan bridge and both consumers are useless without
         # /scan, and rm_safety treats missing perception as a stop condition.
-        Node(
-            condition=IfCondition(PythonExpression(
-                ["'", with_lidar, "' == 'true' and '", lidar, "' == 'tg30'"])),
-            package="ydlidar_ros2_driver",
-            executable="ydlidar_ros2_driver_node",
-            name="ydlidar_ros2_driver_node",
-            output="screen",
-            parameters=[_LIDAR_PARAMS],
-            remappings=[("scan", driver_scan_topic)],
-        ),
-        Node(
-            condition=IfCondition(PythonExpression(
-                ["'", with_lidar, "' == 'true' and '", lidar, "' == 'a1'"])),
-            package="sllidar_ros2",
-            executable="sllidar_node",
-            name="sllidar_node",
-            output="screen",
-            parameters=[_A1_LIDAR_PARAMS],
-            remappings=[("scan", driver_scan_topic)],
-        ),
-        Node(
-            condition=IfCondition(PythonExpression(
-                ["'", with_lidar, "' == 'true' and ", rotated])),
-            package="rm_policy",
-            executable="scan_rotate_node",
-            name="scan_rotate",
-            output="screen",
-            parameters=[{
-                "input_topic": "/scan_driver",
-                "output_topic": "/scan",
-                "yaw_deg": PythonExpression(["float('", lidar_yaw_deg, "')"]),
-            }],
-        ),
+        # The driver and the yaw relay come from the robot profile.
+        OpaqueFunction(function=_lidar_driver),
 
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(str(_LAUNCH_DIR / "base.launch.py")),
-            condition=IfCondition(with_base),
-            launch_arguments={
-                "control_mode": control_mode,
-                "dry_run": dry_run,
-                "calibration_path": calibration_path,
-            }.items(),
-        ),
+        # rm_base on the profile's calibration (or calibration_path:=).
+        OpaqueFunction(function=_base_driver),
 
         # Consumes rm_base's /vel_raw + /imu/data_raw, produces /odom.
         IncludeLaunchDescription(
@@ -1035,6 +1041,7 @@ def generate_launch_description() -> LaunchDescription:
                 "port": dashboard_port,
                 "enable_controls": dashboard_controls,
                 "topics_path": _DEFAULT_TOPICS_PATH,
+                "robot_profile_path": robot_profile,
             }.items(),
         ),
 
