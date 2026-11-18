@@ -5,9 +5,7 @@
 
 robot:
   name: bernard-1
-  # What `hostname` returns on the unit. UNVERIFIED on 2026-11-18 (the robot
-  # was off); confirm on its next boot and correct here if it differs. Until
-  # then `ROBOT=bernard-1 bash scripts/run_stack.sh` selects it by name.
+  # What `hostname` returns on the unit: confirmed 2026-11-18 over SSH.
   hostnames: [bernard-1]
   # 28 was the Jetson's own banner value (2026-08-08) and has been every
   # robot's since; it stays bernard-1's. bernard-3 is 29 so the two can be
