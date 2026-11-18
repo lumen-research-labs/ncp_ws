@@ -27,6 +27,8 @@
 # rather than claiming success.
 set -uo pipefail
 
+# The stop button has to be on this robot's domain: the profile sets it.
+source "$(dirname "$0")/robot_env.sh"
 echo "== stopping the NCP stack =="
 
 # 1. Kill the safety layer's inputs FIRST, then ask safety to stop the robot,

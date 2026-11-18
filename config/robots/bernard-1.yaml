@@ -1,0 +1,41 @@
+# bernard-1 — the unit everything in this repository was measured on.
+# Loaded by rm_safety/robot_profile.py; picked by hostname (scripts/robot_env.sh,
+# ncp.launch.py). One file per robot: nothing about a unit is hardcoded
+# anywhere else. docs/add_a_robot.md says how to make the next one.
+
+robot:
+  name: bernard-1
+  # What `hostname` returns on the unit. UNVERIFIED on 2026-11-18 (the robot
+  # was off); confirm on its next boot and correct here if it differs. Until
+  # then `ROBOT=bernard-1 bash scripts/run_stack.sh` selects it by name.
+  hostnames: [bernard-1]
+  # 28 was the Jetson's own banner value (2026-08-08) and has been every
+  # robot's since; it stays bernard-1's. bernard-3 is 29 so the two can be
+  # on the RobotLab network together without sharing /cmd_vel.
+  ros_domain_id: 28
+
+lidar:
+  # YDLIDAR TG30 (serial ...0082) via ydlidar_ros2_driver at 512000 baud,
+  # the "tg30" block in ncp.launch.py.
+  model: tg30
+  # Its zero points along the robot's +x (laser_link carries no rotation).
+  yaw_deg: 0.0
+  # Chassis self-hits, measured 2026-08-14 and re-measured 2026-11-04
+  # (tests/fixtures/tg30_scan_2026-11-04_standoffs.yaml): the LEFT standoff
+  # ~97-118 deg, the RIGHT standoffs 0.06-0.11 m from -138 to -94 deg. The
+  # same numbers are applied to the policy observation (interface*.yaml's
+  # lidar block) and to rm_safety's arcs (safety_limits.yaml estop); they
+  # used to be written in both files.
+  self_occlusion_zones_deg:
+    - [92.0, 123.0]
+    - [-135.0, -97.0]
+  # Nothing in the world is nearer the lidar than the chassis: a return
+  # under the floor is the robot (the standoffs end at 0.11 m); the corners
+  # return 0.17-0.23 m, under the radius. Measured 2026-11-04.
+  body_floor_m: 0.12
+  body_radius_m: 0.25
+
+base:
+  # Tape-fitted 2026-08-29 on this unit, with the front-right stiction
+  # workaround and encoder_sign -1 (this unit's firmware counts backwards).
+  calibration: config/base_calibration.yaml

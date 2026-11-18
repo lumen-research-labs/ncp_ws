@@ -1,0 +1,33 @@
+# bernard-3 — a stock Yahboom ROSMASTER X3 (Jetson Orin Nano Super), brought
+# up 2026-11-17. Factory hostname `yahboom` until it is renamed
+# (sudo hostnamectl set-hostname bernard-3, then /etc/hosts); both names work.
+
+robot:
+  name: bernard-3
+  hostnames: [bernard-3, yahboom]
+  # 29: distinct from bernard-1's 28 so both can run on one network.
+  ros_domain_id: 29
+
+lidar:
+  # SLAMTEC RPLIDAR A1 (model 0x18, firmware 1.29) via sllidar_ros2 at
+  # 115200 baud, scan_mode Standard; the "a1" block in ncp.launch.py. The
+  # TG30 driver opens the same CP2102 port and reads nothing (2026-11-18).
+  model: a1
+  # Mounted with its zero pointing BACKWARD: the operator's hand at the rear
+  # showed up ahead (2026-11-18). scan_rotate_node turns the scan at the
+  # source so every consumer reads the robot's frame.
+  yaw_deg: 180.0
+  # No chassis self-hits measured: the A1's 0.15 m minimum range is above
+  # anything on this mount. Its REAR HALF is blocked by the mount inside that
+  # dead zone (every ray from +90 through 180 to -90 returns nothing, 668
+  # scans, 2026-11-18); that is a remount, not a zone.
+  self_occlusion_zones_deg: []
+  body_floor_m: 0.12
+  body_radius_m: 0.25
+
+base:
+  # A STARTING POINT, not a fit: bernard-1's generic wheel model on all
+  # four wheels and encoder_sign +1 (this unit's firmware counts the normal
+  # way; the polarity guard latched all four wheels on the first jog with
+  # bernard-1's -1, 2026-11-18). Fit it with docs/calibration.md.
+  calibration: config/base_calibration_bernard3.yaml

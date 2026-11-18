@@ -31,7 +31,9 @@ source /opt/ros/humble/setup.bash
 source /home/jetson/yahboomcar_ros2_ws/software/library_ws/install/setup.bash
 source /home/jetson/yahboomcar_ros2_ws/yahboomcar_ws/install/setup.bash
 source /home/jetson/ncp_ws/install/setup.bash
-export ROS_DOMAIN_ID=28
+# Which robot: the profile picked by hostname (or ROBOT=<name>) sets the
+# domain and names the file the launch configures itself from.
+source "$(dirname "$0")/robot_env.sh"
 
 cd /home/jetson/ncp_ws
-exec ros2 launch rm_bringup ncp.launch.py "$@"
+exec ros2 launch rm_bringup ncp.launch.py "robot_profile:=${RM_ROBOT_PROFILE}" "$@"

@@ -1,0 +1,66 @@
+# Base driver calibration for bernard-3 — consumed by rm_base.base_node via
+# config/robots/bernard-3.yaml (base.calibration).
+#
+# A STARTING POINT, NOT A FIT. Written 2026-11-18 from bernard-1's file
+# (config/base_calibration.yaml, tape-fitted 2026-08-29 on THAT unit) with
+# two changes: encoder_sign +1, because this unit's firmware reports its
+# encoders the normal way round (bernard-1's are inverted), and bernard-1's
+# front-right stiction workaround removed (that is bernard-1's motor). The
+# wheel model is the average of bernard-1's three healthy wheels on all four.
+# It will drive, somewhat off: fit it with docs/calibration.md (two straight
+# legs at two speeds, then a spin) before trusting any distance or angle.
+# Read config/base_calibration.yaml for what every key means.
+
+# +1: a forward-turning wheel makes `get_motor_encoder` count UP on this
+# unit. bernard-1's counts DOWN (its firmware bug), hence -1 there. The only
+# two legal values. With the wrong sign the polarity guard latches every
+# wheel at zero PWM on the first command (observed here 2026-11-18 with -1).
+encoder_sign: +1
+
+lever_arm_m: 0.227            # bernard-1's scrub fudge; fit on the floor
+counts_per_rev: 2360.0        # bernard-1's fit (same gearbox assumed)
+wheel_circumference_m: 0.248  # 79 mm wheels, measured on bernard-1
+max_pwm_step_per_tick: 8
+max_plausible_wheel_mps: 2.0
+
+closed_loop:
+  gains:
+    kp: 60.0
+    ki: 80.0
+    i_max_pwm: 25.0
+  guards:
+    stall_target_mps: 0.03
+    stall_measured_mps: 0.01
+    stall_ticks: 4
+    sign_fault_mps: 0.05
+    sign_fault_ticks: 12
+    sign_settle_ticks: 10
+
+max_body:
+  vx: 0.5     # m/s
+  vy: 0.5     # m/s
+  wz: 1.5     # rad/s
+
+# bernard-1's healthy wheels: FL 1.3/162.9, BL 3.1/143.6, BR 6.5/126.6.
+# Their mean, 3.6 / 144.4, on every wheel here until this unit is fitted.
+wheels:
+  front_left:
+    dead_pwm: 3.6
+    gain_pwm_per_mps: 144.4
+    v_min_mps: 0.02
+    max_pwm: 60
+  back_left:
+    dead_pwm: 3.6
+    gain_pwm_per_mps: 144.4
+    v_min_mps: 0.02
+    max_pwm: 60
+  front_right:
+    dead_pwm: 3.6
+    gain_pwm_per_mps: 144.4
+    v_min_mps: 0.02
+    max_pwm: 60
+  back_right:
+    dead_pwm: 3.6
+    gain_pwm_per_mps: 144.4
+    v_min_mps: 0.02
+    max_pwm: 60
