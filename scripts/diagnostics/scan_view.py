@@ -48,8 +48,11 @@ _LOCK = threading.Lock()
 
 
 class _ScanTap(rclpy.node.Node):
-    def __init__(self, topic: str) -> None:
-        super().__init__("scan_view")
+    def __init__(self, topic: str, port: int) -> None:
+        # Named by port: two viewers run side by side (/scan and /scan_driver)
+        # and two nodes called "scan_view" would fail the operating guide's
+        # "no duplicate node names" check for a reason that is not a second stack.
+        super().__init__(f"scan_view_{port}")
         qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT,
                          durability=DurabilityPolicy.VOLATILE)
         self.create_subscription(LaserScan, topic, self._on_scan, qos)
@@ -150,7 +153,7 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8090)
     args = ap.parse_args()
     rclpy.init()
-    node = _ScanTap(args.topic)
+    node = _ScanTap(args.topic, args.port)
     # The HTTP server lives in a daemon thread and rclpy owns the main
     # thread: rclpy installs the SIGINT/SIGTERM handlers, and a `kill` then
     # ends spin() and the process. The other way round (server in main)
