@@ -2133,6 +2133,41 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   domain 29. `docs/add_a_robot.md` is the how-to. 850 workstation tests.
   Deploy to bernard-3 follows; bernard-1 when it is back (its hostname is
   listed unverified).
+  * **DEPLOYED to bernard-3 the same day** (after a battery swap and a
+    reboot: wait until uptime 120 s, prep, launch; the swap set the clock
+    back 32 h, pushed from the workstation; the robot's TZ is UTC+8, so its
+    log file names run eight hours ahead of UTC). Verified: `robot:
+    bernard-3 (domain 29)`, A1 + 180 deg relay from the profile with no
+    lidar arguments, one /cmd_vel publisher, no duplicate nodes, nothing on
+    domain 28, dashboard names bernard-3. bernard-1 was off all day: NOT
+    deployed, hostname still unverified.
+  * **bernard-3's FRONT-RIGHT wheel did not turn under teleop** while its
+    encoder reported the target speed (bernard-1's 2026-08-29 BUG 5 again:
+    dragged by the other three on the floor, the loop saw nothing wrong).
+    Wheels up, Daniel watching, `per_motor.py` at PWM 30: motor map M1 FL,
+    M2 BL, M3 FR, M4 BR (bernard-1's; rm_base's order is right on this
+    unit), every channel moves only its own encoder, counts UP for +PWM
+    (encoder_sign +1 confirmed), M3 at HALF the others' speed and stiff by
+    hand. `fr_threshold.py --motor 3 --curve` (robot lifted; a first run
+    with it on the floor was discarded): still through 25, turns from 30,
+    running dead 10.6 / gain 200 both ways; front-left for reference: dead
+    4.5 / gain 156, start 10. 9de7a9f: `base_calibration_bernard3.yaml`
+    front_right dead 12 / gain 200 / max_pwm 80 / breakaway 40 both ways;
+    the other three keep bernard-1's mean. Still a wheels-up starting
+    point; the floor fit is owed.
+  * **"It does not turn" checked against the GYRO** (`/imu/data_raw` vs
+    the commanded `/cmd_vel`, aligned per second): a commanded wz of -0.4
+    to -0.5 rad/s rotates the body at 0.54-0.62 rad/s (the raw gyro's sign
+    is opposite, the IMU mount), +0.46 gives -0.34; commands of 0.10-0.12
+    rad/s produce nothing (the rotational dead band, as on bernard-1). It
+    turns; the slider at 60 % (0.36 rad/s) is near the band's edge. The
+    20 % over-rotation is bernard-1's lever_arm scrub fudge on another
+    floor; the spin leg of docs/calibration.md fits it. The wheel encoders
+    alone cannot answer this question (a dragged wheel reads on target):
+    record the gyro.
+  * `scan_view.py` names its node by port (0551e1c): two viewers were a
+    false "duplicate node" alarm. A stale dashboard page after RESET MAP
+    showed no robot and no goal; a reload fixed it (not chased).
 
 ## 4. Current Goal
 
