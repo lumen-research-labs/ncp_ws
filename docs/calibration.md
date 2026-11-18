@@ -58,12 +58,12 @@ python3 scripts/diagnostics/per_motor.py     # wheels UP
 
 Drives one motor at a time. For each, record which wheel turns and which way
 `set_motor(+)` drives it. Record separately whether `get_motor_encoder` counts
-**up or down** for forward rotation — on bernard-1 forward is *decreasing*, and
-`rm_base` negates the delta to correct it.
+**up or down** for forward rotation: that is the calibration file's required
+`encoder_sign`, `-1` on bernard-1 (decreasing), `+1` on bernard-3.
 
-Write both into `rm_base/pwm_map.py` and the calibration file. Getting this
-wrong does not fail loudly; it produces a robot that drives diagonally when
-told to go straight.
+Write the map into `rm_base/pwm_map.py` and the sign into the calibration
+file. A wrong map produces a robot that drives diagonally when told to go
+straight; a wrong sign latches every wheel with `sign_fault` on the first jog.
 
 ---
 

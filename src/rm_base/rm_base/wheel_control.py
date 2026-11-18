@@ -393,15 +393,37 @@ def _clamp_abs(value: float, limit: float) -> float:
     return value
 
 
+def encoder_sign_from(cal: dict, path: str) -> int:
+    """The calibration file's `encoder_sign`, refused unless it is exactly
+    -1 or 1. Required: it is a per-board fact (bernard-1 -1, bernard-3 +1),
+    and a file without it would otherwise be read with the other unit's
+    sign. The message names the file."""
+    if "encoder_sign" not in cal:
+        raise ValueError(
+            f"{path}: missing 'encoder_sign' (-1 if a forward-turning wheel makes "
+            f"get_motor_encoder count DOWN, as on bernard-1; +1 if it counts up). "
+            f"Measure it with scripts/diagnostics/per_motor.py, wheels up."
+        )
+    sign = cal["encoder_sign"]
+    if isinstance(sign, bool) or not isinstance(sign, int) or sign not in (-1, 1):
+        raise ValueError(f"{path}: encoder_sign must be -1 or +1, got {sign!r}")
+    return sign
+
+
 @dataclass
 class EncoderTracker:
     """Turns raw `get_motor_encoder` samples into per-wheel ground speeds.
 
     Two robot-specific facts are handled here rather than in the controller:
 
-      * SIGN — on bernard-1 a forward-turning wheel makes the count DECREASE
-        (measured 2026-08-28), so the delta is negated. This is the term the
-        firmware PID gets backwards.
+      * SIGN — `sign` is the calibration file's `encoder_sign`, +1 or -1,
+        the direction `get_motor_encoder` counts for a forward-turning
+        wheel. bernard-1's firmware counts DOWN (measured 2026-08-28), so
+        its file says -1 and the delta is negated; bernard-3's counts up
+        (2026-11-18), +1. This is the term bernard-1's firmware PID gets
+        backwards. There is no default: a tracker built without the unit's
+        sign would read every wheel as reversed on one of the two robots,
+        and the polarity guard would then latch all four at zero PWM.
       * REPORT RATE — `get_motor_encoder` reads a value cached by
         Rosmaster_Lib's auto-report thread, not the wire. Polling it faster
         than the board reports yields runs of identical samples; dividing an
@@ -418,9 +440,17 @@ class EncoderTracker:
 
     counts_per_rev: float
     wheel_circumference_m: float
+    sign: int
     max_wheel_mps: float = 2.0
 
     _prev: list[int] | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.sign, bool) or not isinstance(self.sign, int) or self.sign not in (-1, 1):
+            raise ValueError(
+                f"EncoderTracker: sign must be -1 or 1 (the calibration file's "
+                f"encoder_sign), got {self.sign!r}"
+            )
     _elapsed: float = 0.0
     _last: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
@@ -444,7 +474,7 @@ class EncoderTracker:
         window = self._elapsed
         metres_per_count = self.wheel_circumference_m / self.counts_per_rev
         speeds = tuple(
-            -(counts[i] - self._prev[i]) * metres_per_count / window for i in range(4)
+            self.sign * (counts[i] - self._prev[i]) * metres_per_count / window for i in range(4)
         )
         self._prev = list(counts)
         self._elapsed = 0.0

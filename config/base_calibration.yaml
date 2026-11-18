@@ -76,6 +76,12 @@ lever_arm_m: 0.227
 counts_per_rev: 2360.0
 wheel_circumference_m: 0.248
 
+# -1: a forward-turning wheel makes `get_motor_encoder` count DOWN on this
+# unit (measured per motor, wheels up, 2026-08-28; the term its firmware PID
+# gets backwards). bernard-3's board counts up and says +1. REQUIRED; the
+# only two legal values. rm_base multiplies every encoder delta by it.
+encoder_sign: -1
+
 # Per-tick PWM change cap (drivetrain / STM32 protection). 20 Hz * 8 = full
 # 60-count range in ~0.4 s.
 max_pwm_step_per_tick: 8

@@ -19,6 +19,7 @@ from rm_base.wheel_control import (  # noqa: E402
     Guards,
     PiGains,
     WheelController,
+    encoder_sign_from,
 )
 
 DT = 0.05  # 20 Hz control tick
@@ -202,8 +203,8 @@ def test_a_brief_reverse_blip_does_not_latch():
 
 # ---- encoder tracker ------------------------------------------------------
 
-def tracker() -> EncoderTracker:
-    return EncoderTracker(counts_per_rev=1320.0, wheel_circumference_m=0.204)
+def tracker(sign: int = -1) -> EncoderTracker:
+    return EncoderTracker(counts_per_rev=1320.0, wheel_circumference_m=0.204, sign=sign)
 
 
 def test_first_sample_is_never_fresh():
@@ -212,8 +213,9 @@ def test_first_sample_is_never_fresh():
 
 
 def test_forward_rotation_is_positive_despite_decreasing_counts():
-    """The firmware sign bug, corrected: forward makes the count go DOWN."""
-    trk = tracker()
+    """bernard-1's firmware sign bug, corrected by encoder_sign -1: forward
+    makes the count go DOWN."""
+    trk = tracker(-1)
     trk.update([0, 0, 0, 0], DT)
     speeds, fresh, window = trk.update([-100, -100, -100, -100], DT)
     assert fresh
@@ -221,6 +223,43 @@ def test_forward_rotation_is_positive_despite_decreasing_counts():
     expected = 100 * (0.204 / 1320.0) / DT
     assert speeds[0] == pytest.approx(expected)
     assert all(s > 0 for s in speeds)
+
+
+def test_a_board_that_counts_up_takes_sign_plus_one():
+    """bernard-3 (2026-11-18): forward makes the count go UP. With -1 every
+    wheel read reversed and the polarity guard latched all four."""
+    up, down = tracker(+1), tracker(-1)
+    for t in (up, down):
+        t.update([0, 0, 0, 0], DT)
+    s_up, fresh_up, _ = up.update([100, 100, 100, 100], DT)
+    s_down, fresh_down, _ = down.update([100, 100, 100, 100], DT)
+    assert fresh_up and fresh_down
+    assert all(s > 0 for s in s_up) and all(s < 0 for s in s_down)
+    assert s_up == pytest.approx(tuple(-s for s in s_down))
+
+
+@pytest.mark.parametrize("bad", [0, 2, -2, True, False, 1.0, "-1", None])
+def test_any_other_sign_is_refused(bad):
+    with pytest.raises(ValueError, match="sign must be -1 or 1"):
+        EncoderTracker(counts_per_rev=1320.0, wheel_circumference_m=0.204, sign=bad)
+
+
+def test_the_calibration_files_carry_their_units_sign():
+    """encoder_sign is per board and REQUIRED; a file without it is refused
+    naming the file, so no unit is ever read with the other's sign."""
+    import yaml
+    root = pathlib.Path(__file__).resolve().parents[2]
+    expected = {"base_calibration.yaml": -1, "base_calibration_floor.yaml": -1,
+                "base_calibration_bernard3.yaml": 1}
+    for name, sign in expected.items():
+        cfg = yaml.safe_load((root / "config" / name).read_text())
+        assert encoder_sign_from(cfg, name) == sign, name
+    with pytest.raises(ValueError) as exc:
+        encoder_sign_from({"lever_arm_m": 0.2}, "config/x.yaml")
+    assert "config/x.yaml" in str(exc.value) and "encoder_sign" in str(exc.value)
+    for bad in (0, 2, True, -1.0, "-1"):
+        with pytest.raises(ValueError, match="encoder_sign must be -1 or \\+1"):
+            encoder_sign_from({"encoder_sign": bad}, "x.yaml")
 
 
 def test_unchanged_counts_are_not_a_zero_measurement():

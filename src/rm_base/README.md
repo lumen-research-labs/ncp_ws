@@ -67,7 +67,9 @@ M1 = front-left    M2 = back-left    M3 = front-right    M4 = back-right
 **This is NOT the Yahboom sample order** (`M1,M2,M3,M4 = FL,FR,BL,BR`). Do not
 "fix" it back. For every wheel, a positive `set_motor` value drives it
 **forward**, and a forward-turning wheel makes `get_motor_encoder` count
-**down** — hence the negation in the odometry path.
+**down** on bernard-1 and **up** on bernard-3 — hence `encoder_sign` (`-1` /
+`+1`), a required key of each unit's calibration file, applied to every
+encoder delta.
 
 Every fixed-size array in `BaseDebug` is indexed `[FL, BL, FR, BR]`.
 

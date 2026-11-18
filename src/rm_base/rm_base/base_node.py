@@ -38,8 +38,9 @@ Why this exists (bernard-1, 2026-08-28):
     Motor channel -> wheel, MEASURED, not the Yahboom sample order:
         M1 = front-left   M2 = back-left   M3 = front-right   M4 = back-right
     For every wheel, a POSITIVE `set_motor` value drives it FORWARD, and a
-    forward-turning wheel makes `get_motor_encoder` count DOWN — hence the
-    negation in the odometry path.
+    forward-turning wheel makes `get_motor_encoder` count DOWN on bernard-1
+    and UP on bernard-3 — hence `encoder_sign` (-1 / +1), a REQUIRED key of
+    the calibration file, applied in the odometry path.
 
 Subscribes:
     /cmd_vel      [geometry_msgs/Twist]   the safety-clamped command. This
@@ -172,6 +173,7 @@ class BaseNode(rclpy.node.Node):
         self._encoders = wheel_control.EncoderTracker(
             counts_per_rev=self._counts_per_rev,
             wheel_circumference_m=self._wheel_circ_m,
+            sign=wheel_control.encoder_sign_from(cal, str(self.get_parameter("calibration_path").value)),
             max_wheel_mps=float(cal.get("max_plausible_wheel_mps", 2.0)),
         )
 
@@ -218,9 +220,9 @@ class BaseNode(rclpy.node.Node):
             )
         with open(path) as fh:
             cal = yaml.safe_load(fh)
-        for key in ("lever_arm_m", "wheels", "max_body"):
+        for key in ("lever_arm_m", "wheels", "max_body", "encoder_sign"):
             if key not in cal:
-                raise RuntimeError(f"base_calibration.yaml missing '{key}'")
+                raise RuntimeError(f"{path}: missing '{key}'")
         for wheel in ("front_left", "back_left", "front_right", "back_right"):
             if wheel not in cal["wheels"]:
                 raise RuntimeError(f"base_calibration.yaml wheels missing '{wheel}'")
