@@ -2189,6 +2189,16 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     verified the same day. LESSON: any safety distance measured from the
     sensor is a per-robot number; write it from the body, or from the
     nearest range the sensor can see.
+  * **bernard-1 came back the same evening and got the branch** (aaa9484):
+    hostname confirmed `bernard-1`, clock pushed (six months behind), seven
+    packages built in 10 s, stack up from its profile: domain 28, TG30, the
+    two self-occlusion zones, `slow 0.55 m / stop 0.15 m (min_range 0.07 +
+    0.48 / 0.08)`, one /cmd_vel publisher, 16 nodes, 0 errors, dashboard
+    header `bernard-1`, 12.3 V. **BOTH ROBOTS RAN AT ONCE** on the RobotLab
+    network, bernard-3 on 29, with no topic of either visible on the other's
+    domain: two dashboards side by side, each KILL its own robot. The
+    untracked CSVs in bernard-1's ~/ncp_ws (pose_ab_*, velocity_accuracy)
+    are measurement data, not conflicts.
 
 ## 4. Current Goal
 

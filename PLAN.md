@@ -1,6 +1,6 @@
 # Plan: the safety zones are clearances beyond the robot's `min_range_m`
 
-> Status: BUILT and DEPLOYED to bernard-3 2026-11-18 (cdd27f8; 872 workstation tests; approved by Daniel: "shouldn't we just have min range m and then we set it to the length to bumper or min lidar length? And yes go ahead"). bernard-1 owed when it is back (its zones are unchanged by construction). The previous plan (one profile per robot) is built and deployed to bernard-3; git history keeps it. Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22).
+> Status: BUILT and DEPLOYED to bernard-3 2026-11-18 (cdd27f8; 872 workstation tests; approved by Daniel: "shouldn't we just have min range m and then we set it to the length to bumper or min lidar length? And yes go ahead"). bernard-1 deployed the same evening (aaa9484): start line `slow 0.55 m / stop 0.15 m (min_range 0.07 + 0.48 / 0.08)`, unchanged by construction; both robots ran at once on domains 28 and 29 with no cross-talk. The previous plan (one profile per robot) is built and deployed to bernard-3; git history keeps it. Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22).
 
 ## Context
 
