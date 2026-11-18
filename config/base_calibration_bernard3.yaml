@@ -1,15 +1,18 @@
 # Base driver calibration for bernard-3 — consumed by rm_base.base_node via
 # config/robots/bernard-3.yaml (base.calibration).
 #
-# A STARTING POINT, NOT A FIT. Written 2026-11-18 from bernard-1's file
-# (config/base_calibration.yaml, tape-fitted 2026-08-29 on THAT unit) with
-# two changes: encoder_sign +1, because this unit's firmware reports its
-# encoders the normal way round (bernard-1's are inverted), and bernard-1's
-# front-right stiction workaround removed (that is bernard-1's motor). The
-# wheel model is the average of bernard-1's three healthy wheels on all four.
-# It will drive, somewhat off: fit it with docs/calibration.md (two straight
-# legs at two speeds, then a spin) before trusting any distance or angle.
-# Read config/base_calibration.yaml for what every key means.
+# A STARTING POINT, NOT A FLOOR FIT. Written 2026-11-18 from bernard-1's
+# file (config/base_calibration.yaml, tape-fitted 2026-08-29 on THAT unit)
+# with encoder_sign +1 (this unit's firmware counts the normal way round;
+# bernard-1's is inverted) and bernard-1's three healthy wheels averaged
+# onto front-left, back-left and back-right. FRONT-RIGHT has its own row,
+# measured WHEELS UP on this unit the same day (fr_threshold.py --curve, see
+# that row). Motor->wheel map confirmed on this unit 2026-11-18
+# (per_motor.py, operator watching): M1 FL, M2 BL, M3 FR, M4 BR, the same
+# as bernard-1's. It will drive, somewhat off: fit it with
+# docs/calibration.md (two straight legs at two speeds, then a spin) before
+# trusting any distance or angle. Read config/base_calibration.yaml for what
+# every key means.
 
 # +1: a forward-turning wheel makes `get_motor_encoder` count UP on this
 # unit. bernard-1's counts DOWN (its firmware bug), hence -1 there. The only
@@ -42,7 +45,11 @@ max_body:
   wz: 1.5     # rad/s
 
 # bernard-1's healthy wheels: FL 1.3/162.9, BL 3.1/143.6, BR 6.5/126.6.
-# Their mean, 3.6 / 144.4, on every wheel here until this unit is fitted.
+# Their mean, 3.6 / 144.4, on FL, BL and BR here until this unit is fitted
+# on the floor. Wheels-up check on this unit (fr_threshold.py, 10..60 PWM,
+# 2026-11-18): front-left runs dead 4.5 / gain 156 fwd, 3.8 / 169 rev,
+# breakaway 10, so the mean is close for it; back-left and back-right were
+# not swept (per_motor.py at PWM 30: BL 0.176 m/s, BR 0.124 m/s, FL 0.120).
 wheels:
   front_left:
     dead_pwm: 3.6
@@ -54,11 +61,28 @@ wheels:
     gain_pwm_per_mps: 144.4
     v_min_mps: 0.02
     max_pwm: 60
+  # THE STIFF MOTOR on this unit: harder to turn by hand than the others and
+  # half their speed at the same PWM (per_motor.py at 30: 585 counts/s vs
+  # 1150-1680). Measured wheels up 2026-11-18 (fr_threshold.py --motor 3
+  # --from 10 --to 60 --step 5 --curve, robot lifted): still through 25,
+  # turns from 30 both ways (0.09 m/s), 0.235 m/s at 60; running fit dead
+  # 10.6 / gain 205.7 fwd, 10.6 / 199.1 rev. On the floor with the generic
+  # row (23 PWM at the 0.135 m/s jog) it never started and was DRAGGED by
+  # the other three, its encoder reporting the chassis speed, so the loop
+  # saw nothing wrong: the feedforward has to be right on its own.
+  #   dead_pwm   12.0  the running intercept, erred high (docs/calibration.md)
+  #   gain       200   the running slope, both directions within 3 %
+  #   breakaway  40    wheels-up start is 30; +10 for the load on the floor.
+  #                    The kick runs at most 8 ticks x 3 attempts, so too
+  #                    high costs a brief lurch, too low a wheel that never
+  #                    starts (observed). Refit on the floor.
   front_right:
-    dead_pwm: 3.6
-    gain_pwm_per_mps: 144.4
+    dead_pwm: 12.0
+    gain_pwm_per_mps: 200.0
     v_min_mps: 0.02
-    max_pwm: 60
+    max_pwm: 80
+    breakaway_pwm: 40.0
+    breakaway_pwm_rev: 40.0
   back_right:
     dead_pwm: 3.6
     gain_pwm_per_mps: 144.4
