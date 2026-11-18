@@ -263,8 +263,12 @@ class Limits:
     timeouts: TimeoutLimits
 
     @staticmethod
-    def from_dict(d: dict) -> "Limits":
-        """Parse the top-level ``safety_limits.yaml`` dictionary.
+    def from_dict(d: dict, mount: Optional[dict] = None) -> "Limits":
+        """Parse the top-level ``safety_limits.yaml`` dictionary. ``mount`` is
+        the robot profile's ``lidar`` block (config/robots/<name>.yaml): the
+        self-occlusion zones and the body floor are facts about one unit's
+        mount and live there, never in the limits file (a limits file that
+        still carries them is refused). ``None``: no zones, floor off.
 
         Parameters
         ----------
@@ -285,6 +289,20 @@ class Limits:
         v = d["velocity_limits"]
         a = d["acceleration_limits"]
         e = d["estop"]
+        stray = [k for k in ("self_occlusion_zones_deg", "body_floor_m", "body_radius_m") if k in e]
+        if stray:
+            raise ValueError(
+                f"estop carries {stray}: mount facts live in the robot profile "
+                f"(config/robots/<name>.yaml lidar:), not in safety_limits.yaml"
+            )
+        mount_zones: Tuple[Tuple[float, float], ...] = ()
+        mount_floor = 0.0
+        if mount is not None:
+            missing = [k for k in ("self_occlusion_zones_deg", "body_floor_m") if k not in mount]
+            if missing:
+                raise ValueError(f"robot profile lidar block is missing {missing}")
+            mount_zones = tuple((float(lo), float(hi)) for lo, hi in mount["self_occlusion_zones_deg"])
+            mount_floor = float(mount["body_floor_m"])
         t = d["timeouts"]
 
         limits = Limits(
@@ -323,13 +341,10 @@ class Limits:
                 # .get with 0.0: the opposite default from the zone switches,
                 # because this key ADDS motion. Absence is "off".
                 retreat_max_vx=float(e.get("retreat_max_vx", 0.0)),
-                body_floor_m=float(e.get("body_floor_m", 0.0)),
+                body_floor_m=mount_floor,
                 retreat_release_range_m=float(e.get("retreat_release_range_m", 0.30)),
                 retreat_release_ticks=int(e.get("retreat_release_ticks", 10)),
-                self_occlusion_zones_deg=tuple(
-                    (float(lo), float(hi))
-                    for lo, hi in e.get("self_occlusion_zones_deg", [])
-                ),
+                self_occlusion_zones_deg=mount_zones,
             ),
             timeouts=TimeoutLimits(
                 command_timeout_ms=float(t["command_timeout_ms"]),

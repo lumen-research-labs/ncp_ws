@@ -68,7 +68,10 @@ def real_limits() -> Limits:
     """Load Limits from the actual config/safety_limits.yaml."""
     with open(_CONFIG_PATH, "r") as fh:
         raw = yaml.safe_load(fh)
-    return Limits.from_dict(raw)
+    # The mount facts (zones, body floor) are the robot's: bernard-1's profile.
+    with open(os.path.join(os.path.dirname(_CONFIG_PATH), "robots", "bernard-1.yaml"), "r") as fh:
+        mount = yaml.safe_load(fh)["lidar"]
+    return Limits.from_dict(raw, mount)
 
 
 def _make_inputs(

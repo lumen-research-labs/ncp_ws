@@ -86,7 +86,11 @@ _TG30_FRAME = "laser_link"
 def limits() -> Limits:
     """Real safety limits, so tests track config/safety_limits.yaml exactly."""
     with open(_CONFIG_PATH) as fh:
-        return Limits.from_dict(yaml.safe_load(fh))
+        raw = yaml.safe_load(fh)
+    # The mount facts (zones, body floor) are bernard-1's: the scan is its.
+    with open(os.path.join(os.path.dirname(_CONFIG_PATH), "robots", "bernard-1.yaml"), "r") as fh:
+        mount = yaml.safe_load(fh)["lidar"]
+    return Limits.from_dict(raw, mount)
 
 
 def _load_echo_yaml_scan(path: str) -> Dict:

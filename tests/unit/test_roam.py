@@ -71,7 +71,7 @@ def _limits(**overrides) -> RoamLimits:
                 self_radius_m=0.25, retreat_vx=0.12, retreat_m=0.3, retreat_max_m=0.8,
                 retreat_timeout_s=8.0, retreat_cooldown_s=20.0,
                 pinned_after_s=5.0, stopped_move_m=0.05, stopped_yaw_deg=6.0,
-                body_floor_m=0.12, turn_wz=0.5, turn_tolerance_deg=15.0,
+                turn_wz=0.5, turn_tolerance_deg=15.0,
                 turn_timeout_s=12.0, turn_clear_m=0.30,
                 recovery_turn_min_deg=0.0, recovery_turn_max_deg=180.0)
     base.update(overrides)
@@ -498,8 +498,11 @@ def test_the_shipped_config_loads_and_passes_its_own_checks():
 
 
 def test_keys_dataclass_and_shipped_file_agree():
-    fields = tuple(f.name for f in dataclasses.fields(RoamLimits))
+    # Every required field is a roam.yaml key; body_floor_m is the robot profile's
+    # (it has a default and the node sets it), so it is not.
+    fields = tuple(f.name for f in dataclasses.fields(RoamLimits) if f.default is dataclasses.MISSING)
     assert fields == KEYS
+    assert RoamLimits.__dataclass_fields__["body_floor_m"].default == 0.0
     with open(_ROAM_YAML, encoding="utf-8") as handle:
         block = yaml.safe_load(handle)["roam"]
     assert set(block) == set(KEYS)
@@ -565,7 +568,6 @@ def test_non_numeric_and_non_integer_seed_are_refused(key, value, fragment):
     (dict(pinned_after_s=1.0), "pinned_after_s"),
     (dict(stopped_move_m=0.0), "stopped_move_m"),
     (dict(stopped_yaw_deg=0.0), "stopped_yaw_deg"),
-    (dict(body_floor_m=0.3), "body_floor_m"),
     (dict(turn_wz=0.0), "turn_wz"),
     (dict(turn_tolerance_deg=180.0), "turn_tolerance_deg"),
     (dict(turn_timeout_s=0.0), "turn_timeout_s"),
@@ -805,3 +807,11 @@ def test_a_profile_block_overrides_roam_for_that_profile_only(tmp_path) -> None:
     bad.write_text(_yaml.safe_dump(data))
     with pytest.raises(ValueError, match=r"\(profile x\): roam.bearing_cap_deg must be within \[0, 180\]"):
         load_roam_limits(str(bad), "x")
+
+
+def test_the_robots_body_floor_must_sit_below_the_body_radius():
+    """body_floor_m is the robot profile's, set by the node after loading; the
+    coherence check still owns it."""
+    assert check_limits(_limits()) is None
+    assert "body_floor_m" in check_limits(dataclasses.replace(_limits(), body_floor_m=0.3))
+    assert check_limits(dataclasses.replace(_limits(), body_floor_m=0.12)) is None

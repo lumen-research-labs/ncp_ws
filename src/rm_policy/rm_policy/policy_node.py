@@ -154,6 +154,7 @@ Failure mode:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import pathlib
@@ -183,7 +184,7 @@ from rm_policy.retreat import (
     TURNED, RetreatController, RetreatLimits, SafetyView, TurnController, TurnLimits,
 )
 from rm_policy.roam import (
-    RoamSequencer, Scan, load_roam_limits, nearest_return, recovery_bearing,
+    RoamSequencer, check_limits, Scan, load_roam_limits, nearest_return, recovery_bearing,
     turn_direction,
 )
 from rm_policy.vendor import ncp_policy
@@ -305,6 +306,7 @@ class PolicyNode(rclpy.node.Node):
         self.declare_parameter("goal_reached_dist", ncp_policy.SUCCESS_DIST)
         self.declare_parameter("roam", False)
         self.declare_parameter("roam_config_path", _DEFAULT_ROAM_CONFIG_PATH)
+        self.declare_parameter("robot_profile_path", "")
         # the policy profile (topics.yaml row) this node runs; picks its roam.yaml profiles: block
         self.declare_parameter("profile", "")
 
@@ -319,6 +321,7 @@ class PolicyNode(rclpy.node.Node):
         safety_limits_path = self._get_str_param("safety_limits_path")
         self._goal_reached_dist = self._get_double_param("goal_reached_dist")
         roam_config_path = self._get_str_param("roam_config_path")
+        robot_profile_path = self._get_str_param("robot_profile_path")
         self._profile = self._get_str_param("profile")
         roam_on = bool(self.get_parameter("roam").get_parameter_value().bool_value)
         self._pose_source = self._get_str_param("pose_source")
@@ -368,10 +371,23 @@ class PolicyNode(rclpy.node.Node):
         # The lidar block: bin count, arc, range bounds, search window and
         # self-occlusion zones. Its width (`obs_dim`) is what the network is
         # built to, below; the contract's `total_dim` must say the same.
+        # The robot profile (config/robots/<name>.yaml): the MOUNT facts for
+        # this unit, the self-occlusion zones and the body floor, which the
+        # contract cannot know (bernard-1 and bernard-3 differ).
+        if not robot_profile_path:
+            raise RuntimeError(
+                "policy_node: robot_profile_path is required (config/robots/<name>.yaml; "
+                "ncp.launch.py resolves it from the hostname)."
+            )
+        robot_cfg = self._load_yaml(robot_profile_path, "robot profile")
+        mount = robot_cfg.get("lidar") if isinstance(robot_cfg, dict) else None
+        if not isinstance(mount, dict):
+            raise RuntimeError(f"policy_node: {robot_profile_path!r} has no `lidar:` block")
+        self._mount = mount
         try:
-            self._lidar = lidar_contract_from(interface_cfg)
+            self._lidar = lidar_contract_from(interface_cfg, mount)
         except ValueError as exc:
-            raise RuntimeError(f"policy_node: {exc}") from exc
+            raise RuntimeError(f"policy_node: {interface_config_path!r} with {robot_profile_path!r}: {exc}") from exc
         total_dim = interface_cfg.get("observation", {}).get("total_dim")
         if total_dim != self._lidar.obs_dim:
             raise RuntimeError(
@@ -425,6 +441,12 @@ class PolicyNode(rclpy.node.Node):
         # ------------------------------------------------------------------
         try:
             roam_limits = load_roam_limits(roam_config_path, self._profile)
+            # The body floor is the robot's, not roam's: from the profile.
+            roam_limits = dataclasses.replace(
+                roam_limits, body_floor_m=float(self._mount["body_floor_m"]))
+            bad = check_limits(roam_limits)
+            if bad is not None:
+                raise ValueError(f"{roam_config_path} with {robot_profile_path}: {bad}")
         except (OSError, ValueError) as exc:
             raise RuntimeError(f"policy_node: {exc}") from exc
         if roam_limits.range_min_m <= self._goal_reached_dist:

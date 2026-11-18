@@ -73,3 +73,16 @@ def test_a_yaw_offset_puts_the_rotate_relay_between_the_driver_and_scan() -> Non
     assert "scan_rotate_node = rm_policy.scan_rotate_node:main" in setup
     down = open(os.path.join(_REPO_ROOT, "scripts", "stack_down.sh"), encoding="utf-8").read()
     assert "scan_rotate_node" in down[down.index("OUR_NODES=("):down.index(")", down.index("OUR_NODES=("))]
+
+
+def test_the_launch_resolves_the_robot_profile_and_hands_it_to_every_scan_consumer() -> None:
+    src = _src()
+    assert '"robot_profile", default_value=_default_robot_profile()' in src
+    assert "OpaqueFunction(function=_refuse_without_robot_profile)" in src
+    assert src.count('"robot_profile_path": context.perform_substitution(LaunchConfiguration("robot_profile"))') == 2, "the bridge and every policy node"
+    assert '"robot_profile_path": robot_profile,' in src, "safety.launch gets it"
+    assert 'launch_arguments={"robot_profile": robot_profile}.items()' in src, "slam.launch gets it"
+    safety = open(os.path.join(_REPO_ROOT, "src", "rm_bringup", "launch", "safety.launch.py"), encoding="utf-8").read()
+    assert '"robot_profile_path": robot_profile_path,' in safety
+    slam = open(os.path.join(_REPO_ROOT, "src", "rm_bringup", "launch", "slam.launch.py"), encoding="utf-8").read()
+    assert "load_robot_profile(path).lidar.body_radius_m" in slam and "safety_limits" not in slam

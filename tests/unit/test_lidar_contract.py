@@ -20,6 +20,8 @@ import yaml
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src", "rm_policy"))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "src", "rm_safety"))
+from rm_safety.robot_profile import load_robot_profile  # noqa: E402
 
 from rm_policy.lidar_contract import LidarContract, lidar_contract_from  # noqa: E402
 
@@ -34,9 +36,12 @@ PROFILES = {
         interface_version="4.0.0", n_beams=720, arc_deg=270.0, range_min_m=0.01,
         range_max_m=30.0, search_window_bins=2,
         mask_zones_deg=((92.0, 123.0), (-135.0, -97.0)), body_floor_m=0.12)),
+    # The mount is the robot's, whatever the profile: m4's 180 deg arc never
+    # reaches bernard-1's zones, but the contract carries them all the same.
     "m4": ("interface_m4.yaml", LidarContract(
         interface_version="3.0.0", n_beams=32, arc_deg=180.0, range_min_m=0.01,
-        range_max_m=30.0, search_window_bins=0, mask_zones_deg=(), body_floor_m=0.12)),
+        range_max_m=30.0, search_window_bins=0,
+        mask_zones_deg=((92.0, 123.0), (-135.0, -97.0)), body_floor_m=0.12)),
     # M9: the 4.0.0 sensor with the action bounds at the robot's clamps
     # (tests/unit/test_action_contract.py pins the action block).
     "m9": ("interface_m9.yaml", LidarContract(
@@ -56,12 +61,20 @@ def _cfg(filename: str = "interface.yaml") -> dict:
         return yaml.safe_load(fh)
 
 
+# The mount facts are the ROBOT's (config/robots/<name>.yaml), not the
+# contract's. The table above states bernard-1's, the unit they were
+# measured on; the contract files carry none of them.
+_MOUNT = load_robot_profile(os.path.join(_CONFIG, "robots", "bernard-1.yaml")).mount
+
+
 @pytest.mark.parametrize("profile", sorted(PROFILES))
 def test_each_profile_file_is_its_contract(profile) -> None:
     filename, expected = PROFILES[profile]
     cfg = _cfg(filename)
-    c = lidar_contract_from(cfg)
+    c = lidar_contract_from(cfg, _MOUNT)
     assert c == expected
+    block = next(b for b in cfg["observation"]["layout"] if b["name"] == "lidar_ranges")
+    assert "self_occlusion_zones_deg" not in block and "body_floor_m" not in block
     assert cfg["observation"]["total_dim"] == c.obs_dim == expected.n_beams + 4
 
 
@@ -120,3 +133,21 @@ def test_checkpoint_provenance_is_recorded(profile) -> None:
 def test_malformed_contract_raises_rather_than_defaulting(cfg) -> None:
     with pytest.raises(ValueError):
         lidar_contract_from(cfg)
+
+
+def test_without_a_mount_there_are_no_zones_and_the_floor_is_off() -> None:
+    c = lidar_contract_from(_cfg("interface.yaml"))
+    assert c.mask_zones_deg == () and c.body_floor_m == 0.0 and c.resample_floor_m == c.range_min_m
+
+
+def test_a_contract_that_still_carries_a_mount_fact_is_refused() -> None:
+    for key, value in (("self_occlusion_zones_deg", [[92.0, 123.0]]), ("body_floor_m", 0.12)):
+        cfg = _cfg("interface.yaml")
+        next(b for b in cfg["observation"]["layout"] if b["name"] == "lidar_ranges")[key] = value
+        with pytest.raises(ValueError, match="mount facts live in the robot profile"):
+            lidar_contract_from(cfg, _MOUNT)
+
+
+def test_a_mount_missing_a_key_is_refused() -> None:
+    with pytest.raises(ValueError, match="missing"):
+        lidar_contract_from(_cfg("interface.yaml"), {"body_floor_m": 0.12})

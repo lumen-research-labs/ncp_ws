@@ -243,10 +243,10 @@ estop:
   # sides to parity; a small residual asymmetry ([92,123] vs [-135,-97], 31
   # vs 38 deg wide) is left as-is rather than hand-tuned further without
   # another live measurement pass.
-  self_occlusion_zones_deg:
-    - [92.0, 123.0]     # LEFT standoff (measured ~97.1-118 deg)
-    - [-135.0, -97.0]   # RIGHT standoff + adjacent close feature (measured
-                         # ~-99.3 to -130 deg)
+  # MOVED 2026-11-18: self_occlusion_zones_deg, body_floor_m and body_radius_m
+  # are mount facts and live in the robot profile (config/robots/<name>.yaml,
+  # lidar:). safety_node reads them from there; a limits file that still
+  # carries them is refused. The measurements above are bernard-1's.
   # RE-MEASURED 2026-11-04 (tests/fixtures/tg30_scan_2026-11-04_standoffs.yaml):
   # the RIGHT standoffs now return 0.06-0.11 m continuously from -138 to -94
   # deg, the LEFT one 0.06 m at ~108 deg; the mount has moved since 2026-08-14.
@@ -260,13 +260,11 @@ estop:
   # and zones. 0.12 m: above the standoffs (0.11 m) and below the stop zone;
   # a real object this close would be inside the chassis. The same number is
   # in every config/interface*.yaml lidar block (pinned equal by a test).
-  body_floor_m: 0.12
   # BODY RADIUS: the chassis corners return 0.17-0.23 m (rear, outside the
   # arcs above). scan_sanitizer_node rewrites every return under this to
   # +inf for consumers we do not own (slam_toolbox's min_laser_range is
   # 0.15 m, so the corners reached its scan matcher as points fixed in the
   # robot frame). Same number as roam.yaml self_radius_m (pinned equal).
-  body_radius_m: 0.25
   consecutive_scans_to_trigger: 3   # noise filter; a single bad return must
                                     # never latch a stop
   latching: true        # once stopped, stays stopped until /safety/reset

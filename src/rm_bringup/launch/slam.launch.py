@@ -53,37 +53,51 @@ Usage:
 
 import pathlib
 
-import yaml
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+from rm_safety.robot_profile import DEFAULT_ROBOTS_DIR, load_robot_profile, resolve_profile_path
 
 _LAUNCH_DIR = pathlib.Path(__file__).resolve().parent
 _REPO_ROOT = _LAUNCH_DIR.parents[2]
 _DEFAULT_PARAMS = str(_REPO_ROOT / "config" / "slam_toolbox.yaml")
-_DEFAULT_LIMITS_PATH = _REPO_ROOT / "config" / "safety_limits.yaml"
 
-
-def _body_radius_m(limits_path: pathlib.Path = _DEFAULT_LIMITS_PATH) -> float:
-    """estop.body_radius_m from config/safety_limits.yaml: returns nearer than
-    this are the robot's own chassis (the corners, 0.17-0.23 m) and the
-    sanitizer turns them into +inf so slam_toolbox never matches on them.
-    A missing key is a startup error, never a silent 0.0."""
-    with open(limits_path, "r", encoding="utf-8") as fh:
-        limits = yaml.safe_load(fh)
+def _sanitizer(context):
+    """The scan sanitizer, with the body radius from this unit's robot profile
+    (config/robots/<name>.yaml lidar.body_radius_m): returns nearer than the
+    chassis corners become +inf so slam_toolbox never matches on the robot.
+    A profile that cannot be read is a refusal, never a silent 0.0."""
+    path = LaunchConfiguration("robot_profile").perform(context)
     try:
-        return float(limits["estop"]["body_radius_m"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise RuntimeError(
-            f"slam.launch.py: {limits_path}: estop.body_radius_m missing or not a "
-            f"number ({exc!r}); the scan sanitizer needs it."
-        ) from exc
+        if not path:
+            path = resolve_profile_path(DEFAULT_ROBOTS_DIR)
+        radius = load_robot_profile(path).lidar.body_radius_m
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"slam.launch.py: robot profile {path!r}: {exc}") from None
+    return [Node(
+        package="rm_policy",
+        executable="scan_sanitizer_node",
+        name="scan_sanitizer",
+        output="screen",
+        parameters=[{
+            "scan_topic": "/scan",
+            "output_topic": "/scan_sanitized",
+            "body_radius_m": float(radius),
+        }],
+    )]
 
 
 def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "robot_profile", default_value="",
+            description="config/robots/<name>.yaml for this unit; its "
+                        "lidar.body_radius_m is the sanitizer's floor. Default: "
+                        "resolved from the hostname.",
+        ),
         DeclareLaunchArgument(
             "params_file", default_value=_DEFAULT_PARAMS,
             description="Path to config/slam_toolbox.yaml.",
@@ -103,20 +117,7 @@ def generate_launch_description() -> LaunchDescription:
         # between, and whether its min_laser_range discards or clamps a short
         # reading is an implementation detail of a dependency we would
         # otherwise be betting the pose estimate on.
-        Node(
-            package="rm_policy",
-            executable="scan_sanitizer_node",
-            name="scan_sanitizer",
-            output="screen",
-            parameters=[{
-                "scan_topic": "/scan",
-                "output_topic": "/scan_sanitized",
-                # The chassis corners (0.17-0.23 m) are above slam_toolbox's
-                # 0.15 m min_laser_range and would reach its scan matcher as
-                # points fixed in the robot frame. Measured 2026-11-04.
-                "body_radius_m": _body_radius_m(),
-            }],
-        ),
+        OpaqueFunction(function=_sanitizer),
         # respawn=True is what makes the dashboard's RESET MAP control work:
         # slam_toolbox 2.6.9 has no reset service, so a fresh map is a restart
         # of this process. The dashboard terminates it and the launch system

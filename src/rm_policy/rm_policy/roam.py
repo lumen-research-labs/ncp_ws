@@ -78,7 +78,7 @@ KEYS = (
     "corridor_half_width_m", "clearance_m", "min_valid_fraction", "draw_attempts",
     "progress_window_s", "progress_min_m", "self_radius_m",
     "retreat_vx", "retreat_m", "retreat_max_m", "retreat_timeout_s", "retreat_cooldown_s",
-    "pinned_after_s", "stopped_move_m", "stopped_yaw_deg", "body_floor_m",
+    "pinned_after_s", "stopped_move_m", "stopped_yaw_deg",
     "turn_wz", "turn_tolerance_deg", "turn_timeout_s", "turn_clear_m",
     "recovery_turn_min_deg", "recovery_turn_max_deg",
 )
@@ -111,7 +111,6 @@ class RoamLimits:
     pinned_after_s: float
     stopped_move_m: float
     stopped_yaw_deg: float
-    body_floor_m: float
     # The turn in place toward a goal off the nose (rm_policy/retreat.py).
     turn_wz: float
     turn_tolerance_deg: float
@@ -121,6 +120,9 @@ class RoamLimits:
     # side with the deepest free strip, before it draws a goal ahead.
     recovery_turn_min_deg: float
     recovery_turn_max_deg: float
+    # Not a roam.yaml key: the robot profile's lidar.body_floor_m (a mount
+    # fact), set by policy_node with dataclasses.replace after loading.
+    body_floor_m: float = 0.0
 
 
 @dataclass(frozen=True)

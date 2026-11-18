@@ -116,6 +116,11 @@ Launch arguments:
                   sha256 is logged at policy_node startup and published on
                   /ncp_debug, so a recorded run is traceable to exact bytes.
 
+    robot_profile config/robots/<name>.yaml for THIS unit (default: the one
+                  whose hostnames list this machine's `hostname`; refused when
+                  none does). Its lidar: block holds the mount facts every
+                  scan consumer reads (self-occlusion zones, body floor, body
+                  radius); run_stack.sh passes it explicitly.
     with_safety   "true" (default) also launches safety.launch.py. Set
                   "false" only when rm_safety is already running.
 
@@ -278,6 +283,7 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 from rm_safety.command_sources import load_command_sources
+from rm_safety.robot_profile import DEFAULT_ROBOTS_DIR, load_robot_profile, resolve_profile_path
 
 _LAUNCH_DIR = pathlib.Path(__file__).resolve().parent
 _REPO_ROOT = _LAUNCH_DIR.parents[2]
@@ -291,6 +297,30 @@ _DEFAULT_ROAM_PATH = str(_REPO_ROOT / "config" / "roam.yaml")
 # malformed table fails the launch here, before any node starts, with the
 # loader's reason.
 _SOURCES = load_command_sources(_DEFAULT_TOPICS_PATH)
+
+
+def _default_robot_profile() -> str:
+    """The profile this unit's hostname selects, or "" (refused below with
+    the reason) when no profile lists it."""
+    try:
+        return resolve_profile_path(DEFAULT_ROBOTS_DIR)
+    except ValueError:
+        return ""
+
+
+def _refuse_without_robot_profile(context):
+    """Fail fast: the stack must know which robot it is on."""
+    path = LaunchConfiguration("robot_profile").perform(context)
+    if not path:
+        try:
+            resolve_profile_path(DEFAULT_ROBOTS_DIR)
+        except ValueError as exc:
+            raise RuntimeError(f"ncp.launch.py: {exc} Or pass robot_profile:=<path>.") from None
+    try:
+        load_robot_profile(path)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"ncp.launch.py: robot_profile:={path!r}: {exc}") from None
+    return []
 
 # The row the UPSTREAM consumer (and the bench tools) publish on. No policy
 # node of ours stands behind it, which is why it is not a profile.
@@ -630,6 +660,7 @@ def _policy_consumer(context):
                 "scan_topic": "/scan",
                 "output_topic": _NCP_SCAN_TOPIC,
                 "interface_config_path": first_interface,
+                "robot_profile_path": context.perform_substitution(LaunchConfiguration("robot_profile")),
             }],
         ),
     ]
@@ -658,6 +689,8 @@ def _policy_consumer(context):
             "roam_config_path": _DEFAULT_ROAM_PATH,
             # picks this profile's block under roam.yaml `profiles:`, if any
             "profile": _name,
+            # the ROBOT's profile: the mount facts (zones, body floor)
+            "robot_profile_path": context.perform_substitution(LaunchConfiguration("robot_profile")),
         }
         # An empty `weights` must be OMITTED, not passed: rclpy aborts on
         # `-p weights:=` (see _upstream_process). Empty is the default
@@ -677,6 +710,7 @@ def _policy_consumer(context):
 def generate_launch_description() -> LaunchDescription:
     with_safety = LaunchConfiguration("with_safety")
     command_source = LaunchConfiguration("command_source")
+    robot_profile = LaunchConfiguration("robot_profile")
     with_lidar = LaunchConfiguration("with_lidar")
     lidar = LaunchConfiguration("lidar")
     lidar_yaw_deg = LaunchConfiguration("lidar_yaw_deg")
@@ -700,6 +734,7 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
         # FIRST action: refuse to stack a second copy on a running one.
         OpaqueFunction(function=_refuse_if_stack_already_running),
+        OpaqueFunction(function=_refuse_without_robot_profile),
         OpaqueFunction(function=_refuse_unknown_lidar),
 
         DeclareLaunchArgument(
@@ -807,6 +842,12 @@ def generate_launch_description() -> LaunchDescription:
                         "remains and /safety/kill becomes the only stop. "
                         "Operator-supervised use ONLY, never unattended. "
                         "'true' restores it.",
+        ),
+        DeclareLaunchArgument(
+            "robot_profile", default_value=_default_robot_profile(),
+            description="This unit's config/robots/<name>.yaml: resolved from the "
+                        "hostname by default; the mount facts (self-occlusion "
+                        "zones, body floor, body radius) every node reads.",
         ),
         DeclareLaunchArgument(
             "with_lidar", default_value="true",
@@ -957,6 +998,7 @@ def generate_launch_description() -> LaunchDescription:
             launch_arguments={
                 "command_source": command_source,
                 "topics_path": _DEFAULT_TOPICS_PATH,
+                "robot_profile_path": robot_profile,
                 "slow_zone_enabled": LaunchConfiguration("slow_zone_enabled"),
                 "stop_zone_enabled": LaunchConfiguration("stop_zone_enabled"),
             }.items(),
@@ -969,6 +1011,7 @@ def generate_launch_description() -> LaunchDescription:
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(_LAUNCH_DIR / "slam.launch.py")),
             condition=IfCondition(with_slam),
+            launch_arguments={"robot_profile": robot_profile}.items(),
         ),
 
         IncludeLaunchDescription(

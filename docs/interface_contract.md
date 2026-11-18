@@ -23,9 +23,9 @@ The arithmetic is upstream's own, `prepare_scan → local_goal → build_obs` in
 | arc | forward **270°**, BARN's native UST-10LX span |
 | bins | **720**, 0.375° each, ordered right → left |
 | sampling | `nearest_valid_ray` with a **±2-bin search window** |
-| self-occlusion zones | `[92°, 123°]` and `[-135°, -97°]` |
+| self-occlusion zones | the robot profile's (`config/robots/<name>.yaml`) |
 | resample range | 0.01 m to 30.0 m. `0.0`, negatives, `inf`, `NaN`, masked rays and returns under the body floor become 30 m |
-| body floor | `body_floor_m` 0.12 m: nearer than this is the chassis (standoffs 0.06 to 0.11 m, 2026-11-04) |
+| body floor | the robot profile's; nearer than it is the chassis |
 | normalization | `clip(r, 0, 5) → (r − 2.5) / 5 × 2` |
 | empty-bin policy | `fault` when no ray is within the search window |
 

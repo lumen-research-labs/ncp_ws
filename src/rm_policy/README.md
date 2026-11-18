@@ -62,8 +62,9 @@ recorded fixtures that cuts empty bins from 5–8% to about 1.3%. Rays inside
 the bin always win, so the window is a fallback, never a smoothing.
 
 The 270° arc also sees the chassis standoffs, which the training sensor's
-0.1 m `min_range` hid. `self_occlusion_zones_deg` blanks those sectors before
-sampling, so they read "clear" as they did in simulation.
+0.1 m `min_range` hid. The robot profile's `self_occlusion_zones_deg`
+(`config/robots/<name>.yaml`) blanks those sectors before sampling, so they
+read "clear" as they did in simulation.
 
 Min-pooling instead would report obstacles closer and wider than the training
 sensor did: measured at 32 bins against real TG30 scans it shifts the

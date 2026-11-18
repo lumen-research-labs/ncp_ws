@@ -5,9 +5,9 @@ What it does:
     Starts a single `rm_safety/safety_node` with parameters sourced from
     `config/safety_limits.yaml`.  The node itself loads all numeric limits from
     that YAML at runtime (no limits are duplicated here); this launch file only
-    sets the three node-level parameters that are NOT part of the limits file:
-    `command_source`, `safety_loop_rate_hz`, `safety_limits_path` and
-    `topics_path`.
+    sets the node-level parameters that are NOT part of the limits file:
+    `command_source`, `safety_loop_rate_hz`, `safety_limits_path`,
+    `topics_path` and `robot_profile_path`.
 
 Launch arguments:
     command_source        (default "teleop")  — active command source: a row
@@ -33,6 +33,13 @@ Launch arguments:
     safety_limits_path    (default: in-repo    — absolute path to
                            config/safety_limits.yaml, resolved relative to this
                            launch file's source location under `--symlink-install`)
+    robot_profile_path    (default: the profile  — absolute path to this unit's
+                           this unit's hostname     config/robots/<name>.yaml. Its
+                           selects, or "" when      lidar: block carries the mount
+                           none does)               facts the limits reader takes
+                                                 (self-occlusion zones, body
+                                                 floor); the node refuses to
+                                                 start without it.
 
 Why killed-on-startup is not a launch concern:
     The node comes up KILLED regardless of this launch file
@@ -60,6 +67,8 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+from rm_safety.robot_profile import DEFAULT_ROBOTS_DIR, resolve_profile_path
+
 # ---------------------------------------------------------------------------
 # Default safety_limits.yaml path, resolved relative to THIS file's source.
 # Under `colcon build --symlink-install` (the project standard) the installed
@@ -78,11 +87,21 @@ _DEFAULT_TOPICS_PATH = str(
 )
 
 
+def _default_robot_profile() -> str:
+    """The profile this unit's hostname selects, or "" when no profile lists
+    it; the node then refuses to start, naming the known profiles."""
+    try:
+        return resolve_profile_path(DEFAULT_ROBOTS_DIR)
+    except ValueError:
+        return ""
+
+
 def generate_launch_description() -> LaunchDescription:
     command_source = LaunchConfiguration("command_source")
     safety_loop_rate_hz = LaunchConfiguration("safety_loop_rate_hz")
     safety_limits_path = LaunchConfiguration("safety_limits_path")
     topics_path = LaunchConfiguration("topics_path")
+    robot_profile_path = LaunchConfiguration("robot_profile_path")
     slow_zone_enabled = LaunchConfiguration("slow_zone_enabled")
     stop_zone_enabled = LaunchConfiguration("stop_zone_enabled")
 
@@ -110,6 +129,13 @@ def generate_launch_description() -> LaunchDescription:
             default_value=_DEFAULT_TOPICS_PATH,
             description="Absolute path to config/topics.yaml, the "
                         "command-source table.",
+        ),
+        DeclareLaunchArgument(
+            "robot_profile_path",
+            default_value=_default_robot_profile(),
+            description="Absolute path to this unit's config/robots/<name>.yaml; "
+                        "its lidar: block is the mount the limits reader takes. "
+                        "Default: the profile the hostname selects.",
         ),
         # --------------------------------------------------------------
         # LIDAR ZONE MASTER SWITCHES. Both default "true"; passing "false"
@@ -146,6 +172,7 @@ def generate_launch_description() -> LaunchDescription:
                 "safety_loop_rate_hz": safety_loop_rate_hz,
                 "safety_limits_path": safety_limits_path,
                 "topics_path": topics_path,
+                "robot_profile_path": robot_profile_path,
                 "slow_zone_enabled": slow_zone_enabled,
                 "stop_zone_enabled": stop_zone_enabled,
             }],

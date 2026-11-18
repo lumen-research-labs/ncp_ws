@@ -17,12 +17,18 @@ What it does:
     checkpoint of the other width then fails its strict load at startup
     instead of running wrong.
 
-    `body_floor_m` is the BODY FLOOR: nothing in the world can be nearer the
-    lidar than the chassis is, so a return under it is the robot (the
-    standoffs read 0.06-0.11 m, 2026-11-04) and takes the no-return path in
-    the resampler (range_max, "clear"). `resample_floor_m` is what the nodes
-    pass as the resampler's range_min. Absent = 0.0 = off; every shipped
-    profile sets it (tests/unit/test_body_floor.py).
+    The MOUNT facts come from the robot profile (config/robots/<name>.yaml,
+    `lidar:` block, read by rm_safety/robot_profile.py), not from the
+    contract: `self_occlusion_zones_deg` (chassis self-hits the training
+    sensor never saw) and `body_floor_m` (nothing in the world is nearer the
+    lidar than the chassis; a return under the floor is the robot and takes
+    the no-return path, range_max, "clear"). A contract is the checkpoint's
+    fact and is the same on every robot; the mount is the unit's fact and
+    differed between bernard-1 and bernard-3 (2026-11-18). A contract file
+    that still carries either key is refused, so the fact has one home.
+    `resample_floor_m` is what the nodes pass as the resampler's range_min.
+    With no mount given (`mount=None`, tests and tools) there are no zones
+    and the floor is off.
 
 Subscribes to:  (nothing — pure module)
 Publishes:      (nothing — pure module)
@@ -37,7 +43,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Mapping, Tuple
+from typing import Mapping, Optional, Tuple
 
 LIDAR_BLOCK_NAME = "lidar_ranges"
 
@@ -68,8 +74,12 @@ class LidarContract:
         return max(self.range_min_m, self.body_floor_m)
 
 
-def lidar_contract_from(interface_cfg: Mapping) -> LidarContract:
-    """Extract the lidar block from a parsed interface.yaml mapping."""
+MOUNT_KEYS = ("self_occlusion_zones_deg", "body_floor_m")
+
+
+def lidar_contract_from(interface_cfg: Mapping, mount: Optional[Mapping] = None) -> LidarContract:
+    """Extract the lidar block from a parsed interface.yaml mapping; the
+    mount facts (zones, body floor) from the robot profile's `lidar` block."""
     try:
         version = str(interface_cfg["interface_version"])
         layout = interface_cfg["observation"]["layout"]
@@ -83,10 +93,22 @@ def lidar_contract_from(interface_cfg: Mapping) -> LidarContract:
         shape = block["shape"]
         if len(shape) != 1:
             raise ValueError(f"shape must have one dimension, got {shape!r}")
-        zones = tuple(
-            (float(z[0]), float(z[1])) for z in block.get("self_occlusion_zones_deg", [])
-        )
-        body_floor = float(block.get("body_floor_m", 0.0))
+        stray = [k for k in MOUNT_KEYS if k in block]
+        if stray:
+            raise ValueError(
+                f"the lidar block carries {stray}: mount facts live in the robot "
+                f"profile (config/robots/<name>.yaml lidar:), not in the contract"
+            )
+        zones: Tuple[Tuple[float, float], ...] = ()
+        body_floor = 0.0
+        if mount is not None:
+            if not isinstance(mount, Mapping):
+                raise ValueError(f"robot profile lidar block is not a mapping: {mount!r}")
+            missing = [k for k in MOUNT_KEYS if k not in mount]
+            if missing:
+                raise ValueError(f"robot profile lidar block is missing {missing}")
+            zones = tuple((float(z[0]), float(z[1])) for z in mount["self_occlusion_zones_deg"])
+            body_floor = float(mount["body_floor_m"])
         if not (math.isfinite(body_floor) and body_floor >= 0.0):
             raise ValueError(
                 f"body_floor_m must be finite and >= 0 (metres from the lidar; "

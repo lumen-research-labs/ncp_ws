@@ -70,13 +70,9 @@ roam:
   # counting them blocked the whole circle on 2026-10-23. A real object this
   # close is touching the robot, and the stop zone owns that.
   self_radius_m: 0.25
-  # Nothing in the world is nearer the lidar than the chassis is, so a return
-  # under this is the robot at ANY bearing (the right standoffs read
-  # 0.06-0.11 m out to -94 deg on 2026-11-04, inside the sectors above, and
-  # refused every turn: "a return sits inside the corner sweep either way").
-  # Same number as config/interface*.yaml and safety_limits.yaml
-  # body_floor_m, pinned equal by a test.
-  body_floor_m: 0.12
+  # The body FLOOR (returns under it are the robot at any bearing) is the
+  # robot profile's lidar.body_floor_m (config/robots/<name>.yaml); the node
+  # sets it on these limits after loading. Not a roam.yaml key.
   # Random candidates per hand-off, then as many bearings at the shortest
   # leg. If none is free the node HOLDS the current goal (last_reason
   # no_free_goal, counted in held) and retries once a second: a boxed-in

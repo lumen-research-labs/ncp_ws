@@ -91,10 +91,17 @@ class ScanBridgeNode(rclpy.node.Node):
         self.declare_parameter("scan_topic", _DEFAULT_SCAN_TOPIC)
         self.declare_parameter("output_topic", _DEFAULT_OUTPUT_TOPIC)
         self.declare_parameter("interface_config_path", _DEFAULT_INTERFACE_CONFIG_PATH)
+        self.declare_parameter("robot_profile_path", "")
 
         scan_topic = self.get_parameter("scan_topic").value
         output_topic = self.get_parameter("output_topic").value
         interface_config_path = self.get_parameter("interface_config_path").value
+        robot_profile_path = self.get_parameter("robot_profile_path").value
+        if not robot_profile_path:
+            raise RuntimeError(
+                "ncp_scan_bridge: robot_profile_path is required (config/robots/<name>.yaml; "
+                "ncp.launch.py resolves it from the hostname)."
+            )
 
         # The lidar block of the contract. Fatal if unreadable or if it
         # disagrees with the vendored checkpoint module about the layout:
@@ -102,11 +109,15 @@ class ScanBridgeNode(rclpy.node.Node):
         try:
             with open(interface_config_path, "r", encoding="utf-8") as fh:
                 interface_cfg = yaml.safe_load(fh)
-            self._lidar = lidar_contract_from(interface_cfg)
+            with open(robot_profile_path, "r", encoding="utf-8") as fh:
+                mount = (yaml.safe_load(fh) or {}).get("lidar")
+            if not isinstance(mount, dict):
+                raise ValueError(f"{robot_profile_path!r} has no `lidar:` block")
+            self._lidar = lidar_contract_from(interface_cfg, mount)
         except (OSError, yaml.YAMLError, ValueError) as exc:
             raise RuntimeError(
                 f"ncp_scan_bridge: cannot read the lidar contract from "
-                f"{interface_config_path!r}: {exc}"
+                f"{interface_config_path!r} with the robot profile {robot_profile_path!r}: {exc}"
             ) from exc
         self._range_min = self._lidar.resample_floor_m  # sensor floor or body floor
         self._range_max = self._lidar.range_max_m

@@ -28,7 +28,7 @@ Roam only moves the goal; the policy drives behind rm_safety's clamps, watchdogs
 | `range_min_m`, `range_max_m` | 0.6, 2.5 | Leg length. |
 | `bearing_cap_deg` | 45 (`dynabarn`:180) | Draw within this of ahead. |
 | `corridor_half_width_m`, `clearance_m` | 0.20, 0.4 | The strip to the goal plus clearance holds no return. |
-| `min_valid_fraction`, `self_radius_m`, `body_floor_m` | 0.5, 0.25, 0.12 | No-returns are unknown; the body is never an obstacle. |
+| `min_valid_fraction`, `self_radius_m` | 0.5, 0.25 | No-returns are unknown; the body is never an obstacle. |
 | `draw_attempts` | 32 | Random candidates, then the shortest leg all round. |
 | `dwell_s`, `timeout_s` | 1.0, 30 | Hold at the goal; the ceiling on one goal. |
 | `progress_window_s`, `progress_min_m` | 10, 0.05 | No progress for this long: `stalled`. |

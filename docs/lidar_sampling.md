@@ -12,7 +12,7 @@ The TG30 returns ~1514 rays across the 270° arc, about 2.1 per 0.375° bin, and
 
 The M4 contract's 180° arc stopped short of the chassis standoffs; the 270° arc includes them, at 0.11 to 0.25 m. The training sensor's 0.1 m `min_range` put the Jackal chassis in a dead zone, so those directions read "clear" in simulation.
 
-`self_occlusion_zones_deg` lists `[92°, 123°]` and `[-135°, -97°]`, the same sectors `config/safety_limits.yaml` masks for the e-stop. Their rays count as bin members, contribute no range, and never feed the window. The two files hold the same numbers on purpose; the safety path stays independent.
+The zones are the robot's, in `config/robots/<name>.yaml` (`lidar.self_occlusion_zones_deg`; bernard-1: `[92°, 123°]` and `[-135°, -97°]`, bernard-3: none). The policy path and rm_safety's arcs read the same profile. Their rays count as bin members, contribute no range, and never feed the window.
 
 ## No-return is `0.0`
 
@@ -24,4 +24,4 @@ Min-pooling reports obstacles closer and wider than a one-ray-per-bin sensor. Me
 
 ## The body floor
 
-Nothing in the world is nearer the lidar than the chassis, so a return under a measured floor is the robot. Measured 2026-11-04 (`tests/fixtures/tg30_scan_2026-11-04_standoffs.yaml`): the standoffs return 0.06 to 0.11 m from −138° to −94°, closer and wider than on 2026-08-14 when the zones were cut. The −97° to −94° band leaked past the mask and reached the policy as a 0.10 m obstacle; M9 answered with full left yaw. `body_floor_m: 0.12` in each contract's lidar block makes the resampler treat such a return as a no-return (`range_max`, clear); `rm_safety` skips the same returns before its arcs (`estop.body_floor_m`); `scan_sanitizer_node` rewrites returns under `estop.body_radius_m` (0.25 m, the corners) to `+inf` for slam_toolbox. The zones stay for anything above it. Live check: `/ncp_debug/<profile>` `obs` has no lidar entry below −0.9 with nothing near the robot. `tests/unit/test_body_floor.py` holds the measurement.
+Nothing in the world is nearer the lidar than the chassis, so a return under a measured floor is the robot. Measured 2026-11-04 (`tests/fixtures/tg30_scan_2026-11-04_standoffs.yaml`): the standoffs return 0.06 to 0.11 m from −138° to −94°, closer and wider than on 2026-08-14 when the zones were cut. The −97° to −94° band leaked past the mask and reached the policy as a 0.10 m obstacle; M9 answered with full left yaw. The robot profile's `lidar.body_floor_m` (0.12 m on both units) makes the resampler treat such a return as a no-return (`range_max`, clear); `rm_safety` skips the same returns before its arcs; `scan_sanitizer_node` rewrites returns under the profile's `body_radius_m` (0.25 m, the corners) to `+inf` for slam_toolbox. The zones stay for anything above it. Live check: `/ncp_debug/<profile>` `obs` has no lidar entry below −0.9 with nothing near the robot. `tests/unit/test_body_floor.py` holds the measurement.

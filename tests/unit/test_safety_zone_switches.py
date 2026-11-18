@@ -56,7 +56,6 @@ def _limits_dict(**estop_overrides) -> dict:
         "slow_lateral_arc_deg": 0.0,
         "consecutive_scans_to_trigger": 3,
         "latching": True,
-        "self_occlusion_zones_deg": [],
     }
     estop.update(estop_overrides)
     return {

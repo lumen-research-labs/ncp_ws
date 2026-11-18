@@ -209,6 +209,7 @@ class SafetyNode(rclpy.node.Node):
         self.declare_parameter("safety_loop_rate_hz", _DEFAULT_LOOP_RATE_HZ)
         self.declare_parameter("safety_limits_path", _DEFAULT_LIMITS_PATH)
         self.declare_parameter("topics_path", DEFAULT_TOPICS_PATH)
+        self.declare_parameter("robot_profile_path", "")
         self.declare_parameter("slow_zone_enabled", _DEFAULT_ZONE_ENABLED)
         self.declare_parameter("stop_zone_enabled", _DEFAULT_ZONE_ENABLED)
 
@@ -450,11 +451,26 @@ class SafetyNode(rclpy.node.Node):
             ) from exc
         # Keep the raw dict for non-Limits fields (startup, publishing).
         self._limits_raw: dict = raw
+        # The mount facts (self-occlusion zones, body floor) are the robot
+        # profile's (config/robots/<name>.yaml lidar:), never the limits file's.
+        profile_path = self.get_parameter("robot_profile_path").get_parameter_value().string_value
+        if not profile_path:
+            raise RuntimeError(
+                "safety_node: robot_profile_path is required (config/robots/<name>.yaml; "
+                "ncp.launch.py resolves it from the hostname)."
+            )
         try:
-            return Limits.from_dict(raw)
+            with open(profile_path, "r") as fh:
+                mount = (yaml.safe_load(fh) or {}).get("lidar")
+        except Exception as exc:
+            raise RuntimeError(f"safety_node: cannot load the robot profile {profile_path!r}: {exc}") from exc
+        if not isinstance(mount, dict):
+            raise RuntimeError(f"safety_node: {profile_path!r} has no `lidar:` block")
+        try:
+            return Limits.from_dict(raw, mount)
         except Exception as exc:
             raise RuntimeError(
-                f"safety_node: safety_limits.yaml is malformed: {exc}"
+                f"safety_node: safety_limits.yaml with {profile_path!r} is malformed: {exc}"
             ) from exc
 
     def _load_sources(self, path: str) -> Dict[str, CommandSource]:

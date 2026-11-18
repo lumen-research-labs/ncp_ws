@@ -233,20 +233,10 @@ observation:
       # There is NO second line of defence in the driver.
       no_return_encoding: zero       # TG30 always emits 0.0; driver flag inert
       range_min_m: 0.01
-      # BODY FLOOR (2026-11-04). Nothing in the world can be nearer the lidar
-      # than the chassis is, so a return under this is the robot and takes
-      # the no-return path (range_max, "clear"). Measured that day on
-      # bernard-1 (tests/fixtures/tg30_scan_2026-11-04_standoffs.yaml): the
-      # right standoffs return 0.06-0.11 m continuously from -138 to -94 deg,
-      # closer and wider than the 2026-08-14 measurement the zones below were
-      # cut from (the mount has moved), and the -97..-94 deg band leaked past
-      # the mask into the observation as a 0.10 m obstacle. M9 then held full
-      # left yaw; M8-v2 had "circled left" on 2026-10-09 for the same reason.
-      # The floor is the first line; the zones stay for anything above it.
-      # Same number as safety_limits.yaml estop.body_floor_m, pinned equal.
-      body_floor_m: 0.12
+      # The BODY FLOOR and the SELF-OCCLUSION ZONES are mount facts and live
+      # in the robot profile (config/robots/<name>.yaml, lidar:), not here;
+      # a contract that carries them is refused (2026-11-18).
       range_max_m: 30.0              # sensor ceiling for resampling, see note
-      self_occlusion_zones_deg: []   # none — operator confirmed 2026-08-14
       empty_bin_policy: fault        # never range_max — that would be fail-open
 
     - name: goal_local
