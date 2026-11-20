@@ -169,6 +169,11 @@ ssh bernard-1 'fuser -v /dev/myserial'      # look first
 If a `python3 …rosmaster_main.py` holds it, kill **that exact PID** and
 relaunch bringup. Never `pkill -f` (see §6).
 
+It appears ONE TO TWO MINUTES AFTER BOOT (seen at 43 s and 46 s), so a prep
+run before that is undone when it arrives. `scripts/prep_robot.sh` handles
+this: on a fresh boot it waits for `rosmaster_main.py` to appear (up to 180 s
+of uptime) and then kills it. Do not add a fixed sleep in front of it.
+
 ## 5. bernard-1 has no internet and a wrong clock
 
 RobotLab has no WAN uplink — no `apt install`, no `git clone` from GitHub.

@@ -13,11 +13,14 @@
 #                         is single-writer, so rm_base cannot open it until
 #                         this is gone. Bringup does not respawn it.
 #   rosmaster_main.py     a Yahboom factory autostart that grabs the same
-#                         port. RECURS EVERY BOOT. If it holds the port when
-#                         bringup starts, the driver's serial thread crashes
-#                         and /voltage, /imu/data_raw and /vel_raw all read
-#                         ZERO while the topics keep publishing normally --
-#                         which looks like dead hardware, not a conflict.
+#                         port. RECURS EVERY BOOT, one to two minutes AFTER
+#                         it. If it holds the port when bringup starts, the
+#                         driver's serial thread crashes and /voltage,
+#                         /imu/data_raw and /vel_raw all read ZERO while the
+#                         topics keep publishing normally -- which looks like
+#                         dead hardware, not a conflict. On a fresh boot this
+#                         script WAITS for it to appear before killing it
+#                         (AUTOSTART_WINDOW_S, default 180 s of uptime).
 #   yahboom_joy_X3        publishes /cmd_vel DIRECTLY, which only rm_safety
 #                         may do. Use teleop_joy.launch.py instead, which
 #                         runs the same node remapped to /teleop/cmd_vel so
@@ -33,6 +36,26 @@
 # Failure mode: reports what it could not clear and exits non-zero, rather
 # than letting a later bringup fail with a confusing symptom.
 set -o pipefail
+
+# THE AUTOSTART RACE. rosmaster_main.py is started by Yahboom's desktop
+# autostart ONE TO TWO MINUTES after boot (seen at 43 s and at 46 s, 2026-11).
+# Prepping before it appears is worse than useless: it then starts AFTER
+# rm_base has the port, takes the port, and every base value reads zero.
+# So after a fresh boot, wait for it to show up and THEN kill it. The window
+# is bounded: past AUTOSTART_WINDOW_S of uptime it is not coming.
+AUTOSTART_WINDOW_S=${AUTOSTART_WINDOW_S:-180}
+uptime_s() { cut -d. -f1 /proc/uptime; }
+if ! pgrep -f '[r]osmaster_main.py' >/dev/null && [ "$(uptime_s)" -lt "$AUTOSTART_WINDOW_S" ]; then
+  echo "== fresh boot ($(uptime_s) s up): waiting for the factory autostart to appear so it can be killed =="
+  while ! pgrep -f '[r]osmaster_main.py' >/dev/null && [ "$(uptime_s)" -lt "$AUTOSTART_WINDOW_S" ]; do
+    sleep 2
+  done
+  if pgrep -f '[r]osmaster_main.py' >/dev/null; then
+    echo "   autostart appeared at $(uptime_s) s"
+  else
+    echo "   no autostart by $(uptime_s) s; it is not coming this boot"
+  fi
+fi
 
 echo "== clearing conflicting processes =="
 for pat in '[M]cnamu_driver_X3' '[r]osmaster_main.py' '[y]ahboom_joy_X3'; do
