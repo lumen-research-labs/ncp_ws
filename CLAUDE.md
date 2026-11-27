@@ -114,6 +114,8 @@ ncp_ws/
 │   └── rm_interfaces/  # BOTH — custom msg/srv
 ├── scripts/            # deploy_to_robot.sh, deploy_upstream.sh, prep_robot.sh,
 │                       #   run_stack.sh, stack_down.sh, bench_*.sh + diagnostics/
+│                       #   robot_wall/ (a second computer's always-on dashboards)
+│                       #   robot_boot/ (the robot launches its own stack at boot)
 ├── archive/            # retired code and docs, indexed in archive/README.md;
 │                       #   COLCON_IGNORE'd, never imported, never linked
 └── tests/

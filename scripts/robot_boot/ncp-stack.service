@@ -1,0 +1,30 @@
+# ncp-stack.service: the robot launches its own NCP stack at boot.
+# Installed by scripts/robot_boot/install.sh into /etc/systemd/system.
+#
+# A SYSTEM unit (no desktop session needed), run as jetson. The stack comes
+# up KILLED on teleop with nothing publishing it, the same two gates as a
+# hand launch, so an unattended start moves nothing.
+#
+# Restart=no on purpose: ncp.launch.py refuses to stack a second copy on a
+# running one, and a crash loop on a robot is worse than a stopped stack.
+# `systemctl stop ncp-stack` is the clean teardown (stack_down.sh: kill the
+# sources, kill safety last); `systemctl start` the clean bring-up.
+[Unit]
+Description=NCP stack (rm_safety, rm_base, policies, dashboard) from the robot profile
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jetson
+Group=jetson
+Environment=HOME=/home/jetson
+WorkingDirectory=/home/jetson/ncp_ws
+ExecStart=/bin/bash /home/jetson/ncp_ws/scripts/robot_boot/boot_stack.sh
+ExecStop=/bin/bash /home/jetson/ncp_ws/scripts/stack_down.sh
+KillMode=mixed
+TimeoutStopSec=30
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

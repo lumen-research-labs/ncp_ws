@@ -198,8 +198,8 @@ config/         interface.yaml (THE contract), safety_limits.yaml,
                 robots/<name>.yaml (one profile per robot: domain, lidar,
                 mount measurements, calibration file)
 docs/           architecture, operating_guide, roam, interface_contract,
-                interface_versions, checkpoints, add_a_policy_profile, safety_validation,
-                deployment, workstation_setup
+                interface_versions, checkpoints, add_a_policy_profile, add_a_robot,
+                robot_wall, robot_boot, safety_validation, deployment, workstation_setup
 src/            the seven rm_* packages (see the table above)
 scripts/        setup_workstation.sh (a fresh PC), deploy_to_robot.sh,
                 deploy_upstream.sh, prep_robot.sh,

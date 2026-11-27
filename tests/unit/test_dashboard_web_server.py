@@ -109,6 +109,22 @@ def test_state_endpoint_returns_the_live_snapshot(server) -> None:
     assert json.loads(body)["topics"]["/scan"]["count"] == 3
 
 
+def test_only_the_read_only_state_is_readable_cross_origin(server) -> None:
+    """The robot wall (another origin) reads /api/state; a cross-origin page
+    must never be able to POST a command or read anything else."""
+    import http.client
+    _srv, port, _state, _calls = server
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/api/state"); resp = conn.getresponse(); resp.read()
+    assert resp.getheader("Access-Control-Allow-Origin") == "*"
+    conn.request("GET", "/api/map"); resp = conn.getresponse(); resp.read()
+    assert resp.getheader("Access-Control-Allow-Origin") is None
+    conn.request("POST", "/api/kill", body=b"{}", headers={"Content-Type": "application/json"})
+    resp = conn.getresponse(); resp.read()
+    assert resp.getheader("Access-Control-Allow-Origin") is None
+    conn.close()
+
+
 def test_post_reaches_the_dispatcher_verbatim(server) -> None:
     _, port, _, calls = server
     status, body = _post(port, "/api/goal", {"x": 2.5, "y": -0.25})

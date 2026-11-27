@@ -1,39 +1,59 @@
-# Plan: the safety zones are clearances beyond the robot's `min_range_m`
+# Plan: the robot wall, a second computer that always shows both dashboards
 
-> Status: BUILT and DEPLOYED to bernard-3 2026-11-18 (cdd27f8; 872 workstation tests; approved by Daniel: "shouldn't we just have min range m and then we set it to the length to bumper or min lidar length? And yes go ahead"). bernard-1 deployed the same evening (aaa9484): start line `slow 0.55 m / stop 0.15 m (min_range 0.07 + 0.48 / 0.08)`, unchanged by construction; both robots ran at once on domains 28 and 29 with no cross-talk. The previous plan (one profile per robot) is built and deployed to bernard-3; git history keeps it. Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22).
+> Status: APPROVED 2026-11-26 (Daniel: "I like the way of setting it up in such a way that it boots with the computer"; "I am fine for the robot to launch its own stack"); BUILDING on `feat/dynabarn-profile`. Phase 2 (the robots launch their own stacks at boot) added at his request. The previous plans (robot profiles; zones as clearances) are built and deployed; git history keeps them. Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22).
 
 ## Context
 
-bernard-3 drives into things with both lidar zones on. `safety_limits.yaml` gives the stop zone as 0.15 m and the slow zone as 0.55 m, both **from the lidar**. On bernard-1 that works: the TG30 sees down to 0.05 m and 0.15 m is 8 cm in front of the bumper. On bernard-3 the RPLIDAR A1 returns nothing inside 0.15 m, so the stop zone sits exactly on the blind radius and can never fire, and the slow zone fails open: an object scaling the speed toward zero crosses into the blind radius 7.5 cm in front of the bumper, vanishes from the arcs, and the speed scale jumps back up. Measured 2026-11-18: the lidar sits 0.0435 m ahead of base_link and the chassis mesh ends at 0.116 m, so the bumper is 0.075 m from the lidar on both units (stock mount).
+Daniel wants both dashboards on a second Pop!_OS computer, open from the moment it boots, surviving robot reboots without anyone touching it. The dashboard page half-does this today: an open tab reconnects on its own when a stack comes back (the event stream retries), but it never reloads, so after a stack restart it shows stale state (the map with no robot, 2026-11-18), and a tab opened while the robot is off shows the browser's error page forever. A rebooted robot is off the network for about two minutes.
+
+## Existing code reused
+
+`rm_dashboard/web_server.py` serves `/api/state` (JSON, read-only) and the page; `index.html` `connect()` is the reconnect; `docs/workstation_setup.md` has the wired-link recipe; `scripts/setup_workstation.sh` is the pattern for an installer that explains itself.
 
 ## Design
 
-One new robot fact, in the profile's lidar block: **`min_range_m`, the larger of the sensor's blind radius and the lidar-to-bumper distance.** Inside it the zones can see nothing, or it is already contact. bernard-1: 0.07 (the bumper; the TG30 sees closer). bernard-3: 0.15 (the A1's blind radius).
+**The wall page**, `scripts/robot_wall/wall.html`, a local static page: one column per robot, each an iframe on that robot's dashboard under a status strip (name, domain, battery, safety state). Every 3 s it probes each robot with `GET /api/state`; while a robot is down its strip says so and the frame is blank; when the probe succeeds after failures the frame is re-pointed, so a rebooted robot comes back on its own. The page never POSTs: it is a viewer, like the dashboard it frames. Robot list from a generated `robots.js` beside it (name + URL), because a `file://` page cannot read a sibling JSON.
 
-`safety_limits.yaml` loses `stop_zone_m` and `slow_zone_m` and gains **`stop_clearance_m` 0.08 and `slow_clearance_m` 0.48, clearances beyond `min_range_m`.** `Limits.from_dict(cfg, mount)` computes the lidar ranges the logic runs on: `stop_zone_m = min_range_m + stop_clearance_m`, likewise slow. The `EstopLimits` fields `stop_zone_m` and `slow_zone_m` keep their meaning (lidar ranges), so `evaluate`, `slow_scale`, the retreat and the dashboard are untouched. A limits file that still carries `stop_zone_m` or `slow_zone_m` is refused, naming the new keys; a mount without `min_range_m` is refused.
+**The dashboard page** gains one rule: if the snapshot's `uptime_s` goes backwards, the stack restarted, reload. **The server** adds `Access-Control-Allow-Origin: *` on `GET /api/state` only (read-only JSON), so the wall can read the strip's numbers; commands keep no CORS.
 
-| robot | min_range_m | stop zone (lidar) | slow zone (lidar) | stop, in front of the bumper |
-|---|---|---|---|---|
-| bernard-1 | 0.07 | 0.15 (unchanged) | 0.55 (unchanged) | 8 cm |
-| bernard-3 | 0.15 | 0.23 | 0.63 | 15.5 cm |
+**The launcher**, `scripts/robot_wall/robot_wall.sh`: picks the browser (chromium, google-chrome, then firefox, kiosk flag each), opens the wall page, logs to `~/.local/share/robot-wall/launch.log`, exits non-zero naming the browsers it looked for if none exists.
+
+**The installer**, `scripts/robot_wall/install.sh [URL ...]` (default: both known robots): copies the page, writes `robots.js`, writes the XDG autostart entry `~/.config/autostart/robot-wall.desktop` (GNOME and COSMIC both run it at login). `--systemd` installs a user service on `graphical-session.target` instead, for a session that ignores XDG autostart. Booting straight into the wall also needs automatic login, a Settings toggle the how-to names.
 
 ## Failure modes
 
 | Failure | Surfaces as |
 |---|---|
-| `safety_limits.yaml` still carries a lidar-range zone key | `Limits.from_dict` refuses, naming the clearance keys |
-| A profile without `min_range_m`, or a non-positive or absurd one | the profile loader refuses, naming the file and the key |
-| Clearances not finite, not positive, or slow not above stop | `Limits.from_dict` refuses |
-| A reader asking for the zones without a mount | gets the clearances as ranges (min_range 0): tests that mean a robot pass bernard-1's mount |
+| A robot off at boot, or rebooted | its strip reads "down, waiting"; the frame returns when the probe succeeds |
+| A stack restart with the robot up | the framed dashboard reloads itself (uptime went backwards) |
+| No supported browser | the launcher exits non-zero, names what it looked for, in the log |
+| The old server build without the CORS header | the probe still works (opaque response = up); the strip shows name and URL only |
+| The second computer not on the robot network | both strips stay "down"; the how-to's first section is the network |
 
 ## Changes
 
-`rm_safety/robot_profile.py` (field, parse, `mount`), `rm_safety/safety_logic.py` (stray keys, mount, computed zones, three new fields, validation), `safety_node.py` (the start line names min_range and the clearances), `config/safety_limits.yaml`, `config/robots/bernard-1.yaml`, `config/robots/bernard-3.yaml`, `scripts/diagnostics/velocity_accuracy.py` (the runway check builds `Limits` with the profile instead of reading the key), `ncp.launch.py` and `config/roam.yaml` comments, docs (`add_a_robot.md`, `rm_safety/README.md`, `rm_bringup/README.md`, `calibration.md`), tests (`test_robot_profile`, `test_safety_zone_switches` keys, `test_safety_arc_split`/`test_safety_logic`/`test_retreat` pass bernard-1's mount, new `test_zone_clearance.py`, `test_docs` needle).
+New: `scripts/robot_wall/{wall.html,robot_wall.sh,install.sh}`, `docs/robot_wall.md`, `tests/unit/test_robot_wall.py`. Changed: `rm_dashboard/static/index.html` (reload on restart), `web_server.py` (CORS on GET `/api/state`), `tests/unit/test_dashboard_web_server.py` (header present on GET state, absent on POST), `tests/unit/test_dashboard_sources.py` (reload pin), `docs/README.md`, `README.md` layout, `CLAUDE.md`, `src/rm_dashboard/README.md` (one line).
+
+## Tests
+
+The wall page: one frame per robot from `robots.js`, the probe hits `/api/state`, re-points a frame only on a down-to-up edge, contains no POST and no command path. The installer: writes the autostart entry with the launcher's path and `X-GNOME-Autostart-enabled=true`; `--systemd` writes a unit on `graphical-session.target`. The launcher: kiosk flag per browser, non-zero exit with no browser. The dashboard: `uptime_s` decreasing calls `location.reload()`. The server: CORS header only on GET `/api/state`. `test_docs` indexes the how-to under the cap.
 
 ## Verification
 
-Suite green; bernard-1's `real_limits` still reads 0.15 / 0.55 and the replay tier is unchanged. Deploy to bernard-3, restart, and the safety start line reads `slow 0.63 m / stop 0.23 m (min_range 0.15 + clearances 0.48 / 0.08)`; a hand held in front of the bumper latches the stop zone before contact. bernard-1 when it is back: start line unchanged.
+Workstation: suite green; `bash scripts/robot_wall/install.sh` here, log out and in, the wall appears in Firefox kiosk with both robots; stop bernard-1's stack and restart it, its column reloads on its own; pull its power, the column says down, and after the robot is back and launched it returns. Second computer: clone the branch, run the installer, enable automatic login, reboot.
+
+## Phase 2: the robots launch their own stacks at boot
+
+**Why.** With the wall alone, a power-cycled robot sits at "down, waiting" until someone runs the prep and the launch over SSH. With this, the sequence after a power cycle is: wait about three minutes, the column comes back by itself, the robot KILLED on teleop and ready to arm. An unattended launch moves nothing: rm_safety starts KILLED and `command_source` is `teleop` with nothing publishing it, the same two gates as a hand launch.
+
+**The clock comes from the wall computer** (Daniel: "can we just set its clock to the computer one?"). Nothing in the stack needs the calendar date (every node reads the robot's one clock), but recordings and logs do, and the robots have no NTP and lose time on every power cut. So: the wall computer runs `chrony` as a time server for the robot network (`allow 192.168.4.0/24`, `local stratum 10` so it serves its own clock even without internet), each robot's `systemd-timesyncd` is pointed at the wall computer's fixed address by `install.sh --time-server <ip>`, and `boot_stack.sh` waits up to 30 s for `timedatectl` to report a sync BEFORE launching, so the stack never starts and then jumps. Wall computer off: the robot launches after the 30 s with the time it has. A sync landing later under a running stack is the known one-tick `pose_stale` blip (2026-11-18), fail-closed and harmless; it happens only when the wall computer comes up after the robot.
+
+**Design.** `scripts/robot_boot/ncp-stack.service`, a SYSTEM unit (the Yahboom image auto-logs the desktop in, but a system unit needs no session): `After=network-online.target`, `User=jetson`, `Restart=no` (ncp.launch.py already refuses to stack a second copy on a running one, and a crash loop on a robot is worse than a stopped stack), `ExecStart=.../scripts/robot_boot/boot_stack.sh`, `ExecStop=.../scripts/stack_down.sh`. `boot_stack.sh` sources the four ROS setup files, waits up to 60 s for both serial by-id paths (the lidar's CP2102, the base board's CH340), runs `prep_robot.sh`, then `run_stack.sh stop_zone_enabled:=true slow_zone_enabled:=true with_waypoint:=true` (today's hand launch), logging to `~/stack_boot.log`. `scripts/robot_boot/install.sh` (run on the robot, once, `sudo -n`): installs and enables the unit, and DISABLES the factory autostart (`rosmaster_main.py`), the only thing that still races for the base port, by whatever mechanism starts it (to be read off the robot before writing this script: desktop autostart entry, rc.local or a unit); the disabled file is kept beside the original with `.disabled`, never deleted. `systemctl stop ncp-stack` is a clean teardown; `systemctl start` a clean bring-up; a hand `run_stack.sh` while the service runs is refused by the launch as today.
+
+**Failure modes.** No serial device after 60 s: the script refuses, names the missing path, the service is `failed`, the log says why (this is the two-cable lidar on bernard-1). The launch refuses (profile, domain, a running stack): same. The service is stopped by hand and the robot rebooted: it starts again (enabled); use `systemctl disable` to keep a robot down. The factory app is wanted again: re-enable its entry.
+
+**Tests.** The unit's pins (system unit, `Restart=no`, ExecStop is stack_down, after network-online, user jetson); the boot script waits for both by-id paths, runs prep then run_stack with the zones on, logs to a file; the installer keeps the disabled autostart beside the original. Robot verification: install on bernard-1, `systemctl start`, start lines as from a hand launch; reboot it from the wall's point of view: column down, then back within three minutes, KILLED on teleop, one /cmd_vel publisher.
 
 ## Not in this plan
 
-The roam and retreat distances (`retreat_release_range_m`, roam's `clearance_m`, `self_radius_m`) are still lidar ranges; the same treatment is a follow-up.
+Remote power control. Internet for the robots.

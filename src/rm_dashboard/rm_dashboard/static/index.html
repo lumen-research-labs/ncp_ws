@@ -422,7 +422,7 @@ const STOP_ZONE_M = 0.35, SLOW_ZONE_M = 0.65, PLOT_MAX_M = 5.0;
 const WHEEL_NAMES = ["front-left","back-left","front-right","back-right"];
 
 const $ = id => document.getElementById(id);
-let latest = null, lastMsgAt = 0;
+let latest = null, lastMsgAt = 0, lastUptime = null;
 
 /* ---------------- connection ---------------- */
 function connect(){
@@ -431,6 +431,12 @@ function connect(){
   es.onerror = () => setConn("reconnecting…","bad");
   es.onmessage = e => {
     try { latest = JSON.parse(e.data); } catch(err){ return; }
+    // The stack restarted under this page (its uptime went backwards):
+    // reload, so the page never shows the old run's map, goal or trail over
+    // the new one (seen 2026-11-18 after RESET MAP). A browser reconnects a
+    // dropped event stream on its own; what it does not do is forget.
+    if(lastUptime !== null && latest.uptime_s < lastUptime - 2){ location.reload(); return; }
+    lastUptime = latest.uptime_s;
     lastMsgAt = performance.now();
     setConn("live","ok");
     render(latest);

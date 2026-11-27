@@ -229,11 +229,18 @@ def _make_handler(server: DashboardServer):
 
         # -- helpers -------------------------------------------------------
 
-        def _send_json(self, obj, status=200):
+        def _send_json(self, obj, status=200, cors=False):
             body = json.dumps(obj).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            if cors:
+                # Read-only state may be read by a page from another origin:
+                # the robot wall (scripts/robot_wall) frames this dashboard
+                # and shows the robot's name, battery and safety state above
+                # it. Commands never get this header; a cross-origin page
+                # cannot POST here.
+                self.send_header("Access-Control-Allow-Origin", "*")
             # No caching anywhere: every response here is live state, and a
             # cached dashboard showing a stopped robot as running is the exact
             # failure this whole thing is meant to prevent.
@@ -256,7 +263,7 @@ def _make_handler(server: DashboardServer):
             if path in ("/", "/index.html"):
                 return self._serve_index()
             if path == "/api/state":
-                return self._send_json(server._snapshot_fn())
+                return self._send_json(server._snapshot_fn(), cors=True)
             if path == "/api/map":
                 return self._serve_map()
             if path == "/events":

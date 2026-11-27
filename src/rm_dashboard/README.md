@@ -69,7 +69,7 @@ expected-vs-actual rather than just a number.
 bernard-1 has **no internet** (RobotLab has no WAN uplink), so anything needing
 `pip install` cannot be deployed at all. That rules out flask, websockets and
 rosbridge, and leaves SSE over plain HTTP — which fits anyway: the traffic is
-one-way state at a fixed rate, and browsers reconnect dropped SSE streams on
+one-way state at a fixed rate (the page also reloads itself when the snapshot's uptime goes backwards, i.e. the stack restarted; `GET /api/state` alone carries a CORS header so the robot wall, `scripts/robot_wall`, can read it from another origin), and browsers reconnect dropped SSE streams on
 their own.
 
 ### Served FROM the robot

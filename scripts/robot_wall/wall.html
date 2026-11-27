@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Robot wall</title>
+<!--
+  The robot wall: one column per robot, each framing THAT robot's own
+  dashboard under a strip with its name, battery and safety state. Opened by
+  robot_wall.sh in a kiosk browser on a screen that stays on.
+
+  It is a VIEWER. It never sends a command: the frames are the robots' real
+  dashboards, and every button in them talks to that robot exactly as in a
+  normal tab. This page only asks each robot GET /api/state every few seconds.
+
+  Why a page and not two tabs: a tab opened while a robot is off shows the
+  browser's error page forever, and a tab left open never reloads after the
+  stack restarts. This page keeps probing; when a robot comes back (a reboot,
+  a battery swap, a stack restart) its frame is re-pointed and loads fresh.
+
+  Robots come from robots.js beside this file (written by install.sh), as
+  `window.ROBOTS = [{name, url}, ...]`: a file:// page cannot read a sibling
+  JSON, but it can run a sibling script.
+-->
+<style>
+  :root { --bg:#0d1117; --panel:#151b23; --line:#2a3340; --fg:#e6edf3; --faint:#8b949e;
+          --ok:#3fb950; --bad:#f85149; --warn:#d29922; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+               font:14px system-ui, sans-serif; }
+  #wall { display:grid; grid-auto-flow:column; grid-auto-columns:1fr; height:100vh; gap:2px; }
+  .col { display:flex; flex-direction:column; min-width:0; background:var(--panel); }
+  .strip { display:flex; align-items:center; gap:14px; padding:8px 12px;
+           border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; }
+  .name { font-weight:700; letter-spacing:.03em; font-size:16px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--faint); display:inline-block; }
+  .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); } .dot.warn { background:var(--warn); }
+  .meta { color:var(--faint); }
+  .url { color:var(--faint); margin-left:auto; font-family:monospace; font-size:12px; }
+  iframe { flex:1; border:0; width:100%; background:var(--bg); }
+  .down { flex:1; display:flex; align-items:center; justify-content:center;
+          color:var(--faint); font-size:18px; text-align:center; padding:24px; }
+  .down b { color:var(--fg); }
+</style>
+</head>
+<body>
+<div id="wall"></div>
+<script src="robots.js"></script>
+<script>
+const PROBE_MS = 3000;           // how often each robot is asked for its state
+const ROBOTS = (window.ROBOTS || []).map(r => ({ ...r, up: false, uptime: null, el: null }));
+
+function build(){
+  const wall = document.getElementById("wall");
+  if(!ROBOTS.length){
+    wall.innerHTML = '<div class="down">No robots configured. Run install.sh with name=url pairs.</div>';
+    return;
+  }
+  for(const r of ROBOTS){
+    const col = document.createElement("div"); col.className = "col";
+    col.innerHTML = `
+      <div class="strip">
+        <span class="dot" data-k="dot"></span>
+        <span class="name">${r.name.toUpperCase()}</span>
+        <span class="meta" data-k="domain"></span>
+        <span class="meta" data-k="batt"></span>
+        <span class="meta" data-k="safety"></span>
+        <span class="url">${r.url}</span>
+      </div>
+      <div class="down" data-k="down"><span><b>${r.name}</b> is down.<br>Waiting for its dashboard to answer.</span></div>
+      <iframe data-k="frame" title="${r.name} dashboard" style="display:none"></iframe>`;
+    wall.appendChild(col);
+    r.el = {
+      dot: col.querySelector('[data-k=dot]'), domain: col.querySelector('[data-k=domain]'),
+      batt: col.querySelector('[data-k=batt]'), safety: col.querySelector('[data-k=safety]'),
+      down: col.querySelector('[data-k=down]'), frame: col.querySelector('[data-k=frame]'),
+    };
+  }
+}
+
+// Point the frame at the robot's dashboard, fresh (the query defeats any
+// cached copy of a previous run's page).
+function showFrame(r){
+  r.el.frame.src = r.url + "/?wall=" + Date.now();
+  r.el.frame.style.display = "";
+  r.el.down.style.display = "none";
+}
+function showDown(r){
+  r.el.frame.style.display = "none";
+  r.el.frame.src = "about:blank";
+  r.el.down.style.display = "";
+  r.el.dot.className = "dot bad";
+  r.el.batt.textContent = ""; r.el.safety.textContent = "";
+}
+
+// GET /api/state. A dashboard that sends the CORS header gives us the
+// snapshot; an older one still answers an opaque response, which is enough
+// to know it is up. Any network failure is "down".
+async function probe(r){
+  const url = r.url + "/api/state";
+  try {
+    const resp = await fetch(url, { cache: "no-store" });
+    return { up: resp.ok, snap: resp.ok ? await resp.json() : null };
+  } catch (e) {
+    try { await fetch(url, { mode: "no-cors", cache: "no-store" }); return { up: true, snap: null }; }
+    catch (e2) { return { up: false, snap: null }; }
+  }
+}
+
+function strip(r, snap){
+  if(!snap){ r.el.dot.className = "dot ok"; r.el.domain.textContent = ""; return; }
+  const robot = snap.robot || {};
+  r.el.domain.textContent = robot.domain !== undefined ? `domain ${robot.domain}` : "";
+  const v = ((snap.topics || {})["/voltage"] || {}).value;
+  r.el.batt.textContent = v && v.volts !== undefined ? `${v.volts.toFixed(1)} V` : "";
+  const st = ((snap.topics || {})["/safety/status"] || {}).value;
+  const names = { 0: "OK", 1: "SLOW", 2: "STOPPED", 3: "KILLED" };
+  r.el.safety.textContent = st ? `${names[st.state] ?? st.state} · ${st.reason ?? ""} · ${snap.command_source ?? ""}` : "";
+  r.el.dot.className = "dot " + (st && st.state === 3 ? "warn" : "ok");
+}
+
+async function tick(r){
+  const { up, snap } = await probe(r);
+  if(up && !r.up){ r.up = true; showFrame(r); }           // came back: load it fresh
+  else if(!up && r.up){ r.up = false; showDown(r); }      // went away
+  if(up && snap && typeof snap.uptime_s === "number"){
+    // The stack restarted while we were watching (uptime went backwards):
+    // the framed page reloads itself too, but an older build does not.
+    if(r.uptime !== null && snap.uptime_s < r.uptime - 2) showFrame(r);
+    r.uptime = snap.uptime_s;
+  }
+  if(up) strip(r, snap);
+}
+
+build();
+for(const r of ROBOTS){ tick(r); setInterval(() => tick(r), PROBE_MS); }
+</script>
+</body>
+</html>
