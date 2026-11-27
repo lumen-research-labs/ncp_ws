@@ -2227,6 +2227,15 @@ NaN, exception) → publish zero velocity, never let the last command persist.
   off the network when this was built; owed: deploy, run the installer on
   each (with the wall computer's address), watch one power cycle from the
   wall, confirm the autostart mechanism the installer found.
+  * Later the same night, both robots back on: boot service INSTALLED and
+    running on both (6f9a78e); the factory autostart is an XDG entry whose
+    Exec is `bash /home/jetson/Rosmaster/rosmaster/start_app.sh`
+    (`start_app.sh.desktop` on bernard-1, `bash.desktop` on bernard-3), now
+    renamed `.disabled`; timesyncd on both points at 192.168.4.251, the
+    address the wall computer will get. `setup_wall_computer.sh` is the
+    one command on the new computer, from a GitHub clone or a stick bundle
+    (`make_bundle.sh`; the stick Daniel plugged in was the Pop!_OS
+    installer image, read-only, so the GitHub route was chosen).
 
 ## 4. Current Goal
 
