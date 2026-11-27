@@ -1,13 +1,12 @@
 # The robot wall
 
 A second computer that shows both dashboards from the moment it boots and
-keeps showing them through robot reboots and battery swaps. It is a viewer:
-each column is that robot's own dashboard, framed, so every button in it
-(ARM, KILL, the source buttons, ROAM, goals, jog) works exactly as in a tab.
-What the wall adds is persistence: it probes each robot every three seconds,
-shows "down, waiting" while a robot is off, and re-points the frame the moment
-the robot's dashboard answers again. The dashboard itself now reloads when the
-stack under it restarts, so a column never shows a previous run's map.
+keeps showing them through robot reboots. It is a viewer: each column is that
+robot's own dashboard, framed, so every button in it (ARM, KILL, sources,
+ROAM, goals, jog) works as in a tab. The wall adds persistence: it probes
+each robot every three seconds, shows "down, waiting" while a robot is off,
+and re-points the frame when the dashboard answers again. The dashboard
+itself reloads when the stack under it restarts.
 
 ## 1. Put the computer on the robot network
 
@@ -23,8 +22,8 @@ overlaps the lab WiFi's addresses. Pick one:
   asks for the key). Both robots are reachable; no internet; a third
   client on the radio the robots share.
 
-Give the wall computer a fixed address on that network if the robots are to
-take their clock from it (see [`robot_boot.md`](robot_boot.md)).
+The setup gives it the fixed address the robots take their clock from
+([`robot_boot.md`](robot_boot.md)).
 
 ## 2. Install: one command
 
@@ -44,11 +43,9 @@ workstation writes a stick with the clone, the chrony package and the WiFi
 key; on the new computer, `bash <stick>/robot-wall/setup.sh` does the same.
 
 Underneath, `install.sh` copies the page and the launcher to
-`~/.local/share/robot-wall`, writes the robot list to `robots.js` there, and
-registers an autostart entry in `~/.config/autostart`, which GNOME and
-COSMIC run at login. If the session ignores XDG autostart,
-`install.sh --systemd` installs a user service on `graphical-session.target`
-instead. Try it at once with
+`~/.local/share/robot-wall`, writes the robot list to `robots.js`, and
+registers an autostart entry in `~/.config/autostart` (GNOME and COSMIC run
+it at login; `install.sh --systemd` is the alternative). Try it at once with
 `~/.local/share/robot-wall/robot_wall.sh`; it serves the page from a local
 web server on `127.0.0.1:8099`, opens the first browser it finds (Chromium,
 Chrome, Firefox) in kiosk mode on it, and logs to
@@ -59,6 +56,14 @@ Chrome, Firefox) in kiosk mode on it, and logs to
 Settings, Users, **Automatic Login** on (the setup does this itself on
 GDM), and the display's blank-screen timer off (Settings, Power). Reboot:
 the wall appears without a keyboard.
+
+## Reach it from anywhere
+
+With the internet on its WiFi, put the wall computer on the lab's Tailscale
+network: `curl -fsSL https://tailscale.com/install.sh | sh`, then
+`sudo tailscale up --ssh` and approve the login it prints. From any device
+on that network, `ssh lumen@<its name>`; Tailscale handles the SSH login,
+no key files needed.
 
 ## What you see after a robot power cycle
 
