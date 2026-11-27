@@ -16,7 +16,7 @@ Daniel wants both dashboards on a second Pop!_OS computer, open from the moment 
 
 **The dashboard page** gains one rule: if the snapshot's `uptime_s` goes backwards, the stack restarted, reload. **The server** adds `Access-Control-Allow-Origin: *` on `GET /api/state` only (read-only JSON), so the wall can read the strip's numbers; commands keep no CORS.
 
-**The launcher**, `scripts/robot_wall/robot_wall.sh`: picks the browser (chromium, google-chrome, then firefox, kiosk flag each), opens the wall page, logs to `~/.local/share/robot-wall/launch.log`, exits non-zero naming the browsers it looked for if none exists.
+**The launcher**, `scripts/robot_wall/robot_wall.sh`: serves the wall directory on `127.0.0.1:8099` with `python3 -m http.server` (a localhost page may fetch and frame http dashboards in every browser; a `file://` page is subject to each browser's own rules, so the file path is only the fallback without python3), picks the browser (chromium, google-chrome, then firefox, kiosk flag each), opens the page, logs to `~/.local/share/robot-wall/launch.log`, exits non-zero naming the browsers it looked for if none exists.
 
 **The installer**, `scripts/robot_wall/install.sh [URL ...]` (default: both known robots): copies the page, writes `robots.js`, writes the XDG autostart entry `~/.config/autostart/robot-wall.desktop` (GNOME and COSMIC both run it at login). `--systemd` installs a user service on `graphical-session.target` instead, for a session that ignores XDG autostart. Booting straight into the wall also needs automatic login, a Settings toggle the how-to names.
 

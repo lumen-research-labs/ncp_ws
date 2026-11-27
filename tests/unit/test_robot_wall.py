@@ -56,12 +56,17 @@ def test_the_launcher_tries_each_browser_in_kiosk_mode_and_fails_loudly() -> Non
     assert sh.count("--kiosk") >= 3
     assert 'log "robot_wall: no browser found' in sh and "exit 1" in sh
     assert "launch.log" in sh
+    # served from localhost, not opened as a file: a localhost page may fetch
+    # and frame the robots' http dashboards in every browser
+    assert 'python3 -m http.server --bind 127.0.0.1' in sh and 'URL="http://127.0.0.1:$PORT/' in sh
+    assert "falling back to $URL" in sh, "no python3: file:// still opens"
+    assert "trap 'kill $SERVER 2>/dev/null' EXIT" in sh, "the server dies with the browser"
     # with no browser on PATH it exits 1 and says what it looked for: a PATH
     # holding only the coreutils the script needs, and no browser
     import shutil, tempfile
     with tempfile.TemporaryDirectory() as d:
         bindir = os.path.join(d, "bin"); os.mkdir(bindir)
-        for tool in ("date", "tee", "mkdir", "dirname"):
+        for tool in ("date", "tee", "mkdir", "dirname", "basename", "sleep"):
             os.symlink(shutil.which(tool), os.path.join(bindir, tool))
         env = dict(os.environ, PATH=bindir, HOME=d)
         r = subprocess.run(["/bin/bash", os.path.join(_WALL, "robot_wall.sh")], env=env, capture_output=True, text=True)

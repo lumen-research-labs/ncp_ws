@@ -38,8 +38,9 @@ the robot list to `robots.js` there, and registers an autostart entry in
 `~/.config/autostart`, which GNOME and COSMIC run at login. If the session
 ignores XDG autostart, `install.sh --systemd` installs a user service on
 `graphical-session.target` instead. Try it at once with
-`~/.local/share/robot-wall/robot_wall.sh`; it opens the first browser it
-finds (Chromium, Chrome, Firefox) in kiosk mode and logs to
+`~/.local/share/robot-wall/robot_wall.sh`; it serves the page from a local
+web server on `127.0.0.1:8099`, opens the first browser it finds (Chromium,
+Chrome, Firefox) in kiosk mode on it, and logs to
 `~/.local/share/robot-wall/launch.log`.
 
 ## 3. Boot into it
