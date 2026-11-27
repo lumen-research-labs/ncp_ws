@@ -2202,6 +2202,32 @@ NaN, exception) → publish zero velocity, never let the last command persist.
     untracked CSVs in bernard-1's ~/ncp_ws (pose_ab_*, velocity_accuracy)
     are measurement data, not conflicts.
 
+- 2026-11-26: **THE ROBOT WALL AND THE BOOT SERVICE** (352e15c, PLAN.md;
+  Daniel: a second Pop!_OS computer with both dashboards "always open",
+  "boots with the computer", "I am fine for the robot to launch its own
+  stack", "set its clock to the computer one"). `scripts/robot_wall/`:
+  `wall.html` frames each robot's own dashboard under a strip (name, domain,
+  battery, safety), probes `GET /api/state` every 3 s, shows "down, waiting"
+  while a robot is off and re-points the frame when it answers or its uptime
+  goes backwards; a VIEWER, no commands. `robot_wall.sh` kiosk launcher
+  (chromium/chrome/firefox), `install.sh` writes `robots.js` + an XDG
+  autostart entry (`--systemd` alternative). The dashboard page reloads
+  itself when the snapshot's uptime goes backwards (the stale-map fix) and
+  `GET /api/state` alone carries `Access-Control-Allow-Origin: *`.
+  `scripts/robot_boot/`: `ncp-stack.service` (system unit, jetson,
+  Restart=no, ExecStop stack_down.sh), `boot_stack.sh` (wait for both serial
+  by-id devices, wait <=30 s for timesyncd, prep, today's hand launch, log to
+  ~/stack_boot.log), `install.sh` (enable, rename the factory autostart's
+  entry to .disabled, `--time-server` -> timesyncd drop-in; the wall computer
+  runs chrony with `local stratum 10`). Why no clock push in the script:
+  nothing in the stack needs the date; a jump under a running stack is a
+  one-tick stop. Docs `robot_wall.md`, `robot_boot.md`. Also 4459c19:
+  `prep_robot.sh` waits for the factory autostart (appears 1-2 min after
+  boot) instead of a fixed two-minute wait. NOT YET ON THE ROBOTS: both were
+  off the network when this was built; owed: deploy, run the installer on
+  each (with the wall computer's address), watch one power cycle from the
+  wall, confirm the autostart mechanism the installer found.
+
 ## 4. Current Goal
 
 **INTERFACE 4.0.0 — THE FULL-SENSOR POLICY (2026-10-08, branch

@@ -1,6 +1,6 @@
 # Plan: the robot wall, a second computer that always shows both dashboards
 
-> Status: APPROVED 2026-11-26 (Daniel: "I like the way of setting it up in such a way that it boots with the computer"; "I am fine for the robot to launch its own stack"); BUILDING on `feat/dynabarn-profile`. Phase 2 (the robots launch their own stacks at boot) added at his request. The previous plans (robot profiles; zones as clearances) are built and deployed; git history keeps them. Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22).
+> Status: APPROVED 2026-11-26 (Daniel: "I like the way of setting it up in such a way that it boots with the computer"; "I am fine for the robot to launch its own stack"); BUILT 2026-11-26 (352e15c, 890 workstation tests): wall page, launcher, installer, dashboard reload rule, CORS on GET state, boot unit and scripts, two how-tos. PENDING on the robots (both off the network tonight): deploy, `robot_boot/install.sh`, a watched power cycle; on the wall computer: clone, install, chrony, automatic login. The previous plans (robot profiles; zones as clearances) are built and deployed; git history keeps them. Written to `~/lumen/optomotive/CODING_PROMPT.md` (2026-10-22).
 
 ## Context
 
