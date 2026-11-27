@@ -8,9 +8,11 @@
 #   from a USB stick written by make_bundle.sh (no internet needed):
 #     bash /media/$USER/<stick>/robot-wall/setup.sh
 #
-# Options: --wired (a cable into the RobotLab router instead of its WiFi),
-# --address <ip> (default 192.168.4.251), --psk <key> (the RobotLab WiFi key;
-# otherwise the bundle's robotlab.psk, otherwise asked), --no-network.
+# Options: --wired (a cable into the RobotLab router, with the lab WiFi kept
+# for the internet: the recommended way; the cable gets a /32 address and
+# host routes to the robots only), --address <ip> (default 192.168.4.251),
+# --psk <key> (the RobotLab WiFi key for the WiFi way; otherwise the
+# bundle's robotlab.psk, otherwise asked), --no-network.
 #
 # It does, in order, each step reporting:
 #   1. the repository: from the stick, a clone to ~/lumen/ncp_physical/ncp_ws;
@@ -89,13 +91,23 @@ echo "   chrony serving 192.168.4.0/24 (local stratum 10)"
 if [ "$NETWORK" = yes ]; then
   say "3. the robot network ($ADDRESS/24 on RobotLab)"
   if [ "$WIRED" = yes ]; then
+    # A cable into the RobotLab router, with the lab WiFi kept for the
+    # internet. Both networks are 192.168.4.x, so the cable gets a /32
+    # address and HOST ROUTES to the robots only, and is never the default
+    # route (the workstation's own recipe, docs/workstation_setup.md). The
+    # robots still reach this address: Linux answers ARP for it on the
+    # cable, which is all chrony and the dashboards need.
     IF="$(nmcli -t -f DEVICE,TYPE dev status | awk -F: '$2=="ethernet"{print $1; exit}')"
     [ -n "$IF" ] || { echo "   no Ethernet interface found" >&2; exit 1; }
     nmcli con delete RobotLab-wired >/dev/null 2>&1 || true
     nmcli con add type ethernet ifname "$IF" con-name RobotLab-wired \
-      ipv4.method manual ipv4.addresses "$ADDRESS/24" ipv4.gateway 192.168.4.1 ipv4.dns 192.168.4.1 \
+      ipv4.method manual ipv4.addresses "$ADDRESS/32" \
+      ipv4.routes "192.168.4.100/32, 192.168.4.102/32" ipv4.never-default yes ipv6.method disabled \
       connection.autoconnect yes connection.autoconnect-priority 100 >/dev/null
-    nmcli con up RobotLab-wired >/dev/null && echo "   RobotLab-wired up on $IF at $ADDRESS"
+    nmcli con up RobotLab-wired >/dev/null && echo "   RobotLab-wired up on $IF at $ADDRESS/32, routes to .100 and .102 only; WiFi keeps the internet"
+    # Our RobotLab WiFi profile, if an earlier run made one, would pull the
+    # radio off the lab WiFi; the cable replaces it.
+    nmcli con delete RobotLab >/dev/null 2>&1 && echo "   removed the RobotLab WiFi profile (the cable replaces it)" || true
   else
     [ -n "$PSK" ] || PSK="$(cat "$HERE/robotlab.psk" 2>/dev/null || true)"
     if [ -z "$PSK" ]; then

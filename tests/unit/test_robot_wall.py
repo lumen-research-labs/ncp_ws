@@ -107,7 +107,10 @@ def test_the_wall_computer_setup_works_from_a_clone_or_a_stick() -> None:
     assert "sudo apt-get install -y chrony" in sh and 'ls "$HERE"/deb/chrony_*.deb' in sh
     assert "allow 192.168.4.0/24" in sh and "local stratum 10" in sh
     assert 'read -r -s -p "   RobotLab WiFi password: " PSK' in sh, "the key is asked, never committed"
-    assert "ipv4.addresses \"$ADDRESS/24\"" in sh and 'ADDRESS="192.168.4.251"' in sh
+    assert "ipv4.addresses \"$ADDRESS/24\"" in sh and 'ADDRESS="192.168.4.251"' in sh, "the WiFi way: a normal /24"
+    wired = sh[sh.index('if [ "$WIRED" = yes ]; then'):sh.index("  else", sh.index('if [ "$WIRED" = yes ]; then'))]
+    assert 'ipv4.addresses "$ADDRESS/32"' in wired and 'ipv4.routes "192.168.4.100/32, 192.168.4.102/32"' in wired
+    assert "ipv4.never-default yes" in wired, "the cable must never take the default route from the lab WiFi"
     assert 'bash "$DEST/scripts/robot_wall/install.sh"' in sh
     for name in ("setup_wall_computer.sh", "make_bundle.sh"):
         r = subprocess.run(["bash", "-n", os.path.join(_WALL, name)], capture_output=True, text=True)

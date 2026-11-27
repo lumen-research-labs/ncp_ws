@@ -14,11 +14,14 @@ stack under it restarts, so a column never shows a previous run's map.
 The robots live on the RobotLab router (192.168.4.0/24, no internet), which
 overlaps the lab WiFi's addresses. Pick one:
 
-- **Dedicated wall:** join RobotLab directly (its WiFi, or a cable into the
-  router). Both robots are reachable with no configuration; no internet.
-- **Also needs the internet:** keep the lab WiFi and add a wired link with
-  host routes to the two robots only, the recipe in
-  [`workstation_setup.md`](workstation_setup.md).
+- **Recommended: a cable into the RobotLab router, lab WiFi kept for the
+  internet.** `setup_wall_computer.sh --wired` gives the cable a /32 address
+  and host routes to the two robots only, never the default route, the
+  recipe in [`workstation_setup.md`](workstation_setup.md). Off the
+  congested robot radio, and `apt` and `git pull` keep working.
+- **WiFi only:** join RobotLab's WiFi (the default of the setup script, it
+  asks for the key). Both robots are reachable; no internet; a third
+  client on the radio the robots share.
 
 Give the wall computer a fixed address on that network if the robots are to
 take their clock from it (see [`robot_boot.md`](robot_boot.md)).
