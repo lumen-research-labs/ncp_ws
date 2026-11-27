@@ -71,8 +71,7 @@ the wall appears without a keyboard.
 
 ## Limits
 
-The wall cannot power a robot or start a stack: a robot that is off is off,
-and the dashboard is served by the stack. With the boot service installed on
-the robots, a power cycle needs no one. Both robots in one browser means both
-KILL buttons are on one screen; each stops only its own robot (they are on
-different ROS domains), so read the column header before pressing.
+The wall cannot power a robot or start a stack; with the boot service on
+the robots, a power cycle needs no one. Both KILL buttons are on one screen;
+each stops only its own robot (different ROS domains), so read the column
+header before pressing.
