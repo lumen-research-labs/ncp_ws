@@ -99,6 +99,23 @@ def test_the_installer_defaults_to_both_robots_and_refuses_a_bad_pair(tmp_path) 
     assert not (tmp_path / "other").exists(), "a refused install writes nothing"
 
 
+def test_the_wall_computer_setup_works_from_a_clone_or_a_stick() -> None:
+    sh = _read("setup_wall_computer.sh")
+    assert 'if [ -d "$HERE/ncp_ws/.git" ]; then' in sh and 'elif [ -d "$HERE/../../.git" ]; then' in sh
+    assert sh.index('say "2. chrony') < sh.index('say "3. the robot network'), "chrony needs the internet; joining RobotLab ends it"
+    assert "sudo apt-get install -y chrony" in sh and 'ls "$HERE"/deb/chrony_*.deb' in sh
+    assert "allow 192.168.4.0/24" in sh and "local stratum 10" in sh
+    assert 'read -r -s -p "   RobotLab WiFi password: " PSK' in sh, "the key is asked, never committed"
+    assert "ipv4.addresses \"$ADDRESS/24\"" in sh and 'ADDRESS="192.168.4.251"' in sh
+    assert 'bash "$DEST/scripts/robot_wall/install.sh"' in sh
+    for name in ("setup_wall_computer.sh", "make_bundle.sh"):
+        r = subprocess.run(["bash", "-n", os.path.join(_WALL, name)], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+    bundle = _read("make_bundle.sh")
+    assert "apt-get download chrony" in bundle and "robotlab.psk" in bundle and "umask 077" in bundle
+    assert "git clone -q --branch" in bundle
+
+
 def test_the_dashboard_reloads_itself_when_the_stack_restarts() -> None:
     html = open(_INDEX, encoding="utf-8").read()
     assert "latest.uptime_s < lastUptime - 2){ location.reload(); return; }" in html

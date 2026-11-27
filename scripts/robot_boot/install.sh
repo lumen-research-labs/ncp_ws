@@ -6,7 +6,10 @@
 # 1. Installs and enables ncp-stack.service (system unit, user jetson).
 # 2. Disables Yahboom's factory autostart (rosmaster_main.py), the one thing
 #    that still races our stack for the base-board serial port: every file
-#    under the XDG autostart dirs that starts it is renamed to .disabled
+#    under the XDG autostart dirs that starts it (the shipped entry is
+#    `Exec=bash /home/jetson/Rosmaster/rosmaster/start_app.sh`, named
+#    start_app.sh.desktop on bernard-1 and bash.desktop on bernard-3; the
+#    script is what runs rosmaster_main.py) is renamed to .disabled
 #    beside the original (never deleted; rename it back to re-enable), and a
 #    systemd unit starting it is disabled. Anything else that starts it
 #    (rc.local, a crontab) is NAMED and left for the operator.
@@ -47,7 +50,7 @@ if [ "$DISABLE_AUTOSTART" = yes ]; then
       found=1
       if [ -w "$f" ]; then mv "$f" "$f.disabled"; else sudo mv "$f" "$f.disabled"; fi
       echo "   disabled $f -> $f.disabled"
-    done < <(grep -lZ "rosmaster_main" "$d"/*.desktop 2>/dev/null || true)
+    done < <(grep -lZE "rosmaster_main|Rosmaster/rosmaster|start_app\.sh" "$d"/*.desktop 2>/dev/null || true)
   done
   for u in $(grep -ls "rosmaster_main" /etc/systemd/system/*.service /lib/systemd/system/*.service 2>/dev/null || true); do
     found=1; name="$(basename "$u")"

@@ -23,21 +23,29 @@ overlaps the lab WiFi's addresses. Pick one:
 Give the wall computer a fixed address on that network if the robots are to
 take their clock from it (see [`robot_boot.md`](robot_boot.md)).
 
-## 2. Install
+## 2. Install: one command
 
-Clone the repository on that computer (branch `feat/dynabarn-profile` until
-merged), then:
+While the new computer still has the internet:
 
 ```bash
-bash scripts/robot_wall/install.sh          # bernard-1 and bernard-3 by default
-bash scripts/robot_wall/install.sh bernard-1=http://192.168.4.100:8080   # or your own list
+git clone -b feat/dynabarn-profile git@github.com:lumen-research-labs/ncp_ws.git ~/lumen/ncp_physical/ncp_ws
+bash ~/lumen/ncp_physical/ncp_ws/scripts/robot_wall/setup_wall_computer.sh
 ```
 
-It copies the page and the launcher to `~/.local/share/robot-wall`, writes
-the robot list to `robots.js` there, and registers an autostart entry in
-`~/.config/autostart`, which GNOME and COSMIC run at login. If the session
-ignores XDG autostart, `install.sh --systemd` installs a user service on
-`graphical-session.target` instead. Try it at once with
+It installs chrony (the robots' time server), joins the RobotLab WiFi at a
+fixed address (192.168.4.251; it asks for the WiFi key; `--wired` for a
+cable, `--address` for another address), installs the wall and its
+autostart entry, and turns on automatic login where it can. Without
+internet, `scripts/robot_wall/make_bundle.sh <stick dir>` on this
+workstation writes a stick with the clone, the chrony package and the WiFi
+key; on the new computer, `bash <stick>/robot-wall/setup.sh` does the same.
+
+Underneath, `install.sh` copies the page and the launcher to
+`~/.local/share/robot-wall`, writes the robot list to `robots.js` there, and
+registers an autostart entry in `~/.config/autostart`, which GNOME and
+COSMIC run at login. If the session ignores XDG autostart,
+`install.sh --systemd` installs a user service on `graphical-session.target`
+instead. Try it at once with
 `~/.local/share/robot-wall/robot_wall.sh`; it serves the page from a local
 web server on `127.0.0.1:8099`, opens the first browser it finds (Chromium,
 Chrome, Firefox) in kiosk mode on it, and logs to
@@ -45,8 +53,9 @@ Chrome, Firefox) in kiosk mode on it, and logs to
 
 ## 3. Boot into it
 
-Settings, Users, **Automatic Login** on, and the display's blank-screen
-timer off (Settings, Power). Reboot: the wall appears without a keyboard.
+Settings, Users, **Automatic Login** on (the setup does this itself on
+GDM), and the display's blank-screen timer off (Settings, Power). Reboot:
+the wall appears without a keyboard.
 
 ## What you see after a robot power cycle
 

@@ -49,6 +49,8 @@ def test_the_installer_renames_the_autostart_and_never_deletes() -> None:
     assert 'systemctl enable ncp-stack.service' in sh
     assert 'mv "$f" "$f.disabled"' in sh and "rm " not in sh
     assert "rosmaster_main" in sh
+    assert 'grep -lZE "rosmaster_main|Rosmaster/rosmaster|start_app\\.sh"' in sh, \
+        "the shipped entry's Exec is start_app.sh; rosmaster_main is one level down"
     assert "timesyncd.conf.d/robot-wall.conf" in sh and "NTP=%s" in sh
     assert "run as jetson on the robot" in sh and "needs passwordless sudo" in sh
 
