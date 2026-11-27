@@ -3,10 +3,11 @@
 # entry install.sh writes; also fine to run by hand.
 #
 # Serves the page from a local web server (python3 -m http.server on
-# 127.0.0.1:ROBOT_WALL_PORT, default 8099) and opens http://127.0.0.1:8099/
-# wall.html: a page from localhost may fetch and frame the robots' http
-# dashboards in every browser, where a file:// page is subject to each
-# browser's own rules. Without python3 it falls back to file://.
+# 127.0.0.1:ROBOT_WALL_PORT, default 8099, started once and left running)
+# and opens http://127.0.0.1:8099/wall.html: a page from localhost may fetch
+# and frame the robots' http dashboards in every browser, where a file://
+# page is subject to each browser's own rules. Without python3 it falls
+# back to file://.
 #
 # Picks the first browser present: chromium, google-chrome, firefox (Pop!_OS
 # ships firefox). Each gets its own kiosk flag. Logs to
@@ -24,20 +25,23 @@ log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" | tee -a "$LOG" >&2; }
 
 [ -f "$PAGE" ] || { log "robot_wall: page not found: $PAGE"; exit 1; }
 URL="file://$PAGE"
+# The server outlives this script on purpose. `firefox URL` with Firefox
+# already running hands the URL to that instance and EXITS AT ONCE; a server
+# stopped on exit then vanished under the page it had just been asked for
+# ("Problem loading page", 2026-11-26). One server per port, reused.
+serving() { curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/$(basename "$PAGE")" 2>/dev/null; }
 if command -v python3 >/dev/null 2>&1; then
-  python3 -m http.server --bind 127.0.0.1 --directory "$(dirname "$PAGE")" "$PORT" >>"$LOG" 2>&1 &
-  SERVER=$!
-  trap 'kill $SERVER 2>/dev/null' EXIT
-  sleep 0.5
-  if kill -0 "$SERVER" 2>/dev/null; then
+  if ! serving; then
+    setsid nohup python3 -m http.server --bind 127.0.0.1 --directory "$(dirname "$PAGE")" "$PORT" >>"$LOG" 2>&1 < /dev/null &
+    for _ in $(seq 50); do serving && break; sleep 0.1; done
+  fi
+  if serving; then
     URL="http://127.0.0.1:$PORT/$(basename "$PAGE")"
     log "robot_wall: serving $(dirname "$PAGE") on $URL"
   else
-    log "robot_wall: local server failed to start (port $PORT busy?), falling back to $URL"
+    log "robot_wall: local server did not answer on port $PORT (busy with something else?), falling back to $URL"
   fi
 fi
-# The browser runs in the foreground so the trap above stops the server when
-# it exits; `exec` would drop the trap.
 run() { log "robot_wall: $*"; "$@"; exit $?; }
 
 for b in chromium chromium-browser google-chrome google-chrome-stable; do
